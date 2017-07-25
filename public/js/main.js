@@ -90,7 +90,8 @@ let keyup = new jef.stream(function(onValue){
 });
 
 let host = window.document.location.host.replace(/:.*/, '');
-let ws = new WebSocket('ws://' + host + ':8080');
+let port = window.document.location.port;
+let ws = new WebSocket('ws://' + host + (port ? (':' + port) : ''));
 
 let messages = new jef.stream(function(onValue) {
   ws.onmessage = onValue;
