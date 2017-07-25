@@ -1,1 +1,1 @@
-web: cd example/notepad; npm install; node server.js
+web: node server.js
