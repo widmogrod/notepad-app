@@ -6,7 +6,7 @@ function bench(name, func, ctx) {
     const result = func.apply(ctx, arguments);
     const end = new Date();
 
-    console.log({name, time: end.getTime() - start.getTime()});
+    // console.log({name, time: end.getTime() - start.getTime()});
 
     return result;
   }
@@ -92,13 +92,62 @@ let keyup = new jef.stream(function(onValue){
 let host = window.document.location.host.replace(/:.*/, '');
 let port = window.document.location.port;
 let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
-let ws = new WebSocket(protocol + '://' + host + (port ? (':' + port) : ''));
 
-let messages = new jef.stream(function(onValue) {
-  ws.onmessage = onValue;
-});
+let messages = new jef.stream.Push();
+let publish = new jef.stream.Push();
+let online = new jef.stream.Push();
 
 let database = new crdt.Text(create(uuid()));
+
+const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '')
+
+function connect(online, messages) {
+  const ws = new WebSocket(WebSocketURL);
+  ws.onmessage = (e) => messages.push(e);
+  ws.onopen = (e) => online.push({online: true, ws});
+  ws.onclose = (e) => online.push({online: false});
+}
+
+connect(online, messages);
+
+function bufferUntil(streamA, streamB) {
+  var buffer = [];
+  var buffering = true;
+  return new jef.stream(function (sinkValue, sinkError, sinkComplete) {
+    streamB.on(function (value) {
+      if (value) {
+        buffering = true;
+      } else {
+        buffering = false;
+        const copy = buffer.splice(0);
+        buffer = [];
+        copy.forEach(sinkValue)
+      }
+    }, sinkError, sinkComplete);
+
+    streamA.on(function (value) {
+      if (buffering) {
+        buffer.push(value);
+      } else {
+        sinkValue(value);
+      }
+
+    }, sinkError, sinkComplete);
+  });
+}
+
+const connected = online.filter(({online}) => online).log('connected').pluck('ws')
+const disconnected = online.filter(({online}) => !online).log('offline - reconnecting').timeout(5000).on(_ => connect(online, messages))
+
+const operations = bufferUntil(
+  publish,
+  online.map(({online}) => !online)
+)
+
+jef.stream.when([
+  connected,
+  operations,
+]).on(([ws, data]) => ws.send(data));
 
 const BACKSPACE = 8;
 const DELETE = 46;
@@ -177,7 +226,7 @@ keyup
   .on(_ => {
     const data = bench('key-serialise', serialise)(database);
     database = bench('key-snapshot', snapshot)(database);
-    ws.send(data);
+    publish.push(data);
   })
 ;
 
