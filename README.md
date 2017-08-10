@@ -36,3 +36,13 @@
 - Observability.
   - implement features to gather metrics about the behaviour of the system
 
+## Research
+Other projects
+- https://quilljs.com/
+- https://togetherjs.com/
+- https://stenci.la/
+- http://substance.io/
+- https://github.com/ether/etherpad-lite
+- https://quip.com/
+- https://medium.com/@_daniel/publish-interactive-historical-documents-with-archivist-7019f6408ee6
+- https://github.com/elifesciences/lens
