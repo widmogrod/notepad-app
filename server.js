@@ -19,7 +19,8 @@ wss.broadcast = function broadcast(data) {
   });
 };
 
-const {Text, Insert, Delete, Discrete} = require('js-crdt/build/index');
+const {Insert, Delete, createFromOrderer} = require('js-crdt/build/text');
+const {VectorClock} = require('js-crdt/build/order');
 
 function serialise(order, operations) {
   return JSON.stringify(
@@ -53,17 +54,16 @@ function deserialise(string) {
 
     text.apply(operation);
     return text;
-  }, new Text(new Discrete(id, vector)));
+  }, createFromOrderer(new VectorClock(id, vector)));
 }
 
-
-let database = new Text(new Discrete('server', {}));
+let database = createFromOrderer(new VectorClock('server', {}));
 
 wss.on('connection', function connection(ws) {
   // Restore database state
-  database.forEach(({order, operations}) => {
+  database.reduce((_, operations, order) => {
     ws.send(serialise(order, operations));
-  });
+  }, null);
 
   ws.on('message', function incoming(data) {
     // Update database state

@@ -19,7 +19,7 @@ function uuid() {
 }
 
 function create(id) {
-  return new crdt.Discrete(id, {});
+  return new crdt.order.VectorClock(id, {});
 }
 
 function snapshot(text) {
@@ -29,12 +29,12 @@ function snapshot(text) {
 function shiftCursorPositionRelativeTo(text, position, diff) {
   diff = diff |0;
   return text.reduce(({shiftBy, position}, operation) => {
-    if (operation instanceof crdt.Insert) {
+    if (operation instanceof crdt.text.Insert) {
       if (operation.at <= (position + diff)) {
         shiftBy += operation.value.length;
         position += operation.value.length;
       }
-    } else if (operation instanceof crdt.Delete) {
+    } else if (operation instanceof crdt.text.Delete) {
       if (operation.at < position) {
         shiftBy -= operation.length;
       }
@@ -47,7 +47,7 @@ function shiftCursorPositionRelativeTo(text, position, diff) {
 function serialise(text) {
   const operations = text.setMap.get(text.order)
     .reduce((result, operation) => {
-      let value = operation instanceof crdt.Insert
+      let value = operation instanceof crdt.text.Insert
         ? {type: 'insert', args: [operation.at, operation.value]}
         : {type: 'delete', args: [operation.at, operation.length]}
       ;
@@ -72,12 +72,12 @@ function deserialise(string) {
 
   return operations.reduce((text, {type, args}) => {
     const operation = (type === 'insert')
-      ? new crdt.Insert(args[0], args[1])
-      : new crdt.Delete(args[0], args[1]);
+      ? new crdt.text.Insert(args[0], args[1])
+      : new crdt.text.Delete(args[0], args[1]);
 
     text.apply(operation)
     return text
-  }, new crdt.Text(new crdt.Discrete(id, vector)));
+  }, crdt.text.createFromOrderer(new crdt.order.VectorClock(id, vector)));
 }
 
 let editorElement = document.getElementById('editor');
@@ -97,7 +97,7 @@ let messages = new jef.stream.Push();
 let publish = new jef.stream.Push();
 let online = new jef.stream.Push();
 
-let database = new crdt.Text(create(uuid()));
+let database = crdt.text.createFromOrderer(create(uuid()));
 
 const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '')
 
@@ -191,34 +191,34 @@ keyup
 
     if (code === 'cut') {
       return jef.stream.fromValue(
-          new crdt.Delete(pos, selection)
+          new crdt.text.Delete(pos, selection)
       );
     }
 
     if (code === BACKSPACE) {
       return jef.stream.fromValue(
         selection
-          ? new crdt.Delete(pos, selection)
-          : new crdt.Delete(Math.max(0, pos-1), 1)
+          ? new crdt.text.Delete(pos, selection)
+          : new crdt.text.Delete(Math.max(0, pos-1), 1)
       );
     }
 
     if (code === DELETE) {
       return jef.stream.fromValue(
         selection
-          ? new crdt.Delete(pos, selection)
-          : new crdt.Delete(pos, 1)
+          ? new crdt.text.Delete(pos, selection)
+          : new crdt.text.Delete(pos, 1)
       );
     }
 
     if (selection) {
       return jef.stream.fromArray([
-        new crdt.Delete(pos, selection),
-        new crdt.Insert(pos, key),
+        new crdt.text.Delete(pos, selection),
+        new crdt.text.Insert(pos, key),
       ]);
     }
 
-    return jef.stream.fromValue(new crdt.Insert(pos, key))
+    return jef.stream.fromValue(new crdt.text.Insert(pos, key))
   })
   .on(op => bench('key-apply', database.apply, database)(op))
   .on(onFrame(render, (op, start, end) => setCursorOnKey([op], start, end)))
@@ -241,12 +241,7 @@ messages
 ;
 
 function renderer(text) {
-  // const order = text.order;
-  // const val = order.vector[order.id];
-
-  return text.reduce((accumulator, operation) => {
-    return operation.apply(accumulator);
-  }, []).join('');
+  return crdt.text.renderString(text);
 }
 
 function onFrame(f1, f2) {
@@ -281,4 +276,14 @@ function render() {
     })();
 
     bench('render-set', () => editorElement.value = string)();
+}
+
+// type Operation = Insert | Delete;
+
+class Editor {
+  onUndo() {}
+  onRedo() {}
+  onDelete() {}
+  onInsert() {}
+  onSelect() {}
 }
