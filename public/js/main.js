@@ -28,19 +28,21 @@ function snapshot(text) {
 
 function shiftCursorPositionRelativeTo(text, position, diff) {
   diff = diff |0;
-  return text.reduce(({shiftBy, position}, operation) => {
-    if (operation instanceof crdt.text.Insert) {
-      if (operation.at <= (position + diff)) {
-        shiftBy += operation.value.length;
-        position += operation.value.length;
+  return text.reduce(({shiftBy, position}, operations) => {
+    return operations.reduce(({shiftBy, position}, operation) => {
+      if (operation instanceof crdt.text.Insert) {
+        if (operation.at <= (position + diff)) {
+          shiftBy += operation.value.length;
+          position += operation.value.length;
+        }
+      } else if (operation instanceof crdt.text.Delete) {
+        if (operation.at < position) {
+          shiftBy -= operation.length;
+        }
       }
-    } else if (operation instanceof crdt.text.Delete) {
-      if (operation.at < position) {
-        shiftBy -= operation.length;
-      }
-    }
 
-    return {shiftBy, position};
+      return {shiftBy, position};
+    }, {shiftBy, position});
   }, {shiftBy: 0, position}).shiftBy;
 }
 
@@ -221,7 +223,7 @@ keyup
     return jef.stream.fromValue(new crdt.text.Insert(pos, key))
   })
   .on(op => bench('key-apply', database.apply, database)(op))
-  .on(onFrame(render, (op, start, end) => setCursorOnKey([op], start, end)))
+  .on(onFrame(render, (op, start, end) => setCursorOnKey([[op]], start, end)))
   // .timeout(300) // here is issue with empty sends
   .on(_ => {
     const data = bench('key-serialise', serialise)(database);
