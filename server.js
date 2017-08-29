@@ -36,7 +36,7 @@ function serialise(order, operations) {
     }, {
       operations: [],
       order: {
-        t: 'v1',
+        t: order instanceof VectorClock ? 'v1' : 'v2',
         id: order.id,
         vector: order.vector,
       }
@@ -61,11 +61,11 @@ function deserialise(string) {
 let database = createFromOrderer(create('server'));
 
 function create(id) {
-return new VectorClock(id, {})
+  return new VectorClock(id, {})
 }
 
 function createFrom(t, id, vector) {
-return new VectorClock(id, vector);
+  return new VectorClock(id, vector);
 }
 
 wss.on('connection', function connection(ws) {

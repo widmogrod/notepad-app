@@ -69,7 +69,7 @@ function serialise(text) {
     }, {
       operations: [],
       order: {
-        t: 'v1',
+        t: text.order instanceof crdt.order.VectorClock ? 'v1' : 'v2',
         id: text.order.id,
         vector: text.order.vector,
       }
