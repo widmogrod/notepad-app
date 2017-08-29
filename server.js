@@ -36,6 +36,7 @@ function serialise(order, operations) {
     }, {
       operations: [],
       order: {
+        t: 'v1',
         id: order.id,
         vector: order.vector,
       }
@@ -45,7 +46,7 @@ function serialise(order, operations) {
 
 function deserialise(string) {
   const {order, operations} = JSON.parse(string);
-  const {id, vector} = order;
+  const {t, id, vector} = order;
 
   return operations.reduce((text, {type, args}) => {
     const operation = (type === 'insert')
@@ -54,7 +55,7 @@ function deserialise(string) {
 
     text.apply(operation);
     return text;
-  }, createFromOrderer(createFrom(id, vector)));
+  }, createFromOrderer(createFrom(t, id, vector)));
 }
 
 let database = createFromOrderer(create('server'));
@@ -63,7 +64,7 @@ function create(id) {
 return new VectorClock(id, {})
 }
 
-function createFrom(id, vector) {
+function createFrom(t, id, vector) {
 return new VectorClock(id, vector);
 }
 

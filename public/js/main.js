@@ -27,7 +27,7 @@ function create(id) {
   // );
 }
 
-function createFrom(id, vector) {
+function createFrom(t, id, vector) {
   return new crdt.order.VectorClock(id, vector);
 }
 
@@ -69,6 +69,7 @@ function serialise(text) {
     }, {
       operations: [],
       order: {
+        t: 'v1',
         id: text.order.id,
         vector: text.order.vector,
       }
@@ -79,7 +80,7 @@ function serialise(text) {
 
 function deserialise(string) {
   const {order, operations} = JSON.parse(string);
-  const {id, vector} = order;
+  const {t, id, vector} = order;
 
   return operations.reduce((text, {type, args}) => {
     const operation = (type === 'insert')
@@ -88,7 +89,7 @@ function deserialise(string) {
 
     text.apply(operation)
     return text
-  }, crdt.text.createFromOrderer(createFrom(id, vector)));
+  }, crdt.text.createFromOrderer(createFrom(t, id, vector)));
 }
 
 let editorElement = document.getElementById('editor');
