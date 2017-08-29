@@ -35,13 +35,21 @@ function serialise(order, operations) {
       return result;
     }, {
       operations: [],
-      order: {
-        t: order instanceof VectorClock ? 'v1' : 'v2',
-        id: order.id,
-        vector: order.vector,
-      }
+      order: serialiseOrder(order),
     })
   );
+}
+
+function serialiseOrder(order) {
+  if (order instanceof VectorClock) {
+    return {
+      t: 'v1',
+      id: order.id,
+      vector: order.vector,
+    }
+  } else {
+
+  }
 }
 
 function deserialise(string) {

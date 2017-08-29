@@ -68,14 +68,22 @@ function serialise(text) {
       return result;
     }, {
       operations: [],
-      order: {
-        t: text.order instanceof crdt.order.VectorClock ? 'v1' : 'v2',
-        id: text.order.id,
-        vector: text.order.vector,
-      }
+      order: serialiseOrder(text.order),
     });
 
   return JSON.stringify(operations);
+}
+
+function serialiseOrder(order) {
+  if (order instanceof crdt.order.VectorClock) {
+    return {
+      t: 'v1',
+      id: order.id,
+      vector: order.vector,
+    }
+  } else {
+
+  }
 }
 
 function deserialise(string) {
@@ -203,23 +211,23 @@ keyup
 
     if (code === 'cut') {
       return jef.stream.fromValue(
-          new crdt.text.Delete(pos, selection)
+        new crdt.text.Delete(pos, selection)
       );
     }
 
     if (code === BACKSPACE) {
       return jef.stream.fromValue(
         selection
-          ? new crdt.text.Delete(pos, selection)
-          : new crdt.text.Delete(Math.max(0, pos-1), 1)
+        ? new crdt.text.Delete(pos, selection)
+        : new crdt.text.Delete(Math.max(0, pos-1), 1)
       );
     }
 
     if (code === DELETE) {
       return jef.stream.fromValue(
         selection
-          ? new crdt.text.Delete(pos, selection)
-          : new crdt.text.Delete(pos, 1)
+        ? new crdt.text.Delete(pos, selection)
+        : new crdt.text.Delete(pos, 1)
       );
     }
 
@@ -234,7 +242,7 @@ keyup
   })
   .on(op => bench('key-apply', database.apply, database)(op))
   .on(onFrame(render, (op, start, end) => setCursorOnKey([[op]], start, end)))
-  // .timeout(300) // here is issue with empty sends
+// .timeout(300) // here is issue with empty sends
   .on(_ => {
     const data = bench('key-serialise', serialise)(database);
     database = bench('key-snapshot', snapshot)(database);
@@ -283,11 +291,11 @@ function setCursorOnUpdate(e, start, end) {
 }
 
 function render() {
-    const string = bench('render-string', () => {
-      return renderer(database);
-    })();
+  const string = bench('render-string', () => {
+    return renderer(database);
+  })();
 
-    bench('render-set', () => editorElement.value = string)();
+  bench('render-set', () => editorElement.value = string)();
 }
 
 // type Operation = Insert | Delete;
