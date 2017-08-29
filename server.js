@@ -20,7 +20,9 @@ wss.broadcast = function broadcast(data) {
 };
 
 const {Insert, Delete, createFromOrderer} = require('js-crdt/build/text');
-const {VectorClock} = require('js-crdt/build/order');
+const {VectorClock, VectorClock2, Id} = require('js-crdt/build/order');
+const {SortedSetArray} = require('js-crdt/build/structures/sorted-set-array');
+const {NaiveArrayList} = require('js-crdt/build/structures/naive-array-list');
 
 function serialise(order, operations) {
   return JSON.stringify(
@@ -41,6 +43,7 @@ function serialise(order, operations) {
 }
 
 function create(id) {
+  const set1 = new SortedSetArray(new NaiveArrayList([]));
   return new VectorClock(id, {})
 }
 

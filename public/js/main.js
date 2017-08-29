@@ -62,8 +62,8 @@ function serialise(text) {
 }
 
 function create(id) {
+  const set1 = new crdt.structures.SortedSetArray(new crdt.structures.NaiveArrayList([]));
   return new crdt.order.VectorClock(id, {});
-  // const set1 = new crdt.order.SortedSetArray(new crdt.order.NaiveArrayList([]));
   // return new crdt.order.VectorClock2(
   //   new crdt.order.Id(id),
   //   set1

@@ -12,7 +12,7 @@
   "dependencies": {
     "bufferutil": "^3.0.2",
     "express": "^4.15.4",
-    "js-crdt": "^1.3.1",
+    "js-crdt": "^1.3.2",
     "utf-8-validate": "^3.0.3",
     "ws": "^3.1.0"
   },
@@ -21,7 +21,7 @@
     "browserify": "^13.0.1",
     "eslint": "^4.4.1",
     "ts-node": "^3.3.0",
-    "typescript": "^2.4.2",
+    "typescript": "^2.5.1",
     "typescript-eslint-parser": "^3.0.0",
     "uglify-es": "^3.0.27",
     "uglify-js": "^2.6.4"
