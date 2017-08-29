@@ -20,6 +20,15 @@ function uuid() {
 
 function create(id) {
   return new crdt.order.VectorClock(id, {});
+  // const set1 = new crdt.order.SortedSetArray(new crdt.order.NaiveArrayList([]));
+  // return new crdt.order.VectorClock2(
+  //   new crdt.order.Id(id),
+  //   set1
+  // );
+}
+
+function createFrom(id, vector) {
+  return new crdt.order.VectorClock(id, vector);
 }
 
 function snapshot(text) {
@@ -79,7 +88,7 @@ function deserialise(string) {
 
     text.apply(operation)
     return text
-  }, crdt.text.createFromOrderer(new crdt.order.VectorClock(id, vector)));
+  }, crdt.text.createFromOrderer(createFrom(id, vector)));
 }
 
 let editorElement = document.getElementById('editor');

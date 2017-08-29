@@ -54,10 +54,18 @@ function deserialise(string) {
 
     text.apply(operation);
     return text;
-  }, createFromOrderer(new VectorClock(id, vector)));
+  }, createFromOrderer(createFrom(id, vector)));
 }
 
-let database = createFromOrderer(new VectorClock('server', {}));
+let database = createFromOrderer(create('server'));
+
+function create(id) {
+return new VectorClock(id, {})
+}
+
+function createFrom(id, vector) {
+return new VectorClock(id, vector);
+}
 
 wss.on('connection', function connection(ws) {
   // Restore database state
