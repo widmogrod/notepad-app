@@ -18,19 +18,6 @@ function uuid() {
   return array.join('-')
 }
 
-function create(id) {
-  return new crdt.order.VectorClock(id, {});
-  // const set1 = new crdt.order.SortedSetArray(new crdt.order.NaiveArrayList([]));
-  // return new crdt.order.VectorClock2(
-  //   new crdt.order.Id(id),
-  //   set1
-  // );
-}
-
-function createFrom(t, id, vector) {
-  return new crdt.order.VectorClock(id, vector);
-}
-
 function snapshot(text) {
   return text.next();
 }
@@ -74,6 +61,15 @@ function serialise(text) {
   return JSON.stringify(operations);
 }
 
+function create(id) {
+  return new crdt.order.VectorClock(id, {});
+  // const set1 = new crdt.order.SortedSetArray(new crdt.order.NaiveArrayList([]));
+  // return new crdt.order.VectorClock2(
+  //   new crdt.order.Id(id),
+  //   set1
+  // );
+}
+
 function serialiseOrder(order) {
   if (order instanceof crdt.order.VectorClock) {
     return {
@@ -83,6 +79,13 @@ function serialiseOrder(order) {
     }
   } else {
 
+  }
+}
+
+function deserialiesOrder(t, id, vector) {
+  switch(t) {
+    case 'v1':
+      return new crdt.order.VectorClock(id, vector);
   }
 }
 
@@ -97,7 +100,7 @@ function deserialise(string) {
 
     text.apply(operation)
     return text
-  }, crdt.text.createFromOrderer(createFrom(t, id, vector)));
+  }, crdt.text.createFromOrderer(deserialiesOrder(t, id, vector)));
 }
 
 let editorElement = document.getElementById('editor');

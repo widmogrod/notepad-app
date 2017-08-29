@@ -40,6 +40,10 @@ function serialise(order, operations) {
   );
 }
 
+function create(id) {
+  return new VectorClock(id, {})
+}
+
 function serialiseOrder(order) {
   if (order instanceof VectorClock) {
     return {
@@ -49,6 +53,13 @@ function serialiseOrder(order) {
     }
   } else {
 
+  }
+}
+
+function deserialiesOrder(t, id, vector) {
+  switch(t) {
+    case 'v1':
+      return new VectorClock(id, vector);
   }
 }
 
@@ -63,18 +74,10 @@ function deserialise(string) {
 
     text.apply(operation);
     return text;
-  }, createFromOrderer(createFrom(t, id, vector)));
+  }, createFromOrderer(deserialiesOrder(t, id, vector)));
 }
 
 let database = createFromOrderer(create('server'));
-
-function create(id) {
-  return new VectorClock(id, {})
-}
-
-function createFrom(t, id, vector) {
-  return new VectorClock(id, vector);
-}
 
 wss.on('connection', function connection(ws) {
   // Restore database state
