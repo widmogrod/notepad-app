@@ -6,7 +6,7 @@ function bench(name, func, ctx) {
     const result = func.apply(ctx, arguments);
     const end = new Date();
 
-    console.log({name, time: end.getTime() - start.getTime()});
+    // console.log({name, time: end.getTime() - start.getTime()});
 
     return result;
   }
