@@ -4,10 +4,10 @@ Collaborative notepad application that use CRDT [1] data structure to create rea
 
 ## Stages
 Stage one:
-- [v] plain text editing
+- [x] plain text editing
 - [ ] full keyboard support
-- [v] CRDT as a data structure
-- [v] communication via WebSockets
+- [x] CRDT as a data structure
+- [x] communication via WebSockets
 - [ ] many notes
 
 Next stages:
