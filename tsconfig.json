@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "es6",
     "module": "commonjs",
-    "sourceMap": true,
+    "sourceMap": false,
     "outDir": "build",
     "rootDir": "src",
     "strictNullChecks": false
@@ -10,7 +10,7 @@
   "compileOnSave": true,
   "exclude": [
     "node_modules",
-    "test"
+    "public"
   ]
 }
 

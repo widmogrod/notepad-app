@@ -5,8 +5,9 @@ const app = express();
 const server = require('http').createServer();
 
 app.set('port', process.env.PORT || 8080);
+app.use(express.static('dist'));
 app.use(express.static('public'));
-app.use(express.static('node_modules/js-crdt/dist'));
+// app.use(express.static('node_modules/js-crdt/dist'));
 
 const wss = new WebSocket.Server({ server });
 
@@ -61,7 +62,7 @@ function serialiseOrder(order) {
   } else if (order instanceof VectorClock2) {
     function serialiseId(id) {
       return {
-        key: id.key,
+        node: id.node,
         version: id.version,
       }
     }
@@ -86,9 +87,9 @@ function deserialiesOrder(t, id, vector) {
       const set = new SortedSetArray(new NaiveArrayList([]));
 
       return new VectorClock2(
-        new Id(id.key, id.version),
+        new Id(id.node, id.version),
         vector.reduce((set, id) => {
-          return set.add(new Id(id.key, id.version)).result
+          return set.add(new Id(id.node, id.version)).result
         }, set)
       );
   }
