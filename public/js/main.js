@@ -6,7 +6,7 @@ function bench(name, func, ctx) {
     const result = func.apply(ctx, arguments);
     const end = new Date();
 
-    // console.log({name, time: end.getTime() - start.getTime()});
+    console.log({name, time: end.getTime() - start.getTime()});
 
     return result;
   }
@@ -43,6 +43,11 @@ function shiftCursorPositionRelativeTo(text, position, diff) {
 }
 
 function serialise(text) {
+  // console.log({
+  //   order: text.order.toString(),
+  //   id: text.order.id.toString(),
+  //   changes: text.setMap.get(text.order)
+  // });
   const operations = text.setMap.get(text.order)
     .reduce((result, operation) => {
       let value = operation instanceof crdt.text.Insert
@@ -62,12 +67,12 @@ function serialise(text) {
 }
 
 function create(id) {
+  // return new crdt.order.VectorClock(id, {});
   const set1 = new crdt.structures.SortedSetArray(new crdt.structures.NaiveArrayList([]));
-  return new crdt.order.VectorClock(id, {});
-  // return new crdt.order.VectorClock2(
-  //   new crdt.order.Id(id),
-  //   set1
-  // );
+  return new crdt.order.VectorClock2(
+    new crdt.order.Id(id, 0),
+    set1
+  );
 }
 
 function serialiseOrder(order) {
@@ -77,8 +82,22 @@ function serialiseOrder(order) {
       id: order.id,
       vector: order.vector,
     }
-  } else {
+  } else if (order instanceof crdt.order.VectorClock2) {
+    function serialiseId(id) {
+      return {
+        key: id.key,
+        version: id.version,
+      }
+    }
 
+    return {
+      t: 'v2',
+      id: serialiseId(order.id),
+      vector: order.vector.reduce((r, item) => {
+        r.push(serialiseId(item))
+        return r;
+      }, []),
+    }
   }
 }
 
@@ -86,6 +105,15 @@ function deserialiesOrder(t, id, vector) {
   switch(t) {
     case 'v1':
       return new crdt.order.VectorClock(id, vector);
+    case 'v2':
+      const set = new crdt.structures.SortedSetArray(new crdt.structures.NaiveArrayList([]));
+
+      return new crdt.order.VectorClock2(
+        new crdt.order.Id(id.key, id.version),
+        vector.reduce((set, id) => {
+          return set.add(new crdt.order.Id(id.key, id.version)).result
+        }, set)
+      );
   }
 }
 
@@ -243,12 +271,28 @@ keyup
 
     return jef.stream.fromValue(new crdt.text.Insert(pos, key))
   })
-  .on(op => bench('key-apply', database.apply, database)(op))
+  // .on((op) => {
+  //   console.log({op});
+  //   database = bench('key-snapshot', snapshot)(database);
+  // })
+  // .on(op => bench('key-apply', database.apply, database)(op))
   .on(onFrame(render, (op, start, end) => setCursorOnKey([[op]], start, end)))
 // .timeout(300) // here is issue with empty sends
-  .on(_ => {
-    const data = bench('key-serialise', serialise)(database);
-    database = bench('key-snapshot', snapshot)(database);
+  .on((op) => {
+    // const a = database.order;
+    // database = database.next();
+    // const b = database.order;
+    //
+    // console.log({
+    //   a: a.toString(),
+    //   b: b.toString(),
+    //   cmp: a.compare(b),
+    // })
+
+    database = database.next();
+    database.apply(op);
+    const data = serialise(database);
+    // const data = bench('key-serialise', serialise)(database);
     publish.push(data);
   })
 ;
@@ -257,7 +301,10 @@ messages
   .map(e => e.data)
   .map(bench('ws-deserialise', deserialise))
   .on(e => {
-    database = bench('ws-merge', database.merge, database)(e);
+    database = database.next();
+    database = database.merge(e);
+    // database = database.next();
+    // database = bench('ws-merge', database.merge, database)(e);
   })
   .debounce(10)
   .on(onFrame(render, setCursorOnUpdate))

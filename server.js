@@ -43,8 +43,12 @@ function serialise(order, operations) {
 }
 
 function create(id) {
+  // return new VectorClock(id, {})
   const set1 = new SortedSetArray(new NaiveArrayList([]));
-  return new VectorClock(id, {})
+  return new VectorClock2(
+    new Id(id, 0),
+    set1
+  );
 }
 
 function serialiseOrder(order) {
@@ -54,8 +58,22 @@ function serialiseOrder(order) {
       id: order.id,
       vector: order.vector,
     }
-  } else {
+  } else if (order instanceof VectorClock2) {
+    function serialiseId(id) {
+      return {
+        key: id.key,
+        version: id.version,
+      }
+    }
 
+    return {
+      t: 'v2',
+      id: serialiseId(order.id),
+      vector: order.vector.reduce((r, item) => {
+        r.push(serialiseId(item))
+        return r;
+      }, []),
+    }
   }
 }
 
@@ -63,6 +81,16 @@ function deserialiesOrder(t, id, vector) {
   switch(t) {
     case 'v1':
       return new VectorClock(id, vector);
+
+    case 'v2':
+      const set = new SortedSetArray(new NaiveArrayList([]));
+
+      return new VectorClock2(
+        new Id(id.key, id.version),
+        vector.reduce((set, id) => {
+          return set.add(new Id(id.key, id.version)).result
+        }, set)
+      );
   }
 }
 
@@ -85,12 +113,14 @@ let database = createFromOrderer(create('server'));
 wss.on('connection', function connection(ws) {
   // Restore database state
   database.reduce((_, operations, order) => {
+    // console.log({s: serialise(order, operations)});
     ws.send(serialise(order, operations));
   }, null);
 
   ws.on('message', function incoming(data) {
+    // console.log(data)
     // Update database state
-    database = database.merge(deserialise(data));
+    database = database.next().merge(deserialise(data));
 
     // Broadcast to everyone else.
     wss.clients.forEach(function each(client) {
