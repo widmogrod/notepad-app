@@ -1,48 +1,20 @@
-# Collaborative editing
+# notepad-app
 ## Introduction
-## TODO
+Collaborative notepad application that use CRDT [1] data structure to create real-time editing expirience.
 
-- Text toString() is not optimal!
-    - this is event worst than sorting - becose of evey element is calculated ~1ms * k order elements:
+## Stages
+Stage one:
+- [v] plain text editing
+- [ ] full keyboard support
+- [v] CRDT as a data structure
+- [v] communication via WebSockets
+- [ ] many notes
 
-          const orderIndex = this.ordersIndex.findIndex(o => o.equal(order));
+Next stages:
+- [ ] display other collaborators cursors
+- [ ] communication via WebRTC
+- [ ] ...
 
-      solution temporary:
+## References
+- [1] [js-crdt](https://github.com/widmogrod/js-crdt)
 
-          const orderIndex = this.ordersIndex.findIndex(o => o === order);
-
-    - array.slice(0) - almost none overhead - ~0ms
-    - array.sort - also very decent - ~3ms
-
-    - but the real time consuming element are Insert & Delete operations
-        after changing `concat` to Array.splice
-        there is no lag!
-
-- Text reduce is sub optimal comptation wise
-  - Sort is done on every reduce use i.e SortedSet
-        When I used naive sorted set - render time was reduced drasticly
-
-- Text merging should not do snapshots,
-  snapshots should be done when sending changes
-
-- Better serialisation
-  - right now is JSON and it could be more compact
-  - better responsivenes
-
-- Develop a way to compact operations
-  because to many changes result in longer computation time
-  - find minimum common change and from it apply new changes?
-
-- Observability.
-  - implement features to gather metrics about the behaviour of the system
-
-## Research
-Other projects
-- https://quilljs.com/
-- https://togetherjs.com/
-- https://stenci.la/
-- http://substance.io/
-- https://github.com/ether/etherpad-lite
-- https://quip.com/
-- https://medium.com/@_daniel/publish-interactive-historical-documents-with-archivist-7019f6408ee6
-- https://github.com/elifesciences/lens
