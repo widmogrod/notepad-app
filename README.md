@@ -13,6 +13,7 @@ Stage one:
 Next stages:
 - [ ] display other collaborators cursors
 - [ ] communication via WebRTC
+- [ ] offline (time batching & size batching snapshot)
 - [ ] ...
 
 ## References
