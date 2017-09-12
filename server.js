@@ -24,24 +24,7 @@ const {Insert, Delete, createFromOrderer} = require('js-crdt/build/text');
 const {VectorClock, VectorClock2, Id} = require('js-crdt/build/order');
 const {SortedSetArray} = require('js-crdt/build/structures/sorted-set-array');
 const {NaiveArrayList} = require('js-crdt/build/structures/naive-array-list');
-
-function serialise(order, operations) {
-  return JSON.stringify(
-    operations
-    .reduce((result, operation) => {
-      const value = operation instanceof Insert
-        ? {type: 'insert', args: [operation.at, operation.value]}
-        : {type: 'delete', args: [operation.at, operation.length]}
-      ;
-
-      result.operations.push(value);
-      return result;
-    }, {
-      operations: [],
-      order: serialiseOrder(order),
-    })
-  );
-}
+const {serialise, serialiseOperations, deserialise} = require('./build/serialiser');
 
 function create(id) {
   // return new VectorClock(id, {})
@@ -52,76 +35,20 @@ function create(id) {
   );
 }
 
-function serialiseOrder(order) {
-  if (order instanceof VectorClock) {
-    return {
-      t: 'v1',
-      id: order.id,
-      vector: order.vector,
-    }
-  } else if (order instanceof VectorClock2) {
-    function serialiseId(id) {
-      return {
-        node: id.node,
-        version: id.version,
-      }
-    }
-
-    return {
-      t: 'v2',
-      id: serialiseId(order.id),
-      vector: order.vector.reduce((r, item) => {
-        r.push(serialiseId(item))
-        return r;
-      }, []),
-    }
-  }
-}
-
-function deserialiesOrder(t, id, vector) {
-  switch(t) {
-    case 'v1':
-      return new VectorClock(id, vector);
-
-    case 'v2':
-      const set = new SortedSetArray(new NaiveArrayList([]));
-
-      return new VectorClock2(
-        new Id(id.node, id.version),
-        vector.reduce((set, id) => {
-          return set.add(new Id(id.node, id.version)).result
-        }, set)
-      );
-  }
-}
-
-function deserialise(string) {
-  const {order, operations} = JSON.parse(string);
-  const {t, id, vector} = order;
-
-  return operations.reduce((text, {type, args}) => {
-    const operation = (type === 'insert')
-      ? new Insert(args[0], args[1])
-      : new Delete(args[0], args[1]);
-
-    text.apply(operation);
-    return text;
-  }, createFromOrderer(deserialiesOrder(t, id, vector)));
-}
-
 let database = createFromOrderer(create('server'));
 
 wss.on('connection', function connection(ws) {
   // Restore database state
   database.reduce((_, operations, order) => {
     // console.log({s: serialise(order, operations)});
-    ws.send(serialise(order, operations));
+    ws.send(JSON.stringify(serialiseOperations(order, operations)));
   }, null);
 
   ws.on('message', function incoming(data) {
     // console.log(data)
     // Update database state
-    database = database.next().merge(deserialise(data));
+    const partial = deserialise(JSON.parse(data));
+    database = database.next().merge(partial);
 
     // Broadcast to everyone else.
     wss.clients.forEach(function each(client) {
