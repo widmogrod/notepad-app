@@ -20,18 +20,15 @@ wss.broadcast = function broadcast(data) {
   });
 };
 
-const {Insert, Delete, createFromOrderer} = require('js-crdt/build/text');
+const {createFromOrderer} = require('js-crdt/build/text');
 const {createVectorClock2} = require('js-crdt/build/order');
-const {SortedSetArray} = require('js-crdt/build/structures/sorted-set-array');
-const {NaiveArrayList} = require('js-crdt/build/structures/naive-array-list');
-const {serialise, serialiseOperations, deserialise} = require('./build/serialiser');
+const {serialiseOperations, deserialise} = require('./build/serialiser');
 
 let database = createFromOrderer(createVectorClock2('server'));
 
 wss.on('connection', function connection(ws) {
   // Restore database state
   database.reduce((_, operations, order) => {
-    // console.log({s: serialise(order, operations)});
     ws.send(JSON.stringify(serialiseOperations(order, operations)));
   }, null);
 

@@ -22,10 +22,6 @@ function uuid() {
   return array.join('-')
 }
 
-function snapshot(text) {
-  return text.next();
-}
-
 function shiftCursorPositionRelativeTo(text, position, diff?) {
   diff = diff |0;
   return text.reduce(({shiftBy, position}, operations) => {
