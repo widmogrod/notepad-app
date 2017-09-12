@@ -46,15 +46,6 @@ function shiftCursorPositionRelativeTo(text, position, diff?) {
   }, {shiftBy: 0, position}).shiftBy;
 }
 
-function create(id) {
-  // return new crdt.order.VectorClock(id, {});
-  const set1 = new crdt.structures.SortedSetArray(new crdt.structures.NaiveArrayList([]));
-  return new crdt.order.VectorClock2(
-    new crdt.order.Id(id, 0),
-    set1
-  );
-}
-
 interface Ev extends HTMLElement {
   preventDefault()
   type: string
@@ -89,7 +80,7 @@ let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
 const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '')
 
 
-let database = crdt.text.createFromOrderer(create(uuid()));
+let database = crdt.text.createFromOrderer(crdt.order.createVectorClock2(uuid()));
 
 // this subject queues as necessary to ensure every message is delivered
 const publish = new QueueingSubject()

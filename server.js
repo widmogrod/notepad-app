@@ -21,21 +21,12 @@ wss.broadcast = function broadcast(data) {
 };
 
 const {Insert, Delete, createFromOrderer} = require('js-crdt/build/text');
-const {VectorClock, VectorClock2, Id} = require('js-crdt/build/order');
+const {createVectorClock2} = require('js-crdt/build/order');
 const {SortedSetArray} = require('js-crdt/build/structures/sorted-set-array');
 const {NaiveArrayList} = require('js-crdt/build/structures/naive-array-list');
 const {serialise, serialiseOperations, deserialise} = require('./build/serialiser');
 
-function create(id) {
-  // return new VectorClock(id, {})
-  const set1 = new SortedSetArray(new NaiveArrayList([]));
-  return new VectorClock2(
-    new Id(id, 0),
-    set1
-  );
-}
-
-let database = createFromOrderer(create('server'));
+let database = createFromOrderer(createVectorClock2('server'));
 
 wss.on('connection', function connection(ws) {
   // Restore database state

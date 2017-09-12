@@ -41,11 +41,6 @@ function shiftCursorPositionRelativeTo(text, position, diff) {
         }, { shiftBy, position });
     }, { shiftBy: 0, position }).shiftBy;
 }
-function create(id) {
-    // return new crdt.order.VectorClock(id, {});
-    const set1 = new js_crdt_1.default.structures.SortedSetArray(new js_crdt_1.default.structures.NaiveArrayList([]));
-    return new js_crdt_1.default.order.VectorClock2(new js_crdt_1.default.order.Id(id, 0), set1);
-}
 let editorElement = document.getElementById('editor');
 let keyup = Rx_1.Observable.create(observer => {
     editorElement.addEventListener('keydown', e => { observer.next(e); });
@@ -58,7 +53,7 @@ let host = window.document.location.host.replace(/:.*/, '');
 let port = window.document.location.port;
 let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
 const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '');
-let database = js_crdt_1.default.text.createFromOrderer(create(uuid()));
+let database = js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock2(uuid()));
 // this subject queues as necessary to ensure every message is delivered
 const publish = new queueing_subject_1.QueueingSubject();
 // this method returns an object which contains two observables
