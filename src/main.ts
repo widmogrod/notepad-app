@@ -4,146 +4,146 @@ import { QueueingSubject } from 'queueing-subject';
 import websocketConnect from 'rxjs-websockets';
 
 function bench(name, func, ctx?) {
-    return function() {
-        const start = new Date();
-        const result = func.apply(ctx, arguments);
-        const end = new Date();
+  return function() {
+    const start = new Date();
+    const result = func.apply(ctx, arguments);
+    const end = new Date();
 
-        // console.log({name, time: end.getTime() - start.getTime()});
+    // console.log({name, time: end.getTime() - start.getTime()});
 
-        return result;
-    }
+    return result;
+  }
 }
 
 function uuid() {
-    const array = new Uint8Array(2);
-    crypto.getRandomValues(array);
-    return array.join('-')
+  const array = new Uint8Array(2);
+  crypto.getRandomValues(array);
+  return array.join('-')
 }
 
 function snapshot(text) {
-    return text.next();
+  return text.next();
 }
 
 function shiftCursorPositionRelativeTo(text, position, diff?) {
-    diff = diff |0;
-    return text.reduce(({shiftBy, position}, operations) => {
-        return operations.reduce(({shiftBy, position}, operation) => {
-            if (operation instanceof crdt.text.Insert) {
-                if (operation.at <= (position + diff)) {
-                    shiftBy += operation.value.length;
-                    position += operation.value.length;
-                }
-            } else if (operation instanceof crdt.text.Delete) {
-                if (operation.at < position) {
-                    shiftBy -= operation.length;
-                }
-            }
+  diff = diff |0;
+  return text.reduce(({shiftBy, position}, operations) => {
+    return operations.reduce(({shiftBy, position}, operation) => {
+      if (operation instanceof crdt.text.Insert) {
+        if (operation.at <= (position + diff)) {
+          shiftBy += operation.value.length;
+          position += operation.value.length;
+        }
+      } else if (operation instanceof crdt.text.Delete) {
+        if (operation.at < position) {
+          shiftBy -= operation.length;
+        }
+      }
 
-            return {shiftBy, position};
-        }, {shiftBy, position});
-    }, {shiftBy: 0, position}).shiftBy;
+      return {shiftBy, position};
+    }, {shiftBy, position});
+  }, {shiftBy: 0, position}).shiftBy;
 }
 
 function serialise(text) {
-    const operations = text.setMap.get(text.order)
-        .reduce((result, operation) => {
-            let value = operation instanceof crdt.text.Insert
-                ? {type: 'insert', args: [operation.at, operation.value]}
-                : {type: 'delete', args: [operation.at, operation.length]}
-            ;
+  const operations = text.setMap.get(text.order)
+    .reduce((result, operation) => {
+      let value = operation instanceof crdt.text.Insert
+        ? {type: 'insert', args: [operation.at, operation.value]}
+        : {type: 'delete', args: [operation.at, operation.length]}
+      ;
 
-            result.operations.push(value);
+      result.operations.push(value);
 
-            return result;
-        }, {
-            operations: [],
-            order: serialiseOrder(text.order),
-        });
+      return result;
+    }, {
+      operations: [],
+      order: serialiseOrder(text.order),
+    });
 
-    return operations;
+  return operations;
 }
 
 function create(id) {
-    // return new crdt.order.VectorClock(id, {});
-    const set1 = new crdt.structures.SortedSetArray(new crdt.structures.NaiveArrayList([]));
-    return new crdt.order.VectorClock2(
-        new crdt.order.Id(id, 0),
-        set1
-    );
+  // return new crdt.order.VectorClock(id, {});
+  const set1 = new crdt.structures.SortedSetArray(new crdt.structures.NaiveArrayList([]));
+  return new crdt.order.VectorClock2(
+    new crdt.order.Id(id, 0),
+    set1
+  );
 }
 
 function serialiseOrder(order) {
-    if (order instanceof crdt.order.VectorClock) {
-        return {
-            t: 'v1',
-            id: order.id,
-            vector: order.vector,
-        }
-    } else if (order instanceof crdt.order.VectorClock2) {
-        function serialiseId(id) {
-            return {
-                node: id.node,
-                version: id.version,
-            }
-        }
-
-        return {
-            t: 'v2',
-            id: serialiseId(order.id),
-            vector: order.vector.reduce((r, item) => {
-                r.push(serialiseId(item))
-                return r;
-            }, []),
-        }
+  if (order instanceof crdt.order.VectorClock) {
+    return {
+      t: 'v1',
+      id: order.id,
+      vector: order.vector,
     }
+  } else if (order instanceof crdt.order.VectorClock2) {
+    function serialiseId(id) {
+      return {
+        node: id.node,
+        version: id.version,
+      }
+    }
+
+    return {
+      t: 'v2',
+      id: serialiseId(order.id),
+      vector: order.vector.reduce((r, item) => {
+        r.push(serialiseId(item))
+        return r;
+      }, []),
+    }
+  }
 }
 
 function deserialiesOrder(t, id, vector) {
-    switch(t) {
-        case 'v1':
-            return new crdt.order.VectorClock(id, vector);
-        case 'v2':
-            const set = new crdt.structures.SortedSetArray(new crdt.structures.NaiveArrayList([]));
+  switch(t) {
+    case 'v1':
+      return new crdt.order.VectorClock(id, vector);
+    case 'v2':
+      const set = new crdt.structures.SortedSetArray(new crdt.structures.NaiveArrayList([]));
 
-            return new crdt.order.VectorClock2(
-                new crdt.order.Id(id.node, id.version),
-                vector.reduce((set, id) => {
-                    return set.add(new crdt.order.Id(id.node, id.version)).result
-                }, set)
-            );
-    }
+      return new crdt.order.VectorClock2(
+        new crdt.order.Id(id.node, id.version),
+        vector.reduce((set, id) => {
+          return set.add(new crdt.order.Id(id.node, id.version)).result
+        }, set)
+      );
+  }
 }
 
 function deserialise({order, operations}) {
-    const {t, id, vector} = order;
+  const {t, id, vector} = order;
 
-    return operations.reduce((text, {type, args}) => {
-        const operation = (type === 'insert')
-            ? new crdt.text.Insert(args[0], args[1])
-            : new crdt.text.Delete(args[0], args[1]);
+  return operations.reduce((text, {type, args}) => {
+    const operation = (type === 'insert')
+      ? new crdt.text.Insert(args[0], args[1])
+      : new crdt.text.Delete(args[0], args[1]);
 
-        text.apply(operation)
-        return text
-    }, crdt.text.createFromOrderer(deserialiesOrder(t, id, vector)));
+    text.apply(operation)
+    return text
+  }, crdt.text.createFromOrderer(deserialiesOrder(t, id, vector)));
 }
 
 interface Ev extends HTMLElement {
-    preventDefault()
-    type: string
-    code: number
-    key: string
-    keyCode: number
-    target: T
-    clipboardData: Cd
+  preventDefault()
+  type: string
+  code: number
+  key: string
+  keyCode: number
+  target: T
+  clipboardData: Cd
 }
 
 interface T {
-    selectionStart: number
-    selectionEnd: number
+  selectionStart: number
+  selectionEnd: number
 }
 interface Cd {
-    getData(string):string
+  getData(string):string
 }
 
 let editorElement = <HTMLInputElement>document.getElementById('editor');
@@ -177,140 +177,142 @@ const DELETE = 46;
 const ENTER = 13;
 
 keyup
-    .filter((e: Ev) => {
-        switch(e.type) {
-            case 'keydown':
-                return e.keyCode === BACKSPACE || e.keyCode === DELETE;
-            case 'keypress':
-                return true;
-            case 'cut':
-            case 'paste':
-                return true;
-            default:
-                return false;
-        }
-    })
-    .map((e: Ev) => {
-        const selection = e.target.selectionEnd - e.target.selectionStart;
-        const pos = e.target.selectionStart;
+  .filter((e: Ev) => {
+    switch(e.type) {
+      case 'keydown':
+        return e.keyCode === BACKSPACE || e.keyCode === DELETE;
+      case 'keypress':
+        return true;
+      case 'cut':
+      case 'paste':
+        return true;
+      default:
+        return false;
+    }
+  })
+  .map((e: Ev) => {
+    const selection = e.target.selectionEnd - e.target.selectionStart;
+    const pos = e.target.selectionStart;
 
-        // HACK: reset selection when keypress was made
-        // without it selection do not disaperes
-        // and this makes situations like
-        // insert removes selected block all the time
-        editorElement.setSelectionRange(pos, pos);
+    // HACK: reset selection when keypress was made
+    // without it selection do not disaperes
+    // and this makes situations like
+    // insert removes selected block all the time
+    editorElement.setSelectionRange(pos, pos);
 
-        return {
-            key: (e.type === 'paste') ? e.clipboardData.getData('text/plain') : e.key,
-            code: e.keyCode || e.type,
-            pos,
-            selection,
-        };
-    })
-    .concatMap(({key, code, pos, selection}) => {
-        if (code === ENTER) {
-            key = '\n';
-        }
+    return {
+      key: (e.type === 'paste') ? e.clipboardData.getData('text/plain') : e.key,
+      code: e.keyCode || e.type,
+      pos,
+      selection,
+    };
+  })
+  .concatMap(({key, code, pos, selection}) => {
+    if (code === ENTER) {
+      key = '\n';
+    }
 
-        if (code === 'cut') {
-            return Observable.from([
-                new crdt.text.Delete(pos, selection)
-            ]);
-        }
+    if (code === 'cut') {
+      return Observable.from([
+        new crdt.text.Delete(pos, selection)
+      ]);
+    }
 
-        if (code === BACKSPACE) {
-            return Observable.from([
-                selection
-                ? new crdt.text.Delete(pos, selection)
-                : new crdt.text.Delete(Math.max(0, pos-1), 1)
-            ]);
-        }
+    if (code === BACKSPACE) {
+      return Observable.from([
+        selection
+        ? new crdt.text.Delete(pos, selection)
+        : new crdt.text.Delete(Math.max(0, pos-1), 1)
+      ]);
+    }
 
-        if (code === DELETE) {
-            return Observable.from([
-                selection
-                ? new crdt.text.Delete(pos, selection)
-                : new crdt.text.Delete(pos, 1)
-            ]);
-        }
+    if (code === DELETE) {
+      return Observable.from([
+        selection
+        ? new crdt.text.Delete(pos, selection)
+        : new crdt.text.Delete(pos, 1)
+      ]);
+    }
 
-        if (selection) {
-            return Observable.from([
-                new crdt.text.Delete(pos, selection),
-                new crdt.text.Insert(pos, key),
-            ]);
-        }
+    if (selection) {
+      return Observable.from([
+        new crdt.text.Delete(pos, selection),
+        new crdt.text.Insert(pos, key),
+      ]);
+    }
 
-        return Observable.from([
-            new crdt.text.Insert(pos, key),
-        ]);
-    })
-    .subscribe((op) => {
-        onFrame(render, (op, start, end) => setCursorOnKey([[op]], start, end))(op)
+    return Observable.from([
+      new crdt.text.Insert(pos, key),
+    ]);
+  })
+  .subscribe((op) => {
+    onFrame(render, (op, start, end) => setCursorOnKey([[op]], start, end))(op)
 
-        database = database.next();
-        database.apply(op);
+    database = database.next();
+    database.apply(op);
 
-        const data = serialise(database);
-        publish.next(data);
-    })
+    const data = serialise(database);
+    publish.next(data);
+  })
 ;
 
 messages
-    .map(bench('ws-deserialise', deserialise))
-    // .debounce(10)
-    .subscribe(e => {
-        database = database.next();
-        database = database.merge(e);
-        onFrame(render, setCursorOnUpdate)(e);
-    })
+  .map(bench('ws-deserialise', deserialise))
+  .bufferTime(100)
+  .subscribe(es => {
+    es.map((e) => {
+      database = database.next();
+      database = database.merge(e);
+      onFrame(render, setCursorOnUpdate)(e);
+    });
+  })
 ;
 
 function renderer(text) {
-    return crdt.text.renderString(text);
+  return crdt.text.renderString(text);
 }
 
 function onFrame(f1, f2) {
-    return (arg) => {
-        requestAnimationFrame(() => {
-            const
-            start = editorElement.selectionStart,
-                end = editorElement.selectionEnd;
+  return (arg) => {
+    const
+    start = editorElement.selectionStart,
+      end = editorElement.selectionEnd;
 
-            const shiftBy = f2(arg, start, end);
-            f1(arg);
-            editorElement.setSelectionRange(start + shiftBy, end + shiftBy);
-        });
-    };
+    const shiftBy = f2(arg, start, end);
+    requestAnimationFrame(() => {
+      f1(arg);
+      editorElement.setSelectionRange(start + shiftBy, end + shiftBy);
+    });
+  };
 }
 
 function setCursorOnKey(e, start, end) {
-    return bench('cursor-key-calculate', () => {
-        return shiftCursorPositionRelativeTo(e, start);
-    })();
+  return bench('cursor-key-calculate', () => {
+    return shiftCursorPositionRelativeTo(e, start);
+  })();
 }
 
 function setCursorOnUpdate(e, start, end) {
-    return bench('cursor-up-calculate', () => {
-        return shiftCursorPositionRelativeTo(e, start, -1);
-    })();
+  return bench('cursor-up-calculate', () => {
+    return shiftCursorPositionRelativeTo(e, start, -1);
+  })();
 }
 
 function render() {
-    const string = bench('render-string', () => {
-        return renderer(database);
-    })();
+  const string = bench('render-string', () => {
+    return renderer(database);
+  })();
 
-    bench('render-set', () => editorElement.value = string)();
+  bench('render-set', () => editorElement.value = string)();
 }
 
 // type Operation = Insert | Delete;
 
 class Editor {
-    onUndo() {}
-    onRedo() {}
-    onDelete() {}
-    onInsert() {}
-    onSelect() {}
+  onUndo() {}
+  onRedo() {}
+  onDelete() {}
+  onInsert() {}
+  onSelect() {}
 }
 

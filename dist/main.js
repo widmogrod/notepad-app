@@ -42,11 +42,6 @@ function shiftCursorPositionRelativeTo(text, position, diff) {
     }, { shiftBy: 0, position }).shiftBy;
 }
 function serialise(text) {
-    // console.log({
-    //   order: text.order.toString(),
-    //   id: text.order.id.toString(),
-    //   changes: text.setMap.get(text.order)
-    // });
     const operations = text.setMap.get(text.order)
         .reduce((result, operation) => {
         let value = operation instanceof js_crdt_1.default.text.Insert
@@ -59,7 +54,6 @@ function serialise(text) {
         order: serialiseOrder(text.order),
     });
     return operations;
-    // return JSON.stringify(operations);
 }
 function create(id) {
     // return new crdt.order.VectorClock(id, {});
@@ -103,7 +97,6 @@ function deserialiesOrder(t, id, vector) {
     }
 }
 function deserialise({ order, operations }) {
-    // const {order, operations} = JSON.parse(value);
     const { t, id, vector } = order;
     return operations.reduce((text, { type, args }) => {
         const operation = (type === 'insert')
@@ -121,75 +114,16 @@ let keyup = Rx_1.Observable.create(observer => {
     editorElement.addEventListener('paste', e => { e.preventDefault(); observer.next(e); });
     editorElement.addEventListener('cut', e => { e.preventDefault(); observer.next(e); });
 });
-//  = Observable.fromEvent(editorElement, 'keydown').merge(
-//     Observable.fromEvent(editorElement, 'keyup').do((e: Ev) => e.preventDefault()).merge(
-//         Observable.fromEvent(editorElement, 'keypres').do((e: Ev) => e.preventDefault()).merge(
-//             Observable.fromEvent(editorElement, 'paste').do((e: Ev) => e.preventDefault()).merge(
-//                 Observable.fromEvent(editorElement, 'cut').do((e: Ev) => e.preventDefault()))
-//         )
-//     )
-// )
-// let keyup = new jef.stream(function(onValue){
-// });
 let host = window.document.location.host.replace(/:.*/, '');
 let port = window.document.location.port;
 let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
 const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '');
-// let messages = new jef.stream.Push();
-// let publish = new jef.stream.Push();
-// let online = new jef.stream.Push();
 let database = js_crdt_1.default.text.createFromOrderer(create(uuid()));
-// function connect(online, messages) {
-//     const ws = new WebSocket(WebSocketURL);
-//     ws.onmessage = (e) => messages.push(e);
-//     ws.onopen = (e) => online.push({online: true, ws});
-//     ws.onclose = (e) => online.push({online: false});
-// }
 // this subject queues as necessary to ensure every message is delivered
 const publish = new queueing_subject_1.QueueingSubject();
 // this method returns an object which contains two observables
 const { messages, connectionStatus } = rxjs_websockets_1.default(WebSocketURL, publish);
 connectionStatus.subscribe(e => console.log({ status: e }));
-//
-// connect(online, messages);
-//
-// function bufferUntil(streamA, streamB) {
-//   var buffer = [];
-//   var buffering = true;
-//   return new jef.stream(function (sinkValue, sinkError, sinkComplete) {
-//     streamB.on(function (value) {
-//       if (value) {
-//         buffering = true;
-//       } else {
-//         buffering = false;
-//         const copy = buffer.splice(0);
-//         buffer = [];
-//         copy.forEach(sinkValue)
-//       }
-//     }, sinkError, sinkComplete);
-//
-//     streamA.on(function (value) {
-//       if (buffering) {
-//         buffer.push(value);
-//       } else {
-//         sinkValue(value);
-//       }
-//
-//     }, sinkError, sinkComplete);
-//   });
-// }
-//
-// const connected = online.filter(({online}) => online).log('connected').pluck('ws')
-// const disconnected = online.filter(({online}) => !online).log('offline - reconnecting').timeout(5000).on(_ => connect(online, messages))
-//
-// const operations = bufferUntil(
-//   publish,
-//   online.map(({online}) => !online)
-// )
-// jef.stream.when([
-//   connected,
-//   operations,
-// ]).on(([ws, data]) => ws.send(data));
 const BACKSPACE = 8;
 const DELETE = 46;
 const ENTER = 13;
@@ -260,25 +194,26 @@ keyup
     database = database.next();
     database.apply(op);
     const data = serialise(database);
-    // const data = bench('key-serialise', serialise)(database);
-    // publish.push(data);
     publish.next(data);
 });
 messages
     .map(bench('ws-deserialise', deserialise))
-    .subscribe(e => {
-    database = database.next();
-    database = database.merge(e);
-    onFrame(render, setCursorOnUpdate)(e);
+    .bufferTime(100)
+    .subscribe(es => {
+    es.map((e) => {
+        database = database.next();
+        database = database.merge(e);
+        onFrame(render, setCursorOnUpdate)(e);
+    });
 });
 function renderer(text) {
     return js_crdt_1.default.text.renderString(text);
 }
 function onFrame(f1, f2) {
     return (arg) => {
+        const start = editorElement.selectionStart, end = editorElement.selectionEnd;
+        const shiftBy = f2(arg, start, end);
         requestAnimationFrame(() => {
-            const start = editorElement.selectionStart, end = editorElement.selectionEnd;
-            const shiftBy = f2(arg, start, end);
             f1(arg);
             editorElement.setSelectionRange(start + shiftBy, end + shiftBy);
         });
