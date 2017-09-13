@@ -205,8 +205,6 @@ chars
   .merge(cutOp)
   .merge(pasteOp)
   .subscribe((op) => {
-    console.log(op)
-
     database = database.next();
     database.apply(op);
 
@@ -215,8 +213,8 @@ chars
       : (op instanceof crdt.text.Delete
         ? (op.at)
         : 0);
+
     editorElement.value = renderer(database);
-    console.log({selection: s});
     editorElement.setSelectionRange(s,s);
 
     const data = serialise(database);
