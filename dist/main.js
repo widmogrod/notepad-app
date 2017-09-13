@@ -40,13 +40,42 @@ function shiftCursorPositionRelativeTo(text, position, diff) {
     }, { shiftBy: 0, position }).shiftBy;
 }
 let editorElement = document.getElementById('editor');
-let keyup = Rx_1.Observable.create(observer => {
-    editorElement.addEventListener('keydown', e => { observer.next(e); });
-    editorElement.addEventListener('keyup', e => { e.preventDefault(); observer.next(e); });
-    editorElement.addEventListener('keypress', e => { e.preventDefault(); observer.next(e); });
-    editorElement.addEventListener('paste', e => { e.preventDefault(); observer.next(e); });
-    editorElement.addEventListener('cut', e => { e.preventDefault(); observer.next(e); });
+// Observable.fromEvent(editorElement, 'select').subscribe(e => console.log(e))
+// Observable.fromEvent(editorElement, 'click').subscribe(e => console.log(e))
+// Observable.fromEvent(editorElement, 'focus').subscribe(e => console.log(e))
+// Stream of requestAnimationFrame ticks
+const animationFrame = Rx_1.Observable.interval(0, Rx_1.Scheduler.animationFrame);
+var keyDowns = Rx_1.Observable
+    .fromEvent(document, 'keydown')
+    .map((e) => {
+    e.preventDefault();
+    return e;
 });
+var keyUps = Rx_1.Observable
+    .fromEvent(document, 'keyup')
+    .map((e) => {
+    e.preventDefault();
+    return e;
+});
+var keyPresses = keyDowns
+    .merge(keyUps)
+    .groupBy((e) => e.keyCode)
+    .map(group => {
+    return group.distinctUntilChanged((x, y) => x.type !== y.type);
+})
+    .mergeAll();
+keyPresses.subscribe(e => console.log(e));
+let positionSelection = animationFrame
+    .map(() => p2s(({ target: editorElement })))
+    .distinctUntilChanged((x, y) => x.pos === y.pos && x.selection === y.selection);
+positionSelection.subscribe(e => console.log(e));
+let charInputsStream = keyPresses
+    .withLatestFrom(positionSelection, (e, p) => {
+    return { e: e, pos: p.pos, selection: p.selection };
+});
+// charInputsStream.subscribe(e => console.log(e))
+let cutStream = Rx_1.Observable.fromEvent(editorElement, 'cut');
+let pasteStream = Rx_1.Observable.fromEvent(editorElement, 'paste');
 let host = window.document.location.host.replace(/:.*/, '');
 let port = window.document.location.port;
 let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
@@ -60,72 +89,81 @@ connectionStatus.subscribe(e => console.log({ status: e }));
 const BACKSPACE = 8;
 const DELETE = 46;
 const ENTER = 13;
-keyup
-    .filter((e) => {
-    switch (e.type) {
-        case 'keydown':
-            return e.keyCode === BACKSPACE || e.keyCode === DELETE;
-        case 'keypress':
-            return true;
-        case 'cut':
-        case 'paste':
-            return true;
-        default:
-            return false;
-    }
-})
-    .map((e) => {
-    const selection = e.target.selectionEnd - e.target.selectionStart;
+function p2s(e) {
     const pos = e.target.selectionStart;
-    // HACK: reset selection when keypress was made
-    // without it selection do not disaperes
-    // and this makes situations like
-    // insert removes selected block all the time
-    editorElement.setSelectionRange(pos, pos);
-    return {
-        key: (e.type === 'paste') ? e.clipboardData.getData('text/plain') : e.key,
-        code: e.keyCode || e.type,
-        pos,
-        selection,
-    };
+    const selection = e.target.selectionEnd - pos;
+    return { pos, selection };
+}
+const chars = charInputsStream
+    .filter(({ e }) => {
+    return e.key.length === 1;
 })
-    .concatMap(({ key, code, pos, selection }) => {
-    if (code === ENTER) {
-        key = '\n';
-    }
-    if (code === 'cut') {
-        return Rx_1.Observable.from([
-            new js_crdt_1.default.text.Delete(pos, selection)
-        ]);
-    }
-    if (code === BACKSPACE) {
-        return Rx_1.Observable.from([
-            selection
-                ? new js_crdt_1.default.text.Delete(pos, selection)
-                : new js_crdt_1.default.text.Delete(Math.max(0, pos - 1), 1)
-        ]);
-    }
-    if (code === DELETE) {
-        return Rx_1.Observable.from([
-            selection
-                ? new js_crdt_1.default.text.Delete(pos, selection)
-                : new js_crdt_1.default.text.Delete(pos, 1)
-        ]);
-    }
-    if (selection) {
-        return Rx_1.Observable.from([
+    .map(({ e, pos, selection }) => {
+    return selection
+        ? Rx_1.Observable.from([
             new js_crdt_1.default.text.Delete(pos, selection),
-            new js_crdt_1.default.text.Insert(pos, key),
+            new js_crdt_1.default.text.Insert(pos, e.key),
+        ])
+        : Rx_1.Observable.from([
+            new js_crdt_1.default.text.Insert(pos, e.key),
         ]);
-    }
-    return Rx_1.Observable.from([
-        new js_crdt_1.default.text.Insert(pos, key),
-    ]);
 })
+    .concatAll();
+const backspaceKey = charInputsStream.filter(({ e }) => e.keyCode === BACKSPACE).map(({ pos, selection }) => {
+    return selection
+        ? new js_crdt_1.default.text.Delete(pos, selection)
+        : new js_crdt_1.default.text.Delete(pos - 1, 1);
+});
+const deleteKey = charInputsStream.filter(({ e }) => e.keyCode === DELETE).map(({ pos, selection }) => {
+    return selection
+        ? new js_crdt_1.default.text.Delete(pos, selection)
+        : new js_crdt_1.default.text.Delete(pos, 1);
+});
+const enterKey = charInputsStream.filter(({ e }) => e.keyCode === ENTER).map(({ pos, selection }) => {
+    return selection
+        ? Rx_1.Observable.from([
+            new js_crdt_1.default.text.Delete(pos, selection),
+            new js_crdt_1.default.text.Insert(pos, "\n"),
+        ])
+        : Rx_1.Observable.from([
+            new js_crdt_1.default.text.Insert(pos, "\n"),
+        ]);
+}).concatAll();
+const cutOp = cutStream.map((e) => {
+    const { pos, selection } = p2s(e);
+    return selection
+        ? Rx_1.Observable.of(new js_crdt_1.default.text.Delete(pos, selection))
+        : Rx_1.Observable.never();
+}).concatAll();
+const pasteOp = pasteStream.map((e) => {
+    const { pos, selection } = p2s(e);
+    return selection
+        ? Rx_1.Observable.from([
+            new js_crdt_1.default.text.Delete(pos, selection),
+            new js_crdt_1.default.text.Insert(pos, e.clipboardData.getData('text/plain'))
+        ])
+        : Rx_1.Observable.from([
+            new js_crdt_1.default.text.Insert(pos, e.clipboardData.getData('text/plain'))
+        ]);
+}).concatAll();
+chars
+    .merge(backspaceKey)
+    .merge(deleteKey)
+    .merge(enterKey)
+    .merge(cutOp)
+    .merge(pasteOp)
     .subscribe((op) => {
-    onFrame(render, (op, start, end) => setCursorOnKey([[op]], start, end))(op);
+    console.log(op);
     database = database.next();
     database.apply(op);
+    const s = op instanceof js_crdt_1.default.text.Insert
+        ? (op.at + op.value.length)
+        : (op instanceof js_crdt_1.default.text.Delete
+            ? (op.at)
+            : 0);
+    editorElement.value = renderer(database);
+    console.log({ selection: s });
+    editorElement.setSelectionRange(s, s);
     const data = serialiser_1.serialise(database);
     publish.next(data);
 });
@@ -144,8 +182,10 @@ function renderer(text) {
 }
 function onFrame(f1, f2) {
     return (arg) => {
-        const start = editorElement.selectionStart, end = editorElement.selectionEnd;
+        const start = editorElement.selectionStart;
+        const end = editorElement.selectionEnd;
         const shiftBy = f2(arg, start, end);
+        // editorElement.setSelectionRange(start, end);
         requestAnimationFrame(() => {
             f1(arg);
             editorElement.setSelectionRange(start + shiftBy, end + shiftBy);
@@ -167,14 +207,6 @@ function render() {
         return renderer(database);
     })();
     bench('render-set', () => editorElement.value = string)();
-}
-// type Operation = Insert | Delete;
-class Editor {
-    onUndo() { }
-    onRedo() { }
-    onDelete() { }
-    onInsert() { }
-    onSelect() { }
 }
 
 },{"./serialiser":2,"js-crdt":5,"queueing-subject":23,"rxjs-websockets":24,"rxjs/Rx":33}],2:[function(require,module,exports){
