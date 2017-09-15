@@ -59,21 +59,21 @@ messages
     const d = e.reduce((r, o) => {
         return o.reduce((r, o) => {
             if (o instanceof text_1.Insert) {
-                // return [
-                //   {retrain: o.at},
-                //   {insert: o.value}
-                // ];
                 return r.retain(o.at).insert(o.value);
             }
             else if (o instanceof text_1.Delete) {
-                return r.retain(o.at).insert(o.length);
+                return r.retain(o.at).delete(o.length);
             }
             return r;
         }, r);
     }, new QuillDelta());
     database = database.next();
     database = database.merge(e);
-    console.log(d);
-    const xx = editor.updateContents(d);
-    console.log(xx);
+    // editor.updateContents(d);
+    const dd = new QuillDelta()
+        .retain(0)
+        .insert(js_crdt_1.default.text.renderString(database));
+    const s = editor.getSelection();
+    editor.setContents(dd);
+    editor.setSelection(s);
 });

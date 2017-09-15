@@ -18,7 +18,7 @@ let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
 
 const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '')
 
-let database = crdt.text.createFromOrderer(crdt.order.createVectorClock2(uuid()));
+let database = crdt.text.createFromOrderer<Operation>(crdt.order.createVectorClock2(uuid()));
 
 // this subject queues as necessary to ensure every message is delivered
 const publish = new QueueingSubject()
@@ -83,20 +83,14 @@ import * as QuillDelta from 'quill-delta'
 messages
   .map(deserialise)
   .subscribe(e => {
-    const d = e.reduce((r: QuillDelta, o: Operation[]) => {
-      return o.reduce((r: QuillDelta, o: Operation) => {
-        if (o instanceof Insert) {
-          return r.retain(o.at).insert(o.value)
-        } else if (o instanceof Delete) {
-          return r.retain(o.at).insert(o.length)
-        }
-        return r;
-
-      }, r);
-    }, new QuillDelta());
-
     database = database.next();
     database = database.merge(e);
 
-    editor.updateContents(d);
+    const dd = new QuillDelta()
+      .retain(0)
+      .insert(crdt.text.renderString(database))
+
+    const s = editor.getSelection()
+    editor.setContents(dd);
+    editor.setSelection(s)
   });
