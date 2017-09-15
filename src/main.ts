@@ -1,12 +1,12 @@
 import crdt from 'js-crdt';
-import {Insert, Delete} from 'js-crdt/build/text';
+import {Insert, Delete, Operation} from 'js-crdt/build/text';
 import {Observable, Observer, Scheduler} from 'rxjs/Rx';
 import "rxjs/add/operator/map";
 import "rxjs/add/operator/retryWhen";
 import "rxjs/add/operator/delay";
 import { QueueingSubject } from 'queueing-subject';
 import websocketConnect from 'rxjs-websockets';
-import {serialise, deserialise} from './serialiser';
+import {serialiseOperations, deserialiseOperations} from './serialiser';
 
 function uuid() {
   const array = new Uint8Array(2);
@@ -20,7 +20,7 @@ let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
 
 const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '')
 
-let database = crdt.text.createFromOrderer<Operation>(crdt.order.createVectorClock2(uuid()));
+let database = crdt.text.createFromOrderer(crdt.order.createVectorClock(uuid()));
 
 // this subject queues as necessary to ensure every message is delivered
 const publish = new QueueingSubject()
@@ -49,10 +49,13 @@ var editor = new Quill('#editor', {
   },
   theme: 'snow'
 });
+editor.focus();
 
 
-type Operation = Insert | Delete;
-type OperationReducer = {pos: number, op: Operation | null};
+interface OperationReducer {
+  pos: number;
+  op: Operation;
+}
 
 editor.on('text-change', function(delta: Delta, oldDelta: Delta, source: QSource) {
   if (source !== "user") {
@@ -73,9 +76,7 @@ editor.on('text-change', function(delta: Delta, oldDelta: Delta, source: QSource
 
   if (r.op) {
     database = database.next();
-    database.apply(r.op);
-
-    const data = serialise(database);
+    const data = serialiseOperations(database.apply(r.op));
     publish.next(data);
   }
 });
@@ -83,11 +84,13 @@ editor.on('text-change', function(delta: Delta, oldDelta: Delta, source: QSource
 import * as QuillDelta from 'quill-delta'
 
 messages
-  .retryWhen(errors => errors.delay(1000))
-  .map(deserialise)
-  .subscribe(e => {
+  .retryWhen(errors => errors.delay(10000))
+  .map(deserialiseOperations)
+  .subscribe(oo => {
+    console.log(oo)
     database = database.next();
-    database = database.merge(e);
+    database = database.mergeOperations(oo);
+    console.log(database);
 
     const dd = new QuillDelta()
       .retain(0)

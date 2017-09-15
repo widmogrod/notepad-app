@@ -17,7 +17,7 @@ let host = window.document.location.host.replace(/:.*/, '');
 let port = window.document.location.port;
 let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
 const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '');
-let database = js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock2(uuid()));
+let database = js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(uuid()));
 // this subject queues as necessary to ensure every message is delivered
 const publish = new queueing_subject_1.QueueingSubject();
 // this method returns an object which contains two observables
@@ -31,6 +31,7 @@ var editor = new Quill('#editor', {
     },
     theme: 'snow'
 });
+editor.focus();
 editor.on('text-change', function (delta, oldDelta, source) {
     if (source !== "user") {
         return;
@@ -49,18 +50,19 @@ editor.on('text-change', function (delta, oldDelta, source) {
     }, { pos: 0, op: null });
     if (r.op) {
         database = database.next();
-        database.apply(r.op);
-        const data = serialiser_1.serialise(database);
+        const data = serialiser_1.serialiseOperations(database.apply(r.op));
         publish.next(data);
     }
 });
 const QuillDelta = require("quill-delta");
 messages
-    .retryWhen(errors => errors.delay(1000))
-    .map(serialiser_1.deserialise)
-    .subscribe(e => {
+    .retryWhen(errors => errors.delay(10000))
+    .map(serialiser_1.deserialiseOperations)
+    .subscribe(oo => {
+    console.log(oo);
     database = database.next();
-    database = database.merge(e);
+    database = database.mergeOperations(oo);
+    console.log(database);
     const dd = new QuillDelta()
         .retain(0)
         .insert(js_crdt_1.default.text.renderString(database));
@@ -69,12 +71,12 @@ messages
     editor.setSelection(s);
 });
 
-},{"./serialiser":2,"js-crdt":14,"queueing-subject":32,"quill":35,"quill-delta":33,"rxjs-websockets":36,"rxjs/add/operator/delay":48,"rxjs/add/operator/map":49,"rxjs/add/operator/retryWhen":50}],2:[function(require,module,exports){
+},{"./serialiser":2,"js-crdt":14,"queueing-subject":30,"quill":33,"quill-delta":31,"rxjs-websockets":34,"rxjs/add/operator/delay":46,"rxjs/add/operator/map":47,"rxjs/add/operator/retryWhen":48}],2:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const js_crdt_1 = require("js-crdt");
-function serialiseOperations(order, operations) {
-    return operations.reduce((result, operation) => {
+function serialiseOperations(oo) {
+    return oo.operations.reduce((result, operation) => {
         let value = operation instanceof js_crdt_1.default.text.Insert
             ? { type: 'insert', args: [operation.at, operation.value] }
             : { type: 'delete', args: [operation.at, operation.length] };
@@ -82,24 +84,12 @@ function serialiseOperations(order, operations) {
         return result;
     }, {
         operations: [],
-        order: serialiseOrder(order),
+        order: serialiseOrder(oo.order),
     });
 }
 exports.serialiseOperations = serialiseOperations;
-function serialise(text) {
-    const operations = text.setMap.get(text.order);
-    return serialiseOperations(text.order, operations);
-}
-exports.serialise = serialise;
 function serialiseOrder(order) {
     if (order instanceof js_crdt_1.default.order.VectorClock) {
-        return {
-            t: 'v1',
-            id: order.id,
-            vector: order.vector,
-        };
-    }
-    else if (order instanceof js_crdt_1.default.order.VectorClock2) {
         function serialiseId(id) {
             return {
                 node: id.node,
@@ -118,26 +108,27 @@ function serialiseOrder(order) {
 }
 function deserialiesOrder(t, id, vector) {
     switch (t) {
-        case 'v1':
-            return new js_crdt_1.default.order.VectorClock(id, vector);
         case 'v2':
             const set = new js_crdt_1.default.structures.SortedSetArray(new js_crdt_1.default.structures.NaiveArrayList([]));
-            return new js_crdt_1.default.order.VectorClock2(new js_crdt_1.default.order.Id(id.node, id.version), vector.reduce((set, id) => {
+            return new js_crdt_1.default.order.VectorClock(new js_crdt_1.default.order.Id(id.node, id.version), vector.reduce((set, id) => {
                 return set.add(new js_crdt_1.default.order.Id(id.node, id.version)).result;
             }, set));
     }
 }
-function deserialise({ order, operations }) {
+function deserialiseOperations({ order, operations }) {
     const { t, id, vector } = order;
-    return operations.reduce((text, { type, args }) => {
-        const operation = (type === 'insert')
-            ? new js_crdt_1.default.text.Insert(args[0], args[1])
-            : new js_crdt_1.default.text.Delete(args[0], args[1]);
-        text.apply(operation);
-        return text;
-    }, js_crdt_1.default.text.createFromOrderer(deserialiesOrder(t, id, vector)));
+    return {
+        order: deserialiesOrder(t, id, vector),
+        operations: operations.reduce((operations, { type, args }) => {
+            const operation = (type === 'insert')
+                ? new js_crdt_1.default.text.Insert(args[0], args[1])
+                : new js_crdt_1.default.text.Delete(args[0], args[1]);
+            operations.push(operation);
+            return operations;
+        }, []),
+    };
 }
-exports.deserialise = deserialise;
+exports.deserialiseOperations = deserialiseOperations;
 
 },{"js-crdt":14}],3:[function(require,module,exports){
 'use strict'
@@ -3077,13 +3068,23 @@ function concat(a, b) {
     return a.concat(b);
 }
 exports.concat = concat;
+function between(value, min, max) {
+    if (value <= min) {
+        return false;
+    }
+    else if (value >= max) {
+        return false;
+    }
+    return true;
+}
+exports.between = between;
 function axioms(assert, a, b, c) {
     // commutative   a + c = c + a                i.e: 1 + 2 = 2 + 1
-    assert(equal(merge(a, b), merge(b, a)), 'is not commutative');
+    assert(equal(merge(a, b), merge(b, a)), "is not commutative");
     // associative   a + (b + c) = (a + b) + c    i.e: 1 + (2 + 3) = (1 + 2) + 3
-    assert(equal(merge(a, merge(b, c)), merge(merge(a, b), c)), 'is not associative');
+    assert(equal(merge(a, merge(b, c)), merge(merge(a, b), c)), "is not associative");
     // idempotent    f(f(a)) = f(a)               i.e: ||a|| = |a|
-    assert(equal(merge(a, a), a), 'is not idempotent');
+    assert(equal(merge(a, a), a), "is not idempotent");
 }
 exports.axioms = axioms;
 
@@ -3112,104 +3113,39 @@ exports.Increment = Increment;
 Object.defineProperty(exports, "__esModule", { value: true });
 const functions = require("./functions");
 const increment = require("./increment");
-const utils = require("./utils");
 const order = require("./order");
-const text = require("./text");
 const structures = require("./structures");
+const text = require("./text");
 exports.default = {
-    text,
-    order,
-    utils,
     functions,
     increment,
-    structures
+    order,
+    structures,
+    text,
 };
 
-},{"./functions":12,"./increment":13,"./order":16,"./structures":19,"./text":27,"./utils":31}],15:[function(require,module,exports){
+},{"./functions":12,"./increment":13,"./order":16,"./structures":18,"./text":26}],15:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-const vector_clock2_1 = require("./vector-clock2");
-const sorted_set_array_1 = require("../structures/sorted-set-array");
 const naive_array_list_1 = require("../structures/naive-array-list");
+const sorted_set_array_1 = require("../structures/sorted-set-array");
+const vector_clock_1 = require("./vector-clock");
 const emptyVector = new sorted_set_array_1.SortedSetArray(new naive_array_list_1.NaiveArrayList([]));
-function createVectorClock2(id, version, vector) {
-    return new vector_clock2_1.VectorClock2(new vector_clock2_1.Id(id, version ? version : 0), vector ? vector : emptyVector);
+function createVectorClock(id, version, vector) {
+    return new vector_clock_1.VectorClock(new vector_clock_1.Id(id, version ? version : 0), vector ? vector : emptyVector);
 }
-exports.createVectorClock2 = createVectorClock2;
+exports.createVectorClock = createVectorClock;
 
-},{"../structures/naive-array-list":20,"../structures/sorted-set-array":24,"./vector-clock2":18}],16:[function(require,module,exports){
+},{"../structures/naive-array-list":19,"../structures/sorted-set-array":23,"./vector-clock":17}],16:[function(require,module,exports){
 "use strict";
 function __export(m) {
     for (var p in m) if (!exports.hasOwnProperty(p)) exports[p] = m[p];
 }
 Object.defineProperty(exports, "__esModule", { value: true });
 __export(require("./vector-clock"));
-__export(require("./vector-clock2"));
 __export(require("./factory"));
 
-},{"./factory":15,"./vector-clock":17,"./vector-clock2":18}],17:[function(require,module,exports){
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const utils_1 = require("../utils");
-class VectorClock {
-    constructor(id, vector) {
-        this.id = id;
-        this.vector = vector;
-        vector = utils_1.clone(vector);
-        vector[id] = vector[id] || 0;
-        this.id = id;
-        this.vector = vector;
-    }
-    next() {
-        const vector = utils_1.clone(this.vector);
-        ++vector[this.id];
-        return new VectorClock(this.id, vector);
-    }
-    merge(b) {
-        const vector = utils_1.union(Object.keys(this.vector), Object.keys(b.vector)).reduce((vector, key) => {
-            vector[key] = Math.max(this.vector[key] || 0, b.vector[key] || 0);
-            return vector;
-        }, {});
-        return new VectorClock(this.id, vector);
-    }
-    equal(b) {
-        return this.compare(b) === 0;
-    }
-    compare(b) {
-        const position = utils_1.common(this.vector, b.vector)
-            .reduce((result, key) => {
-            return result + (this.vector[key] - b.vector[key]);
-        }, 0);
-        if (position !== 0) {
-            return position;
-        }
-        const difA = utils_1.diff(this.vector, b.vector).length;
-        const difB = utils_1.diff(b.vector, this.vector).length;
-        const dif = difA - difB;
-        if (dif !== 0) {
-            return dif;
-        }
-        const tipPosition = this.vector[this.id] - b.vector[b.id];
-        if (tipPosition !== 0) {
-            return tipPosition;
-        }
-        const ha = b.vector.hasOwnProperty(this.id);
-        const hb = this.vector.hasOwnProperty(b.id);
-        if (!ha && !hb) {
-            return this.id < b.id ? -1 : 1;
-        }
-        else if (ha && !hb) {
-            return -1;
-        }
-        else if (hb && !ha) {
-            return 1;
-        }
-        return 0;
-    }
-}
-exports.VectorClock = VectorClock;
-
-},{"../utils":31}],18:[function(require,module,exports){
+},{"./factory":15,"./vector-clock":17}],17:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Id {
@@ -3230,11 +3166,12 @@ class Id {
     }
 }
 exports.Id = Id;
-class VectorClock2 {
+class VectorClock {
     constructor(id, vector) {
         this.id = id;
         this.vector = vector;
         this.id = id;
+        /* tslint:disable: prefer-const */
         let { result, value } = vector.add(id);
         if (result === vector) {
             if (id.version > value.version) {
@@ -3244,11 +3181,11 @@ class VectorClock2 {
         this.vector = result;
     }
     toString() {
-        const a = this.vector.reduce((r, i) => r + i.toString(), '');
-        return `VectorClock2(${this.id},${a})`;
+        const a = this.vector.reduce((r, i) => r + i.toString(), "");
+        return `VectorClock(${this.id},${a})`;
     }
     next() {
-        return new VectorClock2(this.id.next(), this.vector.remove(this.id).result.add(this.id.next()).result);
+        return new VectorClock(this.id.next(), this.vector.remove(this.id).result.add(this.id.next()).result);
     }
     equal(b) {
         if (this.vector.size() !== b.vector.size()) {
@@ -3292,8 +3229,8 @@ class VectorClock2 {
             everyLEQ = everyLEQ ? rA.version <= rB.version : everyLEQ;
             return { everyLEQ, anyLT };
         }, {
-            everyLEQ: true,
             anyLT: false,
+            everyLEQ: true,
         });
         return everyLEQ && (anyLT || (this.vector.size() < b.vector.size()));
     }
@@ -3310,12 +3247,12 @@ class VectorClock2 {
             }
             return vector.add(item).result;
         }, this.vector.mempty());
-        return new VectorClock2(this.id, vector.union(b.vector));
+        return new VectorClock(this.id, vector.union(b.vector));
     }
 }
-exports.VectorClock2 = VectorClock2;
+exports.VectorClock = VectorClock;
 
-},{}],19:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 "use strict";
 function __export(m) {
     for (var p in m) if (!exports.hasOwnProperty(p)) exports[p] = m[p];
@@ -3324,10 +3261,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 __export(require("./naive-array-list"));
 __export(require("./naive-immutable-map"));
 __export(require("./set-axioms"));
-__export(require("./set-map"));
+__export(require("./ordered-map"));
 __export(require("./sorted-set-array"));
 
-},{"./naive-array-list":20,"./naive-immutable-map":21,"./set-axioms":22,"./set-map":23,"./sorted-set-array":24}],20:[function(require,module,exports){
+},{"./naive-array-list":19,"./naive-immutable-map":20,"./ordered-map":21,"./set-axioms":22,"./sorted-set-array":23}],19:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class NaiveArrayList {
@@ -3359,7 +3296,7 @@ class NaiveArrayList {
 }
 exports.NaiveArrayList = NaiveArrayList;
 
-},{}],21:[function(require,module,exports){
+},{}],20:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class NaiveImmutableMap {
@@ -3383,32 +3320,7 @@ class NaiveImmutableMap {
 }
 exports.NaiveImmutableMap = NaiveImmutableMap;
 
-},{}],22:[function(require,module,exports){
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-function equal(a, b) {
-    return a.equal(b);
-}
-function union(a, b) {
-    return a.union(b);
-}
-function intersect(a, b) {
-    return a.intersect(b);
-}
-function difference(a, b) {
-    return a.difference(b);
-}
-function axioms(assert, a, b, c) {
-    assert(equal(union(union(a, b), c), union(a, union(b, c))), 'associative union');
-    assert(equal(intersect(intersect(a, b), c), intersect(a, intersect(b, c))), 'associative intersect');
-    assert(equal(union(a, intersect(b, c)), union(intersect(a, b), intersect(a, c))), 'union distributes over intersection');
-    assert(equal(intersect(a, union(b, c)), intersect(union(a, b), union(a, c))), 'intersection distributes over union');
-    assert(equal(difference(a, union(b, c)), intersect(difference(a, b), difference(a, c))), 'De Morgan\'s law for union');
-    assert(equal(difference(a, intersect(b, c)), union(difference(a, b), difference(a, c))), 'De Morgan\'s law for intersect');
-}
-exports.axioms = axioms;
-
-},{}],23:[function(require,module,exports){
+},{}],21:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Indexed {
@@ -3421,14 +3333,14 @@ class Indexed {
     }
 }
 exports.Indexed = Indexed;
-class SetMap {
+class OrderedMap {
     constructor(keys, values) {
         this.keys = keys;
         this.values = values;
     }
     set(key, value) {
         const result = this.keys.add(new Indexed(key, this.keys.size()));
-        return new SetMap(result.result, this.values.set(result.value.index, value));
+        return new OrderedMap(result.result, this.values.set(result.value.index, value));
     }
     get(key) {
         const result = this.keys.add(new Indexed(key, this.keys.size()));
@@ -3448,9 +3360,34 @@ class SetMap {
         }, aggregator);
     }
 }
-exports.SetMap = SetMap;
+exports.OrderedMap = OrderedMap;
 
-},{}],24:[function(require,module,exports){
+},{}],22:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+function equal(a, b) {
+    return a.equal(b);
+}
+function union(a, b) {
+    return a.union(b);
+}
+function intersect(a, b) {
+    return a.intersect(b);
+}
+function difference(a, b) {
+    return a.difference(b);
+}
+function axioms(assert, a, b, c) {
+    assert(equal(union(union(a, b), c), union(a, union(b, c))), "associative union");
+    assert(equal(intersect(intersect(a, b), c), intersect(a, intersect(b, c))), "associative intersect");
+    assert(equal(union(a, intersect(b, c)), union(intersect(a, b), intersect(a, c))), "union distributes over intersection");
+    assert(equal(intersect(a, union(b, c)), intersect(union(a, b), union(a, c))), "intersection distributes over union");
+    assert(equal(difference(a, union(b, c)), intersect(difference(a, b), difference(a, c))), "De Morgan's law for union");
+    assert(equal(difference(a, intersect(b, c)), union(difference(a, b), difference(a, c))), "De Morgan's law for intersect");
+}
+exports.axioms = axioms;
+
+},{}],23:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function divide(lower, upper, elements, item, onNew, onExists) {
@@ -3458,7 +3395,7 @@ function divide(lower, upper, elements, item, onNew, onExists) {
     if (step < 1) {
         return onNew(item, elements, lower);
     }
-    const half = step / 2 | 0;
+    const half = Math.trunc(step / 2);
     const idx = lower + half;
     const elm = elements.get(idx);
     const cmp = elm.compare(item);
@@ -3513,7 +3450,7 @@ class SortedSetArray {
         }, this.mempty());
     }
     equal(b) {
-        if (this.size() != b.size()) {
+        if (this.size() !== b.size()) {
             return false;
         }
         // TODO reduce is not optimal, because it iterates till the end of set
@@ -3527,7 +3464,7 @@ class SortedSetArray {
 }
 exports.SortedSetArray = SortedSetArray;
 
-},{}],25:[function(require,module,exports){
+},{}],24:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Delete {
@@ -3540,20 +3477,20 @@ class Delete {
 }
 exports.Delete = Delete;
 
-},{}],26:[function(require,module,exports){
+},{}],25:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-const text_1 = require("./text");
-const set_map_1 = require("../structures/set-map");
-const naive_immutable_map_1 = require("../structures/naive-immutable-map");
-const sorted_set_array_1 = require("../structures/sorted-set-array");
 const naive_array_list_1 = require("../structures/naive-array-list");
+const naive_immutable_map_1 = require("../structures/naive-immutable-map");
+const ordered_map_1 = require("../structures/ordered-map");
+const sorted_set_array_1 = require("../structures/sorted-set-array");
+const text_1 = require("./text");
 function createFromOrderer(order) {
-    return new text_1.Text(order, new set_map_1.SetMap(new sorted_set_array_1.SortedSetArray(new naive_array_list_1.NaiveArrayList([])), new naive_immutable_map_1.NaiveImmutableMap()));
+    return new text_1.Text(order, new ordered_map_1.OrderedMap(new sorted_set_array_1.SortedSetArray(new naive_array_list_1.NaiveArrayList([])), new naive_immutable_map_1.NaiveImmutableMap()));
 }
 exports.createFromOrderer = createFromOrderer;
 
-},{"../structures/naive-array-list":20,"../structures/naive-immutable-map":21,"../structures/set-map":23,"../structures/sorted-set-array":24,"./text":29}],27:[function(require,module,exports){
+},{"../structures/naive-array-list":19,"../structures/naive-immutable-map":20,"../structures/ordered-map":21,"../structures/sorted-set-array":23,"./text":28}],26:[function(require,module,exports){
 "use strict";
 function __export(m) {
     for (var p in m) if (!exports.hasOwnProperty(p)) exports[p] = m[p];
@@ -3565,7 +3502,7 @@ __export(require("./text"));
 __export(require("./utils"));
 __export(require("./factory"));
 
-},{"./delete":25,"./factory":26,"./insert":28,"./text":29,"./utils":30}],28:[function(require,module,exports){
+},{"./delete":24,"./factory":25,"./insert":27,"./text":28,"./utils":29}],27:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Insert {
@@ -3578,7 +3515,7 @@ class Insert {
 }
 exports.Insert = Insert;
 
-},{}],29:[function(require,module,exports){
+},{}],28:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const functions_1 = require("../functions");
@@ -3591,28 +3528,35 @@ class Text {
         return new Text(this.order.next(), this.setMap);
     }
     apply(operation) {
-        let value = this.setMap.get(this.order);
-        if (!value) {
-            value = [];
+        let operations = this.setMap.get(this.order);
+        if (!operations) {
+            operations = [];
         }
-        value.push(operation);
-        this.setMap = this.setMap.set(this.order, value);
+        operations.push(operation);
+        this.setMap = this.setMap.set(this.order, operations);
+        return {
+            operations,
+            order: this.order,
+        };
+    }
+    mergeOperations(o) {
+        return new Text(functions_1.merge(this.order, o.order), this.setMap.set(o.order, o.operations));
     }
     merge(b) {
-        return new Text(functions_1.merge(this.order, b.order), this.setMap.merge(b.setMap));
+        return new Text(functions_1.merge(this.order, b.order), functions_1.merge(this.setMap, b.setMap));
     }
     equal(b) {
         return functions_1.equal(this.order, b.order);
     }
     reduce(fn, accumulator) {
         return this.setMap.reduce((accumulator, operations, order) => {
-            return fn(accumulator, operations, order);
+            return fn(accumulator, { operations, order });
         }, accumulator);
     }
 }
 exports.Text = Text;
 
-},{"../functions":12}],30:[function(require,module,exports){
+},{"../functions":12}],29:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const insert_1 = require("./insert");
@@ -3621,52 +3565,11 @@ function snapshot(text) {
 }
 exports.snapshot = snapshot;
 function toArray(text) {
-    return text.reduce((accumulator, operations) => {
-        return operations.reduce(operationToArray, accumulator);
+    return text.reduce((accumulator, item) => {
+        return item.operations.reduce(operationToArray, accumulator);
     }, []);
 }
 exports.toArray = toArray;
-const utils_1 = require("../utils");
-// TODO make it nicer
-function operationToArray(data, op) {
-    if (op instanceof insert_1.Insert) {
-        let copy = data.slice(0);
-        copy = utils_1.ensureArrayLength(copy, op.at);
-        copy.splice(op.at, 0, ...op.value.split(''));
-        return copy;
-    }
-    else {
-        if (op.at < 0)
-            return data;
-        let copy = data.slice(0);
-        copy = utils_1.ensureArrayLength(copy, op.at);
-        copy.splice(op.at, op.length);
-        return copy;
-    }
-}
-exports.operationToArray = operationToArray;
-function toString(value) {
-    return value.join('');
-}
-exports.toString = toString;
-function renderString(text) {
-    return toString(toArray(text));
-}
-exports.renderString = renderString;
-
-},{"../utils":31,"./insert":28}],31:[function(require,module,exports){
-'use strict';
-Object.defineProperty(exports, "__esModule", { value: true });
-function between(value, min, max) {
-    if (value <= min) {
-        return false;
-    }
-    else if (value >= max) {
-        return false;
-    }
-    return true;
-}
-exports.between = between;
 function ensureArrayLength(array, len) {
     if (array.length < len) {
         array.length = len;
@@ -3674,51 +3577,35 @@ function ensureArrayLength(array, len) {
     return array;
 }
 exports.ensureArrayLength = ensureArrayLength;
-function sortNumbers(a, b) {
-    return a - b;
-}
-exports.sortNumbers = sortNumbers;
-function clone(obj) {
-    var target = {};
-    for (const i in obj) {
-        if (obj.hasOwnProperty(i)) {
-            target[i] = obj[i];
-        }
+// TODO make it nicer
+function operationToArray(data, op) {
+    if (op instanceof insert_1.Insert) {
+        let copy = data.slice(0);
+        copy = ensureArrayLength(copy, op.at);
+        copy.splice(op.at, 0, ...op.value.split(""));
+        return copy;
     }
-    return target;
-}
-exports.clone = clone;
-function keyToMap(r, i) {
-    r[i] = true;
-    return r;
-}
-;
-function union(a, b) {
-    a = a.reduce(keyToMap, {});
-    b = b.reduce(keyToMap, a);
-    return Object.keys(b);
-}
-exports.union = union;
-function common(a, b) {
-    return Object.keys(a).reduce((r, k) => {
-        if (b.hasOwnProperty(k)) {
-            r.push(k);
+    else {
+        if (op.at < 0) {
+            return data;
         }
-        return r;
-    }, []).sort();
+        let copy = data.slice(0);
+        copy = ensureArrayLength(copy, op.at);
+        copy.splice(op.at, op.length);
+        return copy;
+    }
 }
-exports.common = common;
-function diff(a, b) {
-    return Object.keys(a).reduce((r, k) => {
-        if (!b.hasOwnProperty(k)) {
-            r.push(k);
-        }
-        return r;
-    }, []);
+exports.operationToArray = operationToArray;
+function toString(value) {
+    return value.join("");
 }
-exports.diff = diff;
+exports.toString = toString;
+function renderString(text) {
+    return toString(toArray(text));
+}
+exports.renderString = renderString;
 
-},{}],32:[function(require,module,exports){
+},{"./insert":27}],30:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -3752,7 +3639,7 @@ var QueueingSubject = (function (_super) {
 }(Subject_1.Subject));
 exports.QueueingSubject = QueueingSubject;
 
-},{"rxjs/Subject":44}],33:[function(require,module,exports){
+},{"rxjs/Subject":42}],31:[function(require,module,exports){
 var diff = require('fast-diff');
 var equal = require('deep-equal');
 var extend = require('extend');
@@ -4079,7 +3966,7 @@ Delta.prototype.transformPosition = function (index, priority) {
 
 module.exports = Delta;
 
-},{"./op":34,"deep-equal":5,"extend":8,"fast-diff":9}],34:[function(require,module,exports){
+},{"./op":32,"deep-equal":5,"extend":8,"fast-diff":9}],32:[function(require,module,exports){
 var equal = require('deep-equal');
 var extend = require('extend');
 
@@ -4220,7 +4107,7 @@ Iterator.prototype.peekType = function () {
 
 module.exports = lib;
 
-},{"deep-equal":5,"extend":8}],35:[function(require,module,exports){
+},{"deep-equal":5,"extend":8}],33:[function(require,module,exports){
 (function (Buffer){
 /*!
  * Quill Editor v1.3.2
@@ -15517,7 +15404,7 @@ module.exports = __webpack_require__(63);
 /******/ ]);
 });
 }).call(this,require("buffer").Buffer)
-},{"buffer":4}],36:[function(require,module,exports){
+},{"buffer":4}],34:[function(require,module,exports){
 "use strict";
 var Observable_1 = require("rxjs/Observable");
 var BehaviorSubject_1 = require("rxjs/BehaviorSubject");
@@ -15573,7 +15460,7 @@ function connect(url, input, websocketFactory, jsonParse) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.default = connect;
 
-},{"rxjs/BehaviorSubject":37,"rxjs/Observable":40}],37:[function(require,module,exports){
+},{"rxjs/BehaviorSubject":35,"rxjs/Observable":38}],35:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -15623,7 +15510,7 @@ var BehaviorSubject = (function (_super) {
 }(Subject_1.Subject));
 exports.BehaviorSubject = BehaviorSubject;
 
-},{"./Subject":44,"./util/ObjectUnsubscribedError":61}],38:[function(require,module,exports){
+},{"./Subject":42,"./util/ObjectUnsubscribedError":59}],36:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -15660,7 +15547,7 @@ var InnerSubscriber = (function (_super) {
 }(Subscriber_1.Subscriber));
 exports.InnerSubscriber = InnerSubscriber;
 
-},{"./Subscriber":46}],39:[function(require,module,exports){
+},{"./Subscriber":44}],37:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('./Observable');
 /**
@@ -15788,7 +15675,7 @@ var Notification = (function () {
 }());
 exports.Notification = Notification;
 
-},{"./Observable":40}],40:[function(require,module,exports){
+},{"./Observable":38}],38:[function(require,module,exports){
 "use strict";
 var root_1 = require('./util/root');
 var toSubscriber_1 = require('./util/toSubscriber');
@@ -16045,7 +15932,7 @@ var Observable = (function () {
 }());
 exports.Observable = Observable;
 
-},{"./symbol/observable":59,"./util/root":70,"./util/toSubscriber":72}],41:[function(require,module,exports){
+},{"./symbol/observable":57,"./util/root":68,"./util/toSubscriber":70}],39:[function(require,module,exports){
 "use strict";
 exports.empty = {
     closed: true,
@@ -16054,7 +15941,7 @@ exports.empty = {
     complete: function () { }
 };
 
-},{}],42:[function(require,module,exports){
+},{}],40:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -16085,7 +15972,7 @@ var OuterSubscriber = (function (_super) {
 }(Subscriber_1.Subscriber));
 exports.OuterSubscriber = OuterSubscriber;
 
-},{"./Subscriber":46}],43:[function(require,module,exports){
+},{"./Subscriber":44}],41:[function(require,module,exports){
 "use strict";
 /**
  * An execution context and a data structure to order tasks and schedule their
@@ -16135,7 +16022,7 @@ var Scheduler = (function () {
 }());
 exports.Scheduler = Scheduler;
 
-},{}],44:[function(require,module,exports){
+},{}],42:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -16304,7 +16191,7 @@ var AnonymousSubject = (function (_super) {
 }(Subject));
 exports.AnonymousSubject = AnonymousSubject;
 
-},{"./Observable":40,"./SubjectSubscription":45,"./Subscriber":46,"./Subscription":47,"./symbol/rxSubscriber":60,"./util/ObjectUnsubscribedError":61}],45:[function(require,module,exports){
+},{"./Observable":38,"./SubjectSubscription":43,"./Subscriber":44,"./Subscription":45,"./symbol/rxSubscriber":58,"./util/ObjectUnsubscribedError":59}],43:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -16345,7 +16232,7 @@ var SubjectSubscription = (function (_super) {
 }(Subscription_1.Subscription));
 exports.SubjectSubscription = SubjectSubscription;
 
-},{"./Subscription":47}],46:[function(require,module,exports){
+},{"./Subscription":45}],44:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -16610,7 +16497,7 @@ var SafeSubscriber = (function (_super) {
     return SafeSubscriber;
 }(Subscriber));
 
-},{"./Observer":41,"./Subscription":47,"./symbol/rxSubscriber":60,"./util/isFunction":67}],47:[function(require,module,exports){
+},{"./Observer":39,"./Subscription":45,"./symbol/rxSubscriber":58,"./util/isFunction":65}],45:[function(require,module,exports){
 "use strict";
 var isArray_1 = require('./util/isArray');
 var isObject_1 = require('./util/isObject');
@@ -16804,25 +16691,25 @@ function flattenUnsubscriptionErrors(errors) {
     return errors.reduce(function (errs, err) { return errs.concat((err instanceof UnsubscriptionError_1.UnsubscriptionError) ? err.errors : err); }, []);
 }
 
-},{"./util/UnsubscriptionError":62,"./util/errorObject":63,"./util/isArray":64,"./util/isFunction":67,"./util/isObject":68,"./util/tryCatch":73}],48:[function(require,module,exports){
+},{"./util/UnsubscriptionError":60,"./util/errorObject":61,"./util/isArray":62,"./util/isFunction":65,"./util/isObject":66,"./util/tryCatch":71}],46:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('../../Observable');
 var delay_1 = require('../../operator/delay');
 Observable_1.Observable.prototype.delay = delay_1.delay;
 
-},{"../../Observable":40,"../../operator/delay":51}],49:[function(require,module,exports){
+},{"../../Observable":38,"../../operator/delay":49}],47:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('../../Observable');
 var map_1 = require('../../operator/map');
 Observable_1.Observable.prototype.map = map_1.map;
 
-},{"../../Observable":40,"../../operator/map":52}],50:[function(require,module,exports){
+},{"../../Observable":38,"../../operator/map":50}],48:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('../../Observable');
 var retryWhen_1 = require('../../operator/retryWhen');
 Observable_1.Observable.prototype.retryWhen = retryWhen_1.retryWhen;
 
-},{"../../Observable":40,"../../operator/retryWhen":53}],51:[function(require,module,exports){
+},{"../../Observable":38,"../../operator/retryWhen":51}],49:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -16958,7 +16845,7 @@ var DelayMessage = (function () {
     return DelayMessage;
 }());
 
-},{"../Notification":39,"../Subscriber":46,"../scheduler/async":57,"../util/isDate":66}],52:[function(require,module,exports){
+},{"../Notification":37,"../Subscriber":44,"../scheduler/async":55,"../util/isDate":64}],50:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17046,7 +16933,7 @@ var MapSubscriber = (function (_super) {
     return MapSubscriber;
 }(Subscriber_1.Subscriber));
 
-},{"../Subscriber":46}],53:[function(require,module,exports){
+},{"../Subscriber":44}],51:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17148,7 +17035,7 @@ var RetryWhenSubscriber = (function (_super) {
     return RetryWhenSubscriber;
 }(OuterSubscriber_1.OuterSubscriber));
 
-},{"../OuterSubscriber":42,"../Subject":44,"../util/errorObject":63,"../util/subscribeToResult":71,"../util/tryCatch":73}],54:[function(require,module,exports){
+},{"../OuterSubscriber":40,"../Subject":42,"../util/errorObject":61,"../util/subscribeToResult":69,"../util/tryCatch":71}],52:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17193,7 +17080,7 @@ var Action = (function (_super) {
 }(Subscription_1.Subscription));
 exports.Action = Action;
 
-},{"../Subscription":47}],55:[function(require,module,exports){
+},{"../Subscription":45}],53:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17336,7 +17223,7 @@ var AsyncAction = (function (_super) {
 }(Action_1.Action));
 exports.AsyncAction = AsyncAction;
 
-},{"../util/root":70,"./Action":54}],56:[function(require,module,exports){
+},{"../util/root":68,"./Action":52}],54:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17388,7 +17275,7 @@ var AsyncScheduler = (function (_super) {
 }(Scheduler_1.Scheduler));
 exports.AsyncScheduler = AsyncScheduler;
 
-},{"../Scheduler":43}],57:[function(require,module,exports){
+},{"../Scheduler":41}],55:[function(require,module,exports){
 "use strict";
 var AsyncAction_1 = require('./AsyncAction');
 var AsyncScheduler_1 = require('./AsyncScheduler');
@@ -17436,7 +17323,7 @@ var AsyncScheduler_1 = require('./AsyncScheduler');
  */
 exports.async = new AsyncScheduler_1.AsyncScheduler(AsyncAction_1.AsyncAction);
 
-},{"./AsyncAction":55,"./AsyncScheduler":56}],58:[function(require,module,exports){
+},{"./AsyncAction":53,"./AsyncScheduler":54}],56:[function(require,module,exports){
 "use strict";
 var root_1 = require('../util/root');
 function symbolIteratorPonyfill(root) {
@@ -17475,7 +17362,7 @@ exports.iterator = symbolIteratorPonyfill(root_1.root);
  */
 exports.$$iterator = exports.iterator;
 
-},{"../util/root":70}],59:[function(require,module,exports){
+},{"../util/root":68}],57:[function(require,module,exports){
 "use strict";
 var root_1 = require('../util/root');
 function getSymbolObservable(context) {
@@ -17502,7 +17389,7 @@ exports.observable = getSymbolObservable(root_1.root);
  */
 exports.$$observable = exports.observable;
 
-},{"../util/root":70}],60:[function(require,module,exports){
+},{"../util/root":68}],58:[function(require,module,exports){
 "use strict";
 var root_1 = require('../util/root');
 var Symbol = root_1.root.Symbol;
@@ -17513,7 +17400,7 @@ exports.rxSubscriber = (typeof Symbol === 'function' && typeof Symbol.for === 'f
  */
 exports.$$rxSubscriber = exports.rxSubscriber;
 
-},{"../util/root":70}],61:[function(require,module,exports){
+},{"../util/root":68}],59:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17541,7 +17428,7 @@ var ObjectUnsubscribedError = (function (_super) {
 }(Error));
 exports.ObjectUnsubscribedError = ObjectUnsubscribedError;
 
-},{}],62:[function(require,module,exports){
+},{}],60:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17567,48 +17454,48 @@ var UnsubscriptionError = (function (_super) {
 }(Error));
 exports.UnsubscriptionError = UnsubscriptionError;
 
-},{}],63:[function(require,module,exports){
+},{}],61:[function(require,module,exports){
 "use strict";
 // typeof any so that it we don't have to cast when comparing a result to the error object
 exports.errorObject = { e: {} };
 
-},{}],64:[function(require,module,exports){
+},{}],62:[function(require,module,exports){
 "use strict";
 exports.isArray = Array.isArray || (function (x) { return x && typeof x.length === 'number'; });
 
-},{}],65:[function(require,module,exports){
+},{}],63:[function(require,module,exports){
 "use strict";
 exports.isArrayLike = (function (x) { return x && typeof x.length === 'number'; });
 
-},{}],66:[function(require,module,exports){
+},{}],64:[function(require,module,exports){
 "use strict";
 function isDate(value) {
     return value instanceof Date && !isNaN(+value);
 }
 exports.isDate = isDate;
 
-},{}],67:[function(require,module,exports){
+},{}],65:[function(require,module,exports){
 "use strict";
 function isFunction(x) {
     return typeof x === 'function';
 }
 exports.isFunction = isFunction;
 
-},{}],68:[function(require,module,exports){
+},{}],66:[function(require,module,exports){
 "use strict";
 function isObject(x) {
     return x != null && typeof x === 'object';
 }
 exports.isObject = isObject;
 
-},{}],69:[function(require,module,exports){
+},{}],67:[function(require,module,exports){
 "use strict";
 function isPromise(value) {
     return value && typeof value.subscribe !== 'function' && typeof value.then === 'function';
 }
 exports.isPromise = isPromise;
 
-},{}],70:[function(require,module,exports){
+},{}],68:[function(require,module,exports){
 (function (global){
 "use strict";
 // CommonJS / Node have global context exposed as "global" variable.
@@ -17630,7 +17517,7 @@ exports.root = _root;
 })();
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],71:[function(require,module,exports){
+},{}],69:[function(require,module,exports){
 "use strict";
 var root_1 = require('./root');
 var isArrayLike_1 = require('./isArrayLike');
@@ -17709,7 +17596,7 @@ function subscribeToResult(outerSubscriber, result, outerValue, outerIndex) {
 }
 exports.subscribeToResult = subscribeToResult;
 
-},{"../InnerSubscriber":38,"../Observable":40,"../symbol/iterator":58,"../symbol/observable":59,"./isArrayLike":65,"./isObject":68,"./isPromise":69,"./root":70}],72:[function(require,module,exports){
+},{"../InnerSubscriber":36,"../Observable":38,"../symbol/iterator":56,"../symbol/observable":57,"./isArrayLike":63,"./isObject":66,"./isPromise":67,"./root":68}],70:[function(require,module,exports){
 "use strict";
 var Subscriber_1 = require('../Subscriber');
 var rxSubscriber_1 = require('../symbol/rxSubscriber');
@@ -17730,7 +17617,7 @@ function toSubscriber(nextOrObserver, error, complete) {
 }
 exports.toSubscriber = toSubscriber;
 
-},{"../Observer":41,"../Subscriber":46,"../symbol/rxSubscriber":60}],73:[function(require,module,exports){
+},{"../Observer":39,"../Subscriber":44,"../symbol/rxSubscriber":58}],71:[function(require,module,exports){
 "use strict";
 var errorObject_1 = require('./errorObject');
 var tryCatchTarget;
@@ -17750,4 +17637,4 @@ function tryCatch(fn) {
 exports.tryCatch = tryCatch;
 ;
 
-},{"./errorObject":63}]},{},[1]);
+},{"./errorObject":61}]},{},[1]);

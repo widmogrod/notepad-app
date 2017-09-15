@@ -16,7 +16,7 @@ let host = window.document.location.host.replace(/:.*/, '');
 let port = window.document.location.port;
 let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
 const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '');
-let database = js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock2(uuid()));
+let database = js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(uuid()));
 // this subject queues as necessary to ensure every message is delivered
 const publish = new queueing_subject_1.QueueingSubject();
 // this method returns an object which contains two observables
@@ -30,6 +30,7 @@ var editor = new Quill('#editor', {
     },
     theme: 'snow'
 });
+editor.focus();
 editor.on('text-change', function (delta, oldDelta, source) {
     if (source !== "user") {
         return;
@@ -48,18 +49,19 @@ editor.on('text-change', function (delta, oldDelta, source) {
     }, { pos: 0, op: null });
     if (r.op) {
         database = database.next();
-        database.apply(r.op);
-        const data = serialiser_1.serialise(database);
+        const data = serialiser_1.serialiseOperations(database.apply(r.op));
         publish.next(data);
     }
 });
 const QuillDelta = require("quill-delta");
 messages
-    .retryWhen(errors => errors.delay(1000))
-    .map(serialiser_1.deserialise)
-    .subscribe(e => {
+    .retryWhen(errors => errors.delay(10000))
+    .map(serialiser_1.deserialiseOperations)
+    .subscribe(oo => {
+    console.log(oo);
     database = database.next();
-    database = database.merge(e);
+    database = database.mergeOperations(oo);
+    console.log(database);
     const dd = new QuillDelta()
         .retain(0)
         .insert(js_crdt_1.default.text.renderString(database));
