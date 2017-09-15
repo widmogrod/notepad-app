@@ -1,7 +1,9 @@
 import crdt from 'js-crdt';
 import {Insert, Delete} from 'js-crdt/build/text';
-import {Observable, Scheduler} from 'rxjs/Rx';
+import {Observable, Observer, Scheduler} from 'rxjs/Rx';
 import "rxjs/add/operator/map";
+import "rxjs/add/operator/retryWhen";
+import "rxjs/add/operator/delay";
 import { QueueingSubject } from 'queueing-subject';
 import websocketConnect from 'rxjs-websockets';
 import {serialise, deserialise} from './serialiser';
@@ -81,6 +83,7 @@ editor.on('text-change', function(delta: Delta, oldDelta: Delta, source: QSource
 import * as QuillDelta from 'quill-delta'
 
 messages
+  .retryWhen(errors => errors.delay(1000))
   .map(deserialise)
   .subscribe(e => {
     database = database.next();

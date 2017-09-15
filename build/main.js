@@ -1,8 +1,9 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const js_crdt_1 = require("js-crdt");
-const text_1 = require("js-crdt/build/text");
 require("rxjs/add/operator/map");
+require("rxjs/add/operator/retryWhen");
+require("rxjs/add/operator/delay");
 const queueing_subject_1 = require("queueing-subject");
 const rxjs_websockets_1 = require("rxjs-websockets");
 const serialiser_1 = require("./serialiser");
@@ -54,22 +55,11 @@ editor.on('text-change', function (delta, oldDelta, source) {
 });
 const QuillDelta = require("quill-delta");
 messages
+    .retryWhen(errors => errors.delay(1000))
     .map(serialiser_1.deserialise)
     .subscribe(e => {
-    const d = e.reduce((r, o) => {
-        return o.reduce((r, o) => {
-            if (o instanceof text_1.Insert) {
-                return r.retain(o.at).insert(o.value);
-            }
-            else if (o instanceof text_1.Delete) {
-                return r.retain(o.at).delete(o.length);
-            }
-            return r;
-        }, r);
-    }, new QuillDelta());
     database = database.next();
     database = database.merge(e);
-    // editor.updateContents(d);
     const dd = new QuillDelta()
         .retain(0)
         .insert(js_crdt_1.default.text.renderString(database));
