@@ -25,13 +25,13 @@
                 margin-top: 30px;
             }
 
-            #editor {
+            #editor, .ql-editor {
                 border: 0;
                 outline: 0;
                 width: 100%;
                 height: 100%;
                 font-family: monospace;
-                font-size: 16px;
+                font-size: 18px;
             }
 
             @media only screen and (max-width: 768px) {
@@ -41,11 +41,14 @@
                 }
             }
         </style>
+        <link href="//cdn.quilljs.com/1.0.0/quill.core.css" rel="stylesheet">
     </head>
     <body>
         <div id="main">
-            <textarea id="editor" autofocus></textarea>
+            <!-- <textarea id="editor" autofocus></textarea> -->
+            <div id="editor"></div>
         </div>
+
         <script src="main.js"></script>
 
 
