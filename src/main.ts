@@ -1,5 +1,5 @@
 import crdt from 'js-crdt';
-import {Insert, Delete, Operation} from 'js-crdt/build/text';
+import {Insert, Delete, Selection, Operation} from 'js-crdt/build/text';
 import {Observable, Observer, Scheduler} from 'rxjs/Rx';
 import "rxjs/add/operator/map";
 import "rxjs/add/operator/retryWhen";
@@ -20,7 +20,8 @@ let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
 
 const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '')
 
-let database = crdt.text.createFromOrderer(crdt.order.createVectorClock(uuid()));
+const clientID = uuid();
+let database = crdt.text.createFromOrderer(crdt.order.createVectorClock(clientID));
 
 // this subject queues as necessary to ensure every message is delivered
 const publish = new QueueingSubject()
@@ -76,8 +77,20 @@ editor.on('text-change', function(delta: Delta, oldDelta: Delta, source: QSource
 
   if (r.op) {
     database = database.next();
-    const data = serialiseOperations(database.apply(r.op));
-    publish.next(data);
+    database.apply(r.op);
+    let op = database.apply(quillSelectionToCrdt(editor.getSelection(true)));
+    publish.next(serialiseOperations(op));
+  }
+});
+editor.on('selection-change', function(range: QSelection, oldRange: QSelection, source: QSource) {
+  if (source !== 'user') {
+    return;
+  }
+
+  if (range) {
+    database = database.next();
+    let op = database.apply(quillSelectionToCrdt(range))
+    publish.next(serialiseOperations(op));
   }
 });
 
@@ -87,16 +100,37 @@ messages
   .retryWhen(errors => errors.delay(10000))
   .map(deserialiseOperations)
   .subscribe(oo => {
-    console.log(oo)
     database = database.next();
     database = database.mergeOperations(oo);
-    console.log(database);
+    // diff?
+    // database.diff(database.mergeOperations(oo));
+
+    const selection = crdt.text.selectionFunc(database, quillSelectionToCrdt(editor.getSelection()))
 
     const dd = new QuillDelta()
       .retain(0)
       .insert(crdt.text.renderString(database))
 
-    const s = editor.getSelection()
     editor.setContents(dd);
-    editor.setSelection(s)
+    editor.setSelection(crdtSelectionToQuill(selection))
   });
+
+interface QSelection {
+  index: number;
+  length: number;
+}
+
+function quillSelectionToCrdt(s: QSelection): Selection {
+  return new Selection(
+    clientID,
+    s.index,
+    s.length,
+  );
+}
+
+function crdtSelectionToQuill(s: Selection): QSelection {
+  return {
+    index: s.at,
+    length: s.length,
+  };
+}

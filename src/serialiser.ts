@@ -6,12 +6,21 @@ type SerialisedText = {operations: Array<any>, order: SerialisedOrder}
 
 export function serialiseOperations(oo: OrderedOperations): SerialisedText {
     return oo.operations.reduce((result, operation) => {
-      let value = operation instanceof crdt.text.Insert
-        ? {type: 'insert', args: [operation.at, operation.value]}
-        : {type: 'delete', args: [operation.at, operation.length]}
-      ;
+      let value;
 
-      result.operations.push(value);
+      if (operation instanceof crdt.text.Insert) {
+        value = {type: 'insert', args: [operation.at, operation.value]}
+      }
+      if (operation instanceof crdt.text.Delete) {
+        value = {type: 'delete', args: [operation.at, operation.length]}
+      }
+      if (operation instanceof crdt.text.Selection) {
+        value = {type: 'selection', args: [operation.origin, operation.at, operation.length]}
+      }
+
+      if (value) {
+        result.operations.push(value);
+      }
 
       return result;
     }, {
@@ -60,11 +69,24 @@ export function deserialiseOperations({order, operations}): OrderedOperations {
   return {
     order: deserialiesOrder(t, id, vector),
     operations: operations.reduce((operations, {type, args}) => {
-      const operation = (type === 'insert')
-        ? new crdt.text.Insert(args[0], args[1])
-        : new crdt.text.Delete(args[0], args[1]);
+      let operation;
 
-      operations.push(operation);
+      switch(type) {
+        case "insert":
+          operation = new crdt.text.Insert(args[0], args[1]);
+          break;
+        case "delete":
+          operation = new crdt.text.Delete(args[0], args[1]);
+          break;
+        case "selection":
+          operation = new crdt.text.Selection(args[0], args[1], args[2]);
+          break;
+      }
+
+      if (operation) {
+        operations.push(operation);
+      }
+
       return operations;
     }, []),
   };
