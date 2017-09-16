@@ -33,6 +33,8 @@ connectionStatus.subscribe(e => console.log({status: e}));
 
 // This is hack to properly require quill :/
 import * as Quill from 'quill';
+import * as QuillDelta from 'quill-delta'
+import 'quill-cursors';
 
 type QRetain = {retain: number}
 type QInsert = {insert: string}
@@ -44,15 +46,17 @@ interface Delta {
   ops: QOperation[]
 }
 
-var editor = new Quill('#editor', {
+let editor = new Quill('#editor', {
   modules: {
     toolbar: false,
+    cursors: true,
   },
   formats: [],
   theme: 'snow'
 });
 editor.focus();
 
+let cursors = editor.getModule('cursors');
 
 interface OperationReducer {
   pos: number;
@@ -95,7 +99,6 @@ editor.on('selection-change', function(range: QSelection, oldRange: QSelection, 
   }
 });
 
-import * as QuillDelta from 'quill-delta'
 
 messages
   .retryWhen(errors => errors.delay(10000))
@@ -106,7 +109,7 @@ messages
     // diff?
     // database.diff(database.mergeOperations(oo));
 
-    const selection = crdt.text.selectionFunc(database, quillSelectionToCrdt(editor.getSelection(true)))
+    const selection = crdt.text.getSelection(database, quillSelectionToCrdt(editor.getSelection(true)))
 
     const dd = new QuillDelta()
       .retain(0)

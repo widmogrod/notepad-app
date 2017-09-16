@@ -26,14 +26,18 @@ const { messages, connectionStatus } = rxjs_websockets_1.default(WebSocketURL, p
 connectionStatus.subscribe(e => console.log({ status: e }));
 // This is hack to properly require quill :/
 const Quill = require("quill");
-var editor = new Quill('#editor', {
+const QuillDelta = require("quill-delta");
+require("quill-cursors");
+let editor = new Quill('#editor', {
     modules: {
         toolbar: false,
+        cursors: true,
     },
     formats: [],
     theme: 'snow'
 });
 editor.focus();
+let cursors = editor.getModule('cursors');
 editor.on('text-change', function (delta, oldDelta, source) {
     if (source !== "user") {
         return;
@@ -67,7 +71,6 @@ editor.on('selection-change', function (range, oldRange, source) {
         publish.next(serialiser_1.serialiseOperations(op));
     }
 });
-const QuillDelta = require("quill-delta");
 messages
     .retryWhen(errors => errors.delay(10000))
     .map(serialiser_1.deserialiseOperations)
@@ -76,7 +79,7 @@ messages
     database = database.mergeOperations(oo);
     // diff?
     // database.diff(database.mergeOperations(oo));
-    const selection = js_crdt_1.default.text.selectionFunc(database, quillSelectionToCrdt(editor.getSelection(true)));
+    const selection = js_crdt_1.default.text.getSelection(database, quillSelectionToCrdt(editor.getSelection(true)));
     const dd = new QuillDelta()
         .retain(0)
         .insert(js_crdt_1.default.text.renderString(database));
