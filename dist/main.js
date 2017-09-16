@@ -2,22 +2,26 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const js_crdt_1 = require("js-crdt");
+const text_1 = require("js-crdt/build/text");
 require("rxjs/add/operator/map");
 require("rxjs/add/operator/retryWhen");
 require("rxjs/add/operator/delay");
 const queueing_subject_1 = require("queueing-subject");
 const rxjs_websockets_1 = require("rxjs-websockets");
 const serialiser_1 = require("./serialiser");
+const ColorHash = require("color-hash");
 function uuid() {
     const array = new Uint8Array(2);
     crypto.getRandomValues(array);
     return array.join('-');
 }
+const colorHash = new ColorHash();
 let host = window.document.location.host.replace(/:.*/, '');
 let port = window.document.location.port;
 let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
 const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '');
-let database = js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock2(uuid()));
+const clientID = uuid();
+let database = js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(clientID));
 // this subject queues as necessary to ensure every message is delivered
 const publish = new queueing_subject_1.QueueingSubject();
 // this method returns an object which contains two observables
@@ -25,12 +29,18 @@ const { messages, connectionStatus } = rxjs_websockets_1.default(WebSocketURL, p
 connectionStatus.subscribe(e => console.log({ status: e }));
 // This is hack to properly require quill :/
 const Quill = require("quill");
-var editor = new Quill('#editor', {
+const QuillDelta = require("quill-delta");
+require("quill-cursors");
+let editor = new Quill('#editor', {
     modules: {
         toolbar: false,
+        cursors: true,
     },
+    formats: [],
     theme: 'snow'
 });
+editor.focus();
+let cursors = editor.getModule('cursors');
 editor.on('text-change', function (delta, oldDelta, source) {
     if (source !== "user") {
         return;
@@ -50,56 +60,81 @@ editor.on('text-change', function (delta, oldDelta, source) {
     if (r.op) {
         database = database.next();
         database.apply(r.op);
-        const data = serialiser_1.serialise(database);
-        publish.next(data);
+        let op = database.apply(quillSelectionToCrdt(editor.getSelection(true)));
+        publish.next(serialiser_1.serialiseOperations(op));
     }
 });
-const QuillDelta = require("quill-delta");
+editor.on('selection-change', function (range, oldRange, source) {
+    if (source !== 'user') {
+        return;
+    }
+    if (range) {
+        database = database.next();
+        let op = database.apply(quillSelectionToCrdt(range));
+        publish.next(serialiser_1.serialiseOperations(op));
+    }
+});
 messages
-    .retryWhen(errors => errors.delay(1000))
-    .map(serialiser_1.deserialise)
-    .subscribe(e => {
+    .retryWhen(errors => errors.delay(10000))
+    .map(serialiser_1.deserialiseOperations)
+    .subscribe(oo => {
     database = database.next();
-    database = database.merge(e);
+    database = database.mergeOperations(oo);
+    // diff?
+    // database.diff(database.mergeOperations(oo));
     const dd = new QuillDelta()
         .retain(0)
         .insert(js_crdt_1.default.text.renderString(database));
-    const s = editor.getSelection();
     editor.setContents(dd);
-    editor.setSelection(s);
+    const currentSelection = quillSelectionToCrdt(editor.getSelection(true));
+    const selections = js_crdt_1.default.text.getSelections(database, currentSelection);
+    selections.reduce((_, s) => {
+        if (s.origin === clientID) {
+            editor.setSelection(crdtSelectionToQuill(s));
+        }
+        else {
+            cursors.setCursor(s.origin, crdtSelectionToQuill(s), s.origin, colorHash.hex(s.origin));
+        }
+    }, null);
 });
+function quillSelectionToCrdt(s) {
+    return new text_1.Selection(clientID, s.index, s.length);
+}
+function crdtSelectionToQuill(s) {
+    return {
+        index: s.at,
+        length: s.length,
+    };
+}
 
-},{"./serialiser":2,"js-crdt":14,"queueing-subject":32,"quill":35,"quill-delta":33,"rxjs-websockets":36,"rxjs/add/operator/delay":48,"rxjs/add/operator/map":49,"rxjs/add/operator/retryWhen":50}],2:[function(require,module,exports){
+},{"./serialiser":2,"color-hash":6,"js-crdt":16,"js-crdt/build/text":28,"queueing-subject":33,"quill":37,"quill-cursors":34,"quill-delta":35,"rxjs-websockets":38,"rxjs/add/operator/delay":50,"rxjs/add/operator/map":51,"rxjs/add/operator/retryWhen":52}],2:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const js_crdt_1 = require("js-crdt");
-function serialiseOperations(order, operations) {
-    return operations.reduce((result, operation) => {
-        let value = operation instanceof js_crdt_1.default.text.Insert
-            ? { type: 'insert', args: [operation.at, operation.value] }
-            : { type: 'delete', args: [operation.at, operation.length] };
-        result.operations.push(value);
+function serialiseOperations(oo) {
+    return oo.operations.reduce((result, operation) => {
+        let value;
+        if (operation instanceof js_crdt_1.default.text.Insert) {
+            value = { type: 'insert', args: [operation.at, operation.value] };
+        }
+        if (operation instanceof js_crdt_1.default.text.Delete) {
+            value = { type: 'delete', args: [operation.at, operation.length] };
+        }
+        if (operation instanceof js_crdt_1.default.text.Selection) {
+            value = { type: 'selection', args: [operation.origin, operation.at, operation.length] };
+        }
+        if (value) {
+            result.operations.push(value);
+        }
         return result;
     }, {
         operations: [],
-        order: serialiseOrder(order),
+        order: serialiseOrder(oo.order),
     });
 }
 exports.serialiseOperations = serialiseOperations;
-function serialise(text) {
-    const operations = text.setMap.get(text.order);
-    return serialiseOperations(text.order, operations);
-}
-exports.serialise = serialise;
 function serialiseOrder(order) {
     if (order instanceof js_crdt_1.default.order.VectorClock) {
-        return {
-            t: 'v1',
-            id: order.id,
-            vector: order.vector,
-        };
-    }
-    else if (order instanceof js_crdt_1.default.order.VectorClock2) {
         function serialiseId(id) {
             return {
                 node: id.node,
@@ -118,28 +153,40 @@ function serialiseOrder(order) {
 }
 function deserialiesOrder(t, id, vector) {
     switch (t) {
-        case 'v1':
-            return new js_crdt_1.default.order.VectorClock(id, vector);
         case 'v2':
             const set = new js_crdt_1.default.structures.SortedSetArray(new js_crdt_1.default.structures.NaiveArrayList([]));
-            return new js_crdt_1.default.order.VectorClock2(new js_crdt_1.default.order.Id(id.node, id.version), vector.reduce((set, id) => {
+            return new js_crdt_1.default.order.VectorClock(new js_crdt_1.default.order.Id(id.node, id.version), vector.reduce((set, id) => {
                 return set.add(new js_crdt_1.default.order.Id(id.node, id.version)).result;
             }, set));
     }
 }
-function deserialise({ order, operations }) {
+function deserialiseOperations({ order, operations }) {
     const { t, id, vector } = order;
-    return operations.reduce((text, { type, args }) => {
-        const operation = (type === 'insert')
-            ? new js_crdt_1.default.text.Insert(args[0], args[1])
-            : new js_crdt_1.default.text.Delete(args[0], args[1]);
-        text.apply(operation);
-        return text;
-    }, js_crdt_1.default.text.createFromOrderer(deserialiesOrder(t, id, vector)));
+    return {
+        order: deserialiesOrder(t, id, vector),
+        operations: operations.reduce((operations, { type, args }) => {
+            let operation;
+            switch (type) {
+                case "insert":
+                    operation = new js_crdt_1.default.text.Insert(args[0], args[1]);
+                    break;
+                case "delete":
+                    operation = new js_crdt_1.default.text.Delete(args[0], args[1]);
+                    break;
+                case "selection":
+                    operation = new js_crdt_1.default.text.Selection(args[0], args[1], args[2]);
+                    break;
+            }
+            if (operation) {
+                operations.push(operation);
+            }
+            return operations;
+        }, []),
+    };
 }
-exports.deserialise = deserialise;
+exports.deserialiseOperations = deserialiseOperations;
 
-},{"js-crdt":14}],3:[function(require,module,exports){
+},{"js-crdt":16}],3:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -2048,7 +2095,152 @@ function isnan (val) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"base64-js":3,"ieee754":10,"isarray":11}],5:[function(require,module,exports){
+},{"base64-js":3,"ieee754":12,"isarray":13}],5:[function(require,module,exports){
+/**
+ * BKDR Hash (modified version)
+ *
+ * @param {String} str string to hash
+ * @returns {Number}
+ */
+var BKDRHash = function(str) {
+    var seed = 131;
+    var seed2 = 137;
+    var hash = 0;
+    // make hash more sensitive for short string like 'a', 'b', 'c'
+    str += 'x';
+    // Note: Number.MAX_SAFE_INTEGER equals 9007199254740991
+    var MAX_SAFE_INTEGER = parseInt(9007199254740991 / seed2);
+    for(var i = 0; i < str.length; i++) {
+        if(hash > MAX_SAFE_INTEGER) {
+            hash = parseInt(hash / seed2);
+        }
+        hash = hash * seed + str.charCodeAt(i);
+    }
+    return hash;
+};
+
+module.exports = BKDRHash;
+
+},{}],6:[function(require,module,exports){
+var BKDRHash = require('./bkdr-hash');
+
+/**
+ * Convert RGB Array to HEX
+ *
+ * @param {Array} RGBArray - [R, G, B]
+ * @returns {String} 6 digits hex starting with #
+ */
+var RGB2HEX = function(RGBArray) {
+    var hex = '#';
+    RGBArray.forEach(function(value) {
+        if (value < 16) {
+            hex += 0;
+        }
+        hex += value.toString(16);
+    });
+    return hex;
+};
+
+/**
+ * Convert HSL to RGB
+ *
+ * @see {@link http://zh.wikipedia.org/wiki/HSL和HSV色彩空间} for further information.
+ * @param {Number} H Hue ∈ [0, 360)
+ * @param {Number} S Saturation ∈ [0, 1]
+ * @param {Number} L Lightness ∈ [0, 1]
+ * @returns {Array} R, G, B ∈ [0, 255]
+ */
+var HSL2RGB = function(H, S, L) {
+    H /= 360;
+
+    var q = L < 0.5 ? L * (1 + S) : L + S - L * S;
+    var p = 2 * L - q;
+
+    return [H + 1/3, H, H - 1/3].map(function(color) {
+        if(color < 0) {
+            color++;
+        }
+        if(color > 1) {
+            color--;
+        }
+        if(color < 1/6) {
+            color = p + (q - p) * 6 * color;
+        } else if(color < 0.5) {
+            color = q;
+        } else if(color < 2/3) {
+            color = p + (q - p) * 6 * (2/3 - color);
+        } else {
+            color = p;
+        }
+        return Math.round(color * 255);
+    });
+};
+
+/**
+ * Color Hash Class
+ *
+ * @class
+ */
+var ColorHash = function(options) {
+    options = options || {};
+
+    var LS = [options.lightness, options.saturation].map(function(param) {
+        param = param || [0.35, 0.5, 0.65]; // note that 3 is a prime
+        return Object.prototype.toString.call(param) === '[object Array]' ? param.concat() : [param];
+    });
+
+    this.L = LS[0];
+    this.S = LS[1];
+
+    this.hash = options.hash || BKDRHash;
+};
+
+/**
+ * Returns the hash in [h, s, l].
+ * Note that H ∈ [0, 360); S ∈ [0, 1]; L ∈ [0, 1];
+ *
+ * @param {String} str string to hash
+ * @returns {Array} [h, s, l]
+ */
+ColorHash.prototype.hsl = function(str) {
+    var H, S, L;
+    var hash = this.hash(str);
+
+    H = hash % 359; // note that 359 is a prime
+    hash = parseInt(hash / 360);
+    S = this.S[hash % this.S.length];
+    hash = parseInt(hash / this.S.length);
+    L = this.L[hash % this.L.length];
+
+    return [H, S, L];
+};
+
+/**
+ * Returns the hash in [r, g, b].
+ * Note that R, G, B ∈ [0, 255]
+ *
+ * @param {String} str string to hash
+ * @returns {Array} [r, g, b]
+ */
+ColorHash.prototype.rgb = function(str) {
+    var hsl = this.hsl(str);
+    return HSL2RGB.apply(this, hsl);
+};
+
+/**
+ * Returns the hash in hex
+ *
+ * @param {String} str string to hash
+ * @returns {String} hex with #
+ */
+ColorHash.prototype.hex = function(str) {
+    var rgb = this.rgb(str);
+    return RGB2HEX(rgb);
+};
+
+module.exports = ColorHash;
+
+},{"./bkdr-hash":5}],7:[function(require,module,exports){
 var pSlice = Array.prototype.slice;
 var objectKeys = require('./lib/keys.js');
 var isArguments = require('./lib/is_arguments.js');
@@ -2144,7 +2336,7 @@ function objEquiv(a, b, opts) {
   return typeof a === typeof b;
 }
 
-},{"./lib/is_arguments.js":6,"./lib/keys.js":7}],6:[function(require,module,exports){
+},{"./lib/is_arguments.js":8,"./lib/keys.js":9}],8:[function(require,module,exports){
 var supportsArgumentsClass = (function(){
   return Object.prototype.toString.call(arguments)
 })() == '[object Arguments]';
@@ -2166,7 +2358,7 @@ function unsupported(object){
     false;
 };
 
-},{}],7:[function(require,module,exports){
+},{}],9:[function(require,module,exports){
 exports = module.exports = typeof Object.keys === 'function'
   ? Object.keys : shim;
 
@@ -2177,7 +2369,7 @@ function shim (obj) {
   return keys;
 }
 
-},{}],8:[function(require,module,exports){
+},{}],10:[function(require,module,exports){
 'use strict';
 
 var hasOwn = Object.prototype.hasOwnProperty;
@@ -2265,7 +2457,7 @@ module.exports = function extend() {
 	return target;
 };
 
-},{}],9:[function(require,module,exports){
+},{}],11:[function(require,module,exports){
 /**
  * This library modifies the diff-patch-match library by Neil Fraser
  * by removing the patch and match functionality and certain advanced
@@ -2965,7 +3157,7 @@ function merge_tuples (diffs, start, length) {
   return diffs;
 }
 
-},{}],10:[function(require,module,exports){
+},{}],12:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = nBytes * 8 - mLen - 1
@@ -3051,14 +3243,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],11:[function(require,module,exports){
+},{}],13:[function(require,module,exports){
 var toString = {}.toString;
 
 module.exports = Array.isArray || function (arr) {
   return toString.call(arr) == '[object Array]';
 };
 
-},{}],12:[function(require,module,exports){
+},{}],14:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function merge(a, b) {
@@ -3077,17 +3269,27 @@ function concat(a, b) {
     return a.concat(b);
 }
 exports.concat = concat;
+function between(value, min, max) {
+    if (value <= min) {
+        return false;
+    }
+    else if (value >= max) {
+        return false;
+    }
+    return true;
+}
+exports.between = between;
 function axioms(assert, a, b, c) {
     // commutative   a + c = c + a                i.e: 1 + 2 = 2 + 1
-    assert(equal(merge(a, b), merge(b, a)), 'is not commutative');
+    assert(equal(merge(a, b), merge(b, a)), "is not commutative");
     // associative   a + (b + c) = (a + b) + c    i.e: 1 + (2 + 3) = (1 + 2) + 3
-    assert(equal(merge(a, merge(b, c)), merge(merge(a, b), c)), 'is not associative');
+    assert(equal(merge(a, merge(b, c)), merge(merge(a, b), c)), "is not associative");
     // idempotent    f(f(a)) = f(a)               i.e: ||a|| = |a|
-    assert(equal(merge(a, a), a), 'is not idempotent');
+    assert(equal(merge(a, a), a), "is not idempotent");
 }
 exports.axioms = axioms;
 
-},{}],13:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Increment {
@@ -3107,109 +3309,44 @@ class Increment {
 }
 exports.Increment = Increment;
 
-},{}],14:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const functions = require("./functions");
 const increment = require("./increment");
-const utils = require("./utils");
 const order = require("./order");
-const text = require("./text");
 const structures = require("./structures");
+const text = require("./text");
 exports.default = {
-    text,
-    order,
-    utils,
     functions,
     increment,
-    structures
+    order,
+    structures,
+    text,
 };
 
-},{"./functions":12,"./increment":13,"./order":16,"./structures":19,"./text":27,"./utils":31}],15:[function(require,module,exports){
+},{"./functions":14,"./increment":15,"./order":18,"./structures":20,"./text":28}],17:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-const vector_clock2_1 = require("./vector-clock2");
-const sorted_set_array_1 = require("../structures/sorted-set-array");
 const naive_array_list_1 = require("../structures/naive-array-list");
+const sorted_set_array_1 = require("../structures/sorted-set-array");
+const vector_clock_1 = require("./vector-clock");
 const emptyVector = new sorted_set_array_1.SortedSetArray(new naive_array_list_1.NaiveArrayList([]));
-function createVectorClock2(id, version, vector) {
-    return new vector_clock2_1.VectorClock2(new vector_clock2_1.Id(id, version ? version : 0), vector ? vector : emptyVector);
+function createVectorClock(id, version, vector) {
+    return new vector_clock_1.VectorClock(new vector_clock_1.Id(id, version ? version : 0), vector ? vector : emptyVector);
 }
-exports.createVectorClock2 = createVectorClock2;
+exports.createVectorClock = createVectorClock;
 
-},{"../structures/naive-array-list":20,"../structures/sorted-set-array":24,"./vector-clock2":18}],16:[function(require,module,exports){
+},{"../structures/naive-array-list":21,"../structures/sorted-set-array":25,"./vector-clock":19}],18:[function(require,module,exports){
 "use strict";
 function __export(m) {
     for (var p in m) if (!exports.hasOwnProperty(p)) exports[p] = m[p];
 }
 Object.defineProperty(exports, "__esModule", { value: true });
 __export(require("./vector-clock"));
-__export(require("./vector-clock2"));
 __export(require("./factory"));
 
-},{"./factory":15,"./vector-clock":17,"./vector-clock2":18}],17:[function(require,module,exports){
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const utils_1 = require("../utils");
-class VectorClock {
-    constructor(id, vector) {
-        this.id = id;
-        this.vector = vector;
-        vector = utils_1.clone(vector);
-        vector[id] = vector[id] || 0;
-        this.id = id;
-        this.vector = vector;
-    }
-    next() {
-        const vector = utils_1.clone(this.vector);
-        ++vector[this.id];
-        return new VectorClock(this.id, vector);
-    }
-    merge(b) {
-        const vector = utils_1.union(Object.keys(this.vector), Object.keys(b.vector)).reduce((vector, key) => {
-            vector[key] = Math.max(this.vector[key] || 0, b.vector[key] || 0);
-            return vector;
-        }, {});
-        return new VectorClock(this.id, vector);
-    }
-    equal(b) {
-        return this.compare(b) === 0;
-    }
-    compare(b) {
-        const position = utils_1.common(this.vector, b.vector)
-            .reduce((result, key) => {
-            return result + (this.vector[key] - b.vector[key]);
-        }, 0);
-        if (position !== 0) {
-            return position;
-        }
-        const difA = utils_1.diff(this.vector, b.vector).length;
-        const difB = utils_1.diff(b.vector, this.vector).length;
-        const dif = difA - difB;
-        if (dif !== 0) {
-            return dif;
-        }
-        const tipPosition = this.vector[this.id] - b.vector[b.id];
-        if (tipPosition !== 0) {
-            return tipPosition;
-        }
-        const ha = b.vector.hasOwnProperty(this.id);
-        const hb = this.vector.hasOwnProperty(b.id);
-        if (!ha && !hb) {
-            return this.id < b.id ? -1 : 1;
-        }
-        else if (ha && !hb) {
-            return -1;
-        }
-        else if (hb && !ha) {
-            return 1;
-        }
-        return 0;
-    }
-}
-exports.VectorClock = VectorClock;
-
-},{"../utils":31}],18:[function(require,module,exports){
+},{"./factory":17,"./vector-clock":19}],19:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Id {
@@ -3230,11 +3367,12 @@ class Id {
     }
 }
 exports.Id = Id;
-class VectorClock2 {
+class VectorClock {
     constructor(id, vector) {
         this.id = id;
         this.vector = vector;
         this.id = id;
+        /* tslint:disable: prefer-const */
         let { result, value } = vector.add(id);
         if (result === vector) {
             if (id.version > value.version) {
@@ -3244,11 +3382,11 @@ class VectorClock2 {
         this.vector = result;
     }
     toString() {
-        const a = this.vector.reduce((r, i) => r + i.toString(), '');
-        return `VectorClock2(${this.id},${a})`;
+        const a = this.vector.reduce((r, i) => r + i.toString(), "");
+        return `VectorClock(${this.id},${a})`;
     }
     next() {
-        return new VectorClock2(this.id.next(), this.vector.remove(this.id).result.add(this.id.next()).result);
+        return new VectorClock(this.id.next(), this.vector.remove(this.id).result.add(this.id.next()).result);
     }
     equal(b) {
         if (this.vector.size() !== b.vector.size()) {
@@ -3292,8 +3430,8 @@ class VectorClock2 {
             everyLEQ = everyLEQ ? rA.version <= rB.version : everyLEQ;
             return { everyLEQ, anyLT };
         }, {
-            everyLEQ: true,
             anyLT: false,
+            everyLEQ: true,
         });
         return everyLEQ && (anyLT || (this.vector.size() < b.vector.size()));
     }
@@ -3310,12 +3448,12 @@ class VectorClock2 {
             }
             return vector.add(item).result;
         }, this.vector.mempty());
-        return new VectorClock2(this.id, vector.union(b.vector));
+        return new VectorClock(this.id, vector.union(b.vector));
     }
 }
-exports.VectorClock2 = VectorClock2;
+exports.VectorClock = VectorClock;
 
-},{}],19:[function(require,module,exports){
+},{}],20:[function(require,module,exports){
 "use strict";
 function __export(m) {
     for (var p in m) if (!exports.hasOwnProperty(p)) exports[p] = m[p];
@@ -3324,10 +3462,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 __export(require("./naive-array-list"));
 __export(require("./naive-immutable-map"));
 __export(require("./set-axioms"));
-__export(require("./set-map"));
+__export(require("./ordered-map"));
 __export(require("./sorted-set-array"));
 
-},{"./naive-array-list":20,"./naive-immutable-map":21,"./set-axioms":22,"./set-map":23,"./sorted-set-array":24}],20:[function(require,module,exports){
+},{"./naive-array-list":21,"./naive-immutable-map":22,"./ordered-map":23,"./set-axioms":24,"./sorted-set-array":25}],21:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class NaiveArrayList {
@@ -3359,7 +3497,7 @@ class NaiveArrayList {
 }
 exports.NaiveArrayList = NaiveArrayList;
 
-},{}],21:[function(require,module,exports){
+},{}],22:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class NaiveImmutableMap {
@@ -3380,33 +3518,13 @@ class NaiveImmutableMap {
     get(key) {
         return this.data[key];
     }
+    reduce(fn, aggregator) {
+        return Object.keys(this.data).reduce((aggregator, key) => {
+            return fn(aggregator, this.data[key], key);
+        }, aggregator);
+    }
 }
 exports.NaiveImmutableMap = NaiveImmutableMap;
-
-},{}],22:[function(require,module,exports){
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-function equal(a, b) {
-    return a.equal(b);
-}
-function union(a, b) {
-    return a.union(b);
-}
-function intersect(a, b) {
-    return a.intersect(b);
-}
-function difference(a, b) {
-    return a.difference(b);
-}
-function axioms(assert, a, b, c) {
-    assert(equal(union(union(a, b), c), union(a, union(b, c))), 'associative union');
-    assert(equal(intersect(intersect(a, b), c), intersect(a, intersect(b, c))), 'associative intersect');
-    assert(equal(union(a, intersect(b, c)), union(intersect(a, b), intersect(a, c))), 'union distributes over intersection');
-    assert(equal(intersect(a, union(b, c)), intersect(union(a, b), union(a, c))), 'intersection distributes over union');
-    assert(equal(difference(a, union(b, c)), intersect(difference(a, b), difference(a, c))), 'De Morgan\'s law for union');
-    assert(equal(difference(a, intersect(b, c)), union(difference(a, b), difference(a, c))), 'De Morgan\'s law for intersect');
-}
-exports.axioms = axioms;
 
 },{}],23:[function(require,module,exports){
 "use strict";
@@ -3421,14 +3539,14 @@ class Indexed {
     }
 }
 exports.Indexed = Indexed;
-class SetMap {
+class OrderedMap {
     constructor(keys, values) {
         this.keys = keys;
         this.values = values;
     }
     set(key, value) {
         const result = this.keys.add(new Indexed(key, this.keys.size()));
-        return new SetMap(result.result, this.values.set(result.value.index, value));
+        return new OrderedMap(result.result, this.values.set(result.value.index, value));
     }
     get(key) {
         const result = this.keys.add(new Indexed(key, this.keys.size()));
@@ -3448,9 +3566,34 @@ class SetMap {
         }, aggregator);
     }
 }
-exports.SetMap = SetMap;
+exports.OrderedMap = OrderedMap;
 
 },{}],24:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+function equal(a, b) {
+    return a.equal(b);
+}
+function union(a, b) {
+    return a.union(b);
+}
+function intersect(a, b) {
+    return a.intersect(b);
+}
+function difference(a, b) {
+    return a.difference(b);
+}
+function axioms(assert, a, b, c) {
+    assert(equal(union(union(a, b), c), union(a, union(b, c))), "associative union");
+    assert(equal(intersect(intersect(a, b), c), intersect(a, intersect(b, c))), "associative intersect");
+    assert(equal(union(a, intersect(b, c)), union(intersect(a, b), intersect(a, c))), "union distributes over intersection");
+    assert(equal(intersect(a, union(b, c)), intersect(union(a, b), union(a, c))), "intersection distributes over union");
+    assert(equal(difference(a, union(b, c)), intersect(difference(a, b), difference(a, c))), "De Morgan's law for union");
+    assert(equal(difference(a, intersect(b, c)), union(difference(a, b), difference(a, c))), "De Morgan's law for intersect");
+}
+exports.axioms = axioms;
+
+},{}],25:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function divide(lower, upper, elements, item, onNew, onExists) {
@@ -3458,7 +3601,7 @@ function divide(lower, upper, elements, item, onNew, onExists) {
     if (step < 1) {
         return onNew(item, elements, lower);
     }
-    const half = step / 2 | 0;
+    const half = Math.trunc(step / 2);
     const idx = lower + half;
     const elm = elements.get(idx);
     const cmp = elm.compare(item);
@@ -3513,7 +3656,7 @@ class SortedSetArray {
         }, this.mempty());
     }
     equal(b) {
-        if (this.size() != b.size()) {
+        if (this.size() !== b.size()) {
             return false;
         }
         // TODO reduce is not optimal, because it iterates till the end of set
@@ -3527,7 +3670,7 @@ class SortedSetArray {
 }
 exports.SortedSetArray = SortedSetArray;
 
-},{}],25:[function(require,module,exports){
+},{}],26:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Delete {
@@ -3536,24 +3679,25 @@ class Delete {
         this.length = length;
         this.at = at;
         this.length = length;
+        this.endsAt = this.at + length;
     }
 }
 exports.Delete = Delete;
 
-},{}],26:[function(require,module,exports){
+},{}],27:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-const text_1 = require("./text");
-const set_map_1 = require("../structures/set-map");
-const naive_immutable_map_1 = require("../structures/naive-immutable-map");
-const sorted_set_array_1 = require("../structures/sorted-set-array");
 const naive_array_list_1 = require("../structures/naive-array-list");
+const naive_immutable_map_1 = require("../structures/naive-immutable-map");
+const ordered_map_1 = require("../structures/ordered-map");
+const sorted_set_array_1 = require("../structures/sorted-set-array");
+const text_1 = require("./text");
 function createFromOrderer(order) {
-    return new text_1.Text(order, new set_map_1.SetMap(new sorted_set_array_1.SortedSetArray(new naive_array_list_1.NaiveArrayList([])), new naive_immutable_map_1.NaiveImmutableMap()));
+    return new text_1.Text(order, new ordered_map_1.OrderedMap(new sorted_set_array_1.SortedSetArray(new naive_array_list_1.NaiveArrayList([])), new naive_immutable_map_1.NaiveImmutableMap()));
 }
 exports.createFromOrderer = createFromOrderer;
 
-},{"../structures/naive-array-list":20,"../structures/naive-immutable-map":21,"../structures/set-map":23,"../structures/sorted-set-array":24,"./text":29}],27:[function(require,module,exports){
+},{"../structures/naive-array-list":21,"../structures/naive-immutable-map":22,"../structures/ordered-map":23,"../structures/sorted-set-array":25,"./text":31}],28:[function(require,module,exports){
 "use strict";
 function __export(m) {
     for (var p in m) if (!exports.hasOwnProperty(p)) exports[p] = m[p];
@@ -3561,11 +3705,12 @@ function __export(m) {
 Object.defineProperty(exports, "__esModule", { value: true });
 __export(require("./insert"));
 __export(require("./delete"));
+__export(require("./selection"));
 __export(require("./text"));
 __export(require("./utils"));
 __export(require("./factory"));
 
-},{"./delete":25,"./factory":26,"./insert":28,"./text":29,"./utils":30}],28:[function(require,module,exports){
+},{"./delete":26,"./factory":27,"./insert":29,"./selection":30,"./text":31,"./utils":32}],29:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Insert {
@@ -3574,11 +3719,41 @@ class Insert {
         this.value = value;
         this.at = at < 0 ? 0 : at;
         this.value = String(value);
+        this.length = this.value.length;
+        this.endsAt = this.at + this.length;
     }
 }
 exports.Insert = Insert;
 
-},{}],29:[function(require,module,exports){
+},{}],30:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+class Selection {
+    constructor(origin, at, length) {
+        this.origin = origin;
+        this.at = at;
+        this.length = length;
+        this.origin = origin;
+        this.at = at < 0 ? 0 : at;
+        this.length = length < 0 ? 0 : length;
+        this.endsAt = this.at + this.length;
+    }
+    hasSameOrgin(b) {
+        return this.origin === b.origin;
+    }
+    moveRightBy(step) {
+        return new Selection(this.origin, this.at + step, this.length);
+    }
+    expandBy(length) {
+        return new Selection(this.origin, this.at, this.length + length);
+    }
+    isInside(position) {
+        return this.at < position && this.endsAt > position;
+    }
+}
+exports.Selection = Selection;
+
+},{}],31:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const functions_1 = require("../functions");
@@ -3591,82 +3766,51 @@ class Text {
         return new Text(this.order.next(), this.setMap);
     }
     apply(operation) {
-        let value = this.setMap.get(this.order);
-        if (!value) {
-            value = [];
+        let operations = this.setMap.get(this.order);
+        if (!operations) {
+            operations = [];
         }
-        value.push(operation);
-        this.setMap = this.setMap.set(this.order, value);
+        operations.push(operation);
+        this.setMap = this.setMap.set(this.order, operations);
+        return {
+            operations,
+            order: this.order,
+        };
+    }
+    mergeOperations(o) {
+        return new Text(functions_1.merge(this.order, o.order), this.setMap.set(o.order, o.operations));
     }
     merge(b) {
-        return new Text(functions_1.merge(this.order, b.order), this.setMap.merge(b.setMap));
+        return new Text(functions_1.merge(this.order, b.order), functions_1.merge(this.setMap, b.setMap));
     }
     equal(b) {
         return functions_1.equal(this.order, b.order);
     }
     reduce(fn, accumulator) {
         return this.setMap.reduce((accumulator, operations, order) => {
-            return fn(accumulator, operations, order);
+            return fn(accumulator, { operations, order });
         }, accumulator);
     }
 }
 exports.Text = Text;
 
-},{"../functions":12}],30:[function(require,module,exports){
+},{"../functions":14}],32:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+const delete_1 = require("./delete");
 const insert_1 = require("./insert");
+const selection_1 = require("./selection");
+const naive_immutable_map_1 = require("../structures/naive-immutable-map");
 function snapshot(text) {
     return text.next();
 }
 exports.snapshot = snapshot;
 function toArray(text) {
-    return text.reduce((accumulator, operations) => {
-        return operations.reduce(operationToArray, accumulator);
+    return text.reduce((accumulator, item) => {
+        return item.operations.reduce(operationToArray, accumulator);
     }, []);
 }
 exports.toArray = toArray;
-const utils_1 = require("../utils");
-// TODO make it nicer
-function operationToArray(data, op) {
-    if (op instanceof insert_1.Insert) {
-        let copy = data.slice(0);
-        copy = utils_1.ensureArrayLength(copy, op.at);
-        copy.splice(op.at, 0, ...op.value.split(''));
-        return copy;
-    }
-    else {
-        if (op.at < 0)
-            return data;
-        let copy = data.slice(0);
-        copy = utils_1.ensureArrayLength(copy, op.at);
-        copy.splice(op.at, op.length);
-        return copy;
-    }
-}
-exports.operationToArray = operationToArray;
-function toString(value) {
-    return value.join('');
-}
-exports.toString = toString;
-function renderString(text) {
-    return toString(toArray(text));
-}
-exports.renderString = renderString;
-
-},{"../utils":31,"./insert":28}],31:[function(require,module,exports){
-'use strict';
-Object.defineProperty(exports, "__esModule", { value: true });
-function between(value, min, max) {
-    if (value <= min) {
-        return false;
-    }
-    else if (value >= max) {
-        return false;
-    }
-    return true;
-}
-exports.between = between;
 function ensureArrayLength(array, len) {
     if (array.length < len) {
         array.length = len;
@@ -3674,51 +3818,98 @@ function ensureArrayLength(array, len) {
     return array;
 }
 exports.ensureArrayLength = ensureArrayLength;
-function sortNumbers(a, b) {
-    return a - b;
-}
-exports.sortNumbers = sortNumbers;
-function clone(obj) {
-    var target = {};
-    for (const i in obj) {
-        if (obj.hasOwnProperty(i)) {
-            target[i] = obj[i];
-        }
+// TODO make it nicer
+function operationToArray(data, op) {
+    if (op instanceof insert_1.Insert) {
+        let copy = data.slice(0);
+        copy = ensureArrayLength(copy, op.at);
+        copy.splice(op.at, 0, ...op.value.split(""));
+        return copy;
     }
-    return target;
-}
-exports.clone = clone;
-function keyToMap(r, i) {
-    r[i] = true;
-    return r;
-}
-;
-function union(a, b) {
-    a = a.reduce(keyToMap, {});
-    b = b.reduce(keyToMap, a);
-    return Object.keys(b);
-}
-exports.union = union;
-function common(a, b) {
-    return Object.keys(a).reduce((r, k) => {
-        if (b.hasOwnProperty(k)) {
-            r.push(k);
+    else if (op instanceof delete_1.Delete) {
+        if (op.at < 0) {
+            return data;
         }
-        return r;
-    }, []).sort();
+        let copy = data.slice(0);
+        copy = ensureArrayLength(copy, op.at);
+        copy.splice(op.at, op.length);
+        return copy;
+    }
+    return data;
 }
-exports.common = common;
-function diff(a, b) {
-    return Object.keys(a).reduce((r, k) => {
-        if (!b.hasOwnProperty(k)) {
-            r.push(k);
+exports.operationToArray = operationToArray;
+function toString(value) {
+    return value.join("");
+}
+exports.toString = toString;
+function renderString(text) {
+    return toString(toArray(text));
+}
+exports.renderString = renderString;
+function getSelection(text, fallback) {
+    return text.reduce((s, oo) => {
+        return oo.operations.reduce(selectionUpdate, s);
+    }, fallback);
+}
+exports.getSelection = getSelection;
+function getSelections(text, fallback) {
+    return text.reduce((map, oo) => {
+        return oo.operations.reduce((map, o) => {
+            return map.reduce((map, s, key) => {
+                if (o instanceof selection_1.Selection) {
+                    const xxx = map.get(o.origin);
+                    if (!xxx) {
+                        return map.set(o.origin, o);
+                    }
+                }
+                const next = selectionUpdate(s, o);
+                return map.set(next.origin, next);
+            }, map);
+        }, map);
+    }, new naive_immutable_map_1.NaiveImmutableMap().set(fallback.origin, fallback));
+}
+exports.getSelections = getSelections;
+function selectionUpdate(selection, op) {
+    if (op instanceof selection_1.Selection) {
+        if (op.hasSameOrgin(selection)) {
+            return op;
         }
-        return r;
-    }, []);
+        return selection;
+    }
+    if (op instanceof insert_1.Insert) {
+        if (op.at <= selection.at) {
+            return selection
+                .moveRightBy(op.length);
+        }
+        else if (selection.isInside(op.at)) {
+            return selection
+                .expandBy(op.length);
+        }
+        return selection;
+    }
+    if (op instanceof delete_1.Delete) {
+        if (op.at <= selection.at) {
+            if (selection.isInside(op.endsAt)) {
+                return selection
+                    .moveRightBy(op.at - selection.at)
+                    .expandBy(selection.at - op.endsAt);
+            }
+            else {
+                return selection
+                    .moveRightBy(-op.length);
+            }
+        }
+        else if (selection.isInside(op.at)) {
+            return selection
+                .expandBy(-op.length);
+        }
+        return selection;
+    }
+    return selection;
 }
-exports.diff = diff;
+exports.selectionUpdate = selectionUpdate;
 
-},{}],32:[function(require,module,exports){
+},{"../structures/naive-immutable-map":22,"./delete":26,"./insert":29,"./selection":30}],33:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -3752,7 +3943,1851 @@ var QueueingSubject = (function (_super) {
 }(Subject_1.Subject));
 exports.QueueingSubject = QueueingSubject;
 
-},{"rxjs/Subject":44}],33:[function(require,module,exports){
+},{"rxjs/Subject":46}],34:[function(require,module,exports){
+(function webpackUniversalModuleDefinition(root, factory) {
+	if(typeof exports === 'object' && typeof module === 'object')
+		module.exports = factory(require("quill"));
+	else if(typeof define === 'function' && define.amd)
+		define(["quill"], factory);
+	else if(typeof exports === 'object')
+		exports["QuillCursors"] = factory(require("quill"));
+	else
+		root["QuillCursors"] = factory(root["Quill"]);
+})(this, function(__WEBPACK_EXTERNAL_MODULE_3__) {
+return /******/ (function(modules) { // webpackBootstrap
+/******/ 	// The module cache
+/******/ 	var installedModules = {};
+/******/
+/******/ 	// The require function
+/******/ 	function __webpack_require__(moduleId) {
+/******/
+/******/ 		// Check if module is in cache
+/******/ 		if(installedModules[moduleId]) {
+/******/ 			return installedModules[moduleId].exports;
+/******/ 		}
+/******/ 		// Create a new module (and put it into the cache)
+/******/ 		var module = installedModules[moduleId] = {
+/******/ 			i: moduleId,
+/******/ 			l: false,
+/******/ 			exports: {}
+/******/ 		};
+/******/
+/******/ 		// Execute the module function
+/******/ 		modules[moduleId].call(module.exports, module, module.exports, __webpack_require__);
+/******/
+/******/ 		// Flag the module as loaded
+/******/ 		module.l = true;
+/******/
+/******/ 		// Return the exports of the module
+/******/ 		return module.exports;
+/******/ 	}
+/******/
+/******/
+/******/ 	// expose the modules object (__webpack_modules__)
+/******/ 	__webpack_require__.m = modules;
+/******/
+/******/ 	// expose the module cache
+/******/ 	__webpack_require__.c = installedModules;
+/******/
+/******/ 	// identity function for calling harmony imports with the correct context
+/******/ 	__webpack_require__.i = function(value) { return value; };
+/******/
+/******/ 	// define getter function for harmony exports
+/******/ 	__webpack_require__.d = function(exports, name, getter) {
+/******/ 		if(!__webpack_require__.o(exports, name)) {
+/******/ 			Object.defineProperty(exports, name, {
+/******/ 				configurable: false,
+/******/ 				enumerable: true,
+/******/ 				get: getter
+/******/ 			});
+/******/ 		}
+/******/ 	};
+/******/
+/******/ 	// getDefaultExport function for compatibility with non-harmony modules
+/******/ 	__webpack_require__.n = function(module) {
+/******/ 		var getter = module && module.__esModule ?
+/******/ 			function getDefault() { return module['default']; } :
+/******/ 			function getModuleExports() { return module; };
+/******/ 		__webpack_require__.d(getter, 'a', getter);
+/******/ 		return getter;
+/******/ 	};
+/******/
+/******/ 	// Object.prototype.hasOwnProperty.call
+/******/ 	__webpack_require__.o = function(object, property) { return Object.prototype.hasOwnProperty.call(object, property); };
+/******/
+/******/ 	// __webpack_public_path__
+/******/ 	__webpack_require__.p = "";
+/******/
+/******/ 	// Load entry module and return exports
+/******/ 	return __webpack_require__(__webpack_require__.s = 6);
+/******/ })
+/************************************************************************/
+/******/ ([
+/* 0 */
+/***/ (function(module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+Object.defineProperty(__webpack_exports__, "__esModule", { value: true });
+/* harmony import */ var __WEBPACK_IMPORTED_MODULE_0_quill__ = __webpack_require__(3);
+/* harmony import */ var __WEBPACK_IMPORTED_MODULE_0_quill___default = __webpack_require__.n(__WEBPACK_IMPORTED_MODULE_0_quill__);
+/* harmony import */ var __WEBPACK_IMPORTED_MODULE_1_rangefix_rangefix__ = __webpack_require__(1);
+/* harmony import */ var __WEBPACK_IMPORTED_MODULE_1_rangefix_rangefix___default = __webpack_require__.n(__WEBPACK_IMPORTED_MODULE_1_rangefix_rangefix__);
+/* harmony import */ var __WEBPACK_IMPORTED_MODULE_2_tinycolor2__ = __webpack_require__(2);
+/* harmony import */ var __WEBPACK_IMPORTED_MODULE_2_tinycolor2___default = __webpack_require__.n(__WEBPACK_IMPORTED_MODULE_2_tinycolor2__);
+
+
+
+
+var DEFAULTS = {
+  template: [
+    '<span class="ql-cursor-selections"></span>',
+    '<span class="ql-cursor-caret-container">',
+    '  <span class="ql-cursor-caret"></span>',
+    '</span>',
+    '<div class="ql-cursor-flag">',
+    '  <small class="ql-cursor-name"></small>',
+    '  <span class="ql-cursor-flag-flap"></span>',
+    '</div>'
+  ].join(''),
+  autoRegisterListener: true,
+  hideDelay: 3000,
+  hideSpeed: 400
+};
+
+function CursorsModule(quill, options) {
+  this.quill = quill;
+  this._initOptions(options);
+  this.cursors = {};
+  this.container = this.quill.addContainer('ql-cursors');
+
+  if (this.options.autoRegisterListener)
+    this.registerTextChangeListener();
+
+  window.addEventListener('resize', this.update.bind(this));
+}
+
+CursorsModule.prototype.registerTextChangeListener = function() {
+  this.quill.on(this.quill.constructor.events.TEXT_CHANGE, this._applyDelta.bind(this));
+};
+
+CursorsModule.prototype.clearCursors = function() {
+  Object.keys(this.cursors).forEach(this.removeCursor.bind(this));
+};
+
+CursorsModule.prototype.moveCursor = function(userId, range) {
+  var cursor = this.cursors[userId];
+  if (cursor) {
+    cursor.range = range;
+    cursor.el.classList.remove('hidden');
+    this._updateCursor(cursor);
+    // TODO Implement cursor hiding timeout like 0.20/benbro?
+  }
+};
+
+CursorsModule.prototype.removeCursor = function(userId) {
+  var cursor = this.cursors[userId];
+  if (cursor)
+    cursor.el.parentNode.removeChild(cursor.el);
+  delete this.cursors[userId];
+};
+
+CursorsModule.prototype.setCursor = function(userId, range, name, color) {
+  // Init cursor if it doesn't exist
+  if (!this.cursors[userId]) {
+    this.cursors[userId] = {
+      userId: userId,
+      color: color,
+      range: range,
+      el: null,
+      selectionEl: null,
+      caretEl: null,
+      flagEl: null
+    };
+
+    // Build and init the remaining cursor elements
+    this._buildCursor(userId, name);
+  }
+
+  // Move and update cursor
+  window.setTimeout(function() {
+    this.moveCursor(userId, range);
+  }.bind(this));
+
+  return this.cursors[userId];
+};
+
+CursorsModule.prototype.shiftCursors = function(index, length) {
+  var cursor;
+
+  Object.keys(this.cursors).forEach(function(userId) {
+    if ((cursor = this.cursors[userId]) && cursor.range) {
+      // If characters we're added or there is no selection
+      // advance start/end if it's greater or equal than index
+      if (length > 0 || cursor.range.length == 0)
+        this._shiftCursor(userId, index - 1, length);
+      // Else if characters were removed
+      // move start/end back if it's only greater than index
+      else
+        this._shiftCursor(userId, index, length);
+    }
+  }, this);
+};
+
+CursorsModule.prototype.update = function() {
+  Object.keys(this.cursors).map(function(key) {
+    this._updateCursor(this.cursors[key])
+  }.bind(this));
+};
+
+CursorsModule.prototype._initOptions = function(options) {
+  this.options = DEFAULTS;
+  this.options.template = options.template || this.options.template;
+  this.options.autoRegisterListener = (options.autoRegisterListener == false) ? options.autoRegisterListener : this.options.autoRegisterListener;
+  this.options.hideDelay = (options.hideDelay == undefined) ? this.options.hideDelay : options.hideDelay;
+  this.options.hideSpeed = (options.hideSpeed == undefined) ? this.options.hideSpeed : options.hideSpeed;
+};
+
+CursorsModule.prototype._applyDelta = function(delta) {
+  var index = 0;
+
+  delta.ops.forEach(function(op) {
+    var length = 0;
+
+    if (op.insert) {
+      length = op.insert.length || 1;
+      this.shiftCursors(index, length);
+    } else if (op.delete) {
+      this.shiftCursors(index, -1 * op.delete);
+    } else if (op.retain) {
+      // Is this really needed?
+      //this.shiftCursors(index, 0);
+      length = op.retain
+    }
+
+    index += length;
+  }, this);
+
+  this.update();
+};
+
+CursorsModule.prototype._buildCursor = function(userId, name) {
+  var cursor = this.cursors[userId];
+  var el = document.createElement('span');
+  var selectionEl;
+  var caretEl;
+  var flagEl;
+
+  el.classList.add('ql-cursor');
+  el.innerHTML = this.options.template;
+  selectionEl = el.querySelector('.ql-cursor-selections');
+  caretEl = el.querySelector('.ql-cursor-caret-container');
+  flagEl = el.querySelector('.ql-cursor-flag');
+
+  // Set color
+  flagEl.style.backgroundColor = cursor.color;
+  caretEl.querySelector('.ql-cursor-caret').style.backgroundColor = cursor.color;
+
+  el.querySelector('.ql-cursor-name').innerText = name;
+
+  // Set flag delay, speed
+  flagEl.style.transitionDelay = this.options.hideDelay + 'ms';
+  flagEl.style.transitionDuration = this.options.hideSpeed + 'ms';
+
+  this.container.appendChild(el);
+
+  // Set cursor elements
+  cursor.el = el;
+  cursor.selectionEl = selectionEl;
+  cursor.caretEl = caretEl;
+  cursor.flagEl = flagEl;
+};
+
+CursorsModule.prototype._shiftCursor = function(userId, index, length) {
+  var cursor = this.cursors[userId];
+  if (cursor.range.index > index)
+    cursor.range.index += length;
+};
+
+CursorsModule.prototype._hideCursor = function(userId) {
+  var cursor = this.cursors[userId];
+  if (cursor)
+    cursor.el.classList.add('hidden');
+};
+
+CursorsModule.prototype._updateCursor = function(cursor) {
+  if (!cursor || !cursor.range) return;
+
+  var containerRect = this.quill.container.getBoundingClientRect();
+  var startLeaf = this.quill.getLeaf(cursor.range.index);
+  var endLeaf = this.quill.getLeaf(cursor.range.index + cursor.range.length);
+  var range = document.createRange();
+  var rects;
+
+  // Sanity check
+  if (!startLeaf || !endLeaf ||
+    !startLeaf[0] || !endLeaf[0] ||
+    startLeaf[1] < 0 || endLeaf[1] < 0 ||
+    !startLeaf[0].domNode || !endLeaf[0].domNode) {
+    console.log('Troubles!', cursor);
+
+    return this._hideCursor(cursor.userId);
+  }
+
+  range.setStart(startLeaf[0].domNode, startLeaf[1]);
+  range.setEnd(endLeaf[0].domNode, endLeaf[1]);
+  rects = window.RangeFix.getClientRects(range);
+
+  this._updateCaret(cursor, endLeaf);
+  this._updateSelection(cursor, rects, containerRect);
+};
+
+CursorsModule.prototype._updateCaret = function(cursor, leaf) {
+  var rect, index = cursor.range.index + cursor.range.length;
+
+  // The only time a valid offset of 0 can occur is when the cursor is positioned
+  // before the first character in a line, and it will be the case that the start
+  // and end points of the range will be exactly the same... if they are not then
+  // a block selection is taking place and we need to offset the character position
+  // by -1;
+  if (index > 0 && leaf[1] === 0 && cursor.range.index !== (cursor.range.index + cursor.range.length)) {
+    index--;
+  }
+
+  rect = this.quill.getBounds(index);
+
+  cursor.caretEl.style.top = (rect.top) + 'px';
+  cursor.caretEl.style.left = (rect.left) + 'px';
+  cursor.caretEl.style.height = rect.height + 'px';
+
+  cursor.flagEl.style.top = (rect.top) + 'px';
+  cursor.flagEl.style.left = (rect.left) + 'px';
+};
+
+CursorsModule.prototype._updateSelection = function(cursor, rects, containerRect) {
+  function createSelectionBlock(rect) {
+    var selectionBlockEl = document.createElement('span');
+
+    selectionBlockEl.classList.add('ql-cursor-selection-block');
+    selectionBlockEl.style.top = (rect.top - containerRect.top) + 'px';
+    selectionBlockEl.style.left = (rect.left - containerRect.left) + 'px';
+    selectionBlockEl.style.width = rect.width + 'px';
+    selectionBlockEl.style.height = rect.height + 'px';
+    selectionBlockEl.style.backgroundColor = __WEBPACK_IMPORTED_MODULE_2_tinycolor2___default()(cursor.color).setAlpha(0.3).toString();
+
+    return selectionBlockEl;
+  }
+
+  // Wipe the slate clean
+  cursor.selectionEl.innerHTML = null;
+
+  var index = [];
+  var rectIndex;
+
+  [].forEach.call(rects, function(rect) {
+    rectIndex = ('' + rect.top + rect.left + rect.width + rect.height);
+
+    // Note: Safari throws a rect with length 1 when caret with no selection.
+    // A check was addedfor to avoid drawing those carets - they show up on blinking.
+    if (!~index.indexOf(rectIndex) && rect.width > 1) {
+      index.push(rectIndex);
+      cursor.selectionEl.appendChild(createSelectionBlock(rect));
+    }
+  }, this);
+};
+
+__WEBPACK_IMPORTED_MODULE_0_quill___default.a.register('modules/cursors', CursorsModule);
+
+
+/***/ }),
+/* 1 */
+/***/ (function(module, exports) {
+
+/*!
+ * RangeFix v0.2.3
+ * https://github.com/edg2s/rangefix
+ *
+ * Copyright 2014-17 Ed Sanders.
+ * Released under the MIT license
+ */
+( function () {
+
+	var broken,
+		rangeFix = {};
+
+	/**
+	 * Check if bugs are present in the native functions
+	 *
+	 * For getClientRects, constructs two lines of text and
+	 * creates a range between them. Broken browsers will
+	 * return three rectangles instead of two.
+	 *
+	 * For getBoundingClientRect, create a collapsed range
+	 * and check if the resulting rect has non-zero offsets.
+	 *
+	 * getBoundingClientRect is also considered broken if
+	 * getClientRects is broken.
+	 *
+	 * For the IE zoom bug, just check the version number as
+	 * we can't detect the bug if the zoom level is currently 100%.
+	 *
+	 * @private
+	 * @return {Object} Object containing boolean properties 'getClientRects',
+	 *                  'getBoundingClientRect' and 'ieZoom' indicating bugs are present
+	 *                  in these functions/browsers.
+	 */
+	function isBroken() {
+		var boundingRect, p, span, t1, t2, img, range, jscriptVersion;
+
+		if ( broken === undefined ) {
+			p = document.createElement( 'p' );
+			span = document.createElement( 'span' );
+			t1 = document.createTextNode( 'aa' );
+			t2 = document.createTextNode( 'aa' );
+			img = document.createElement( 'img' );
+			img.setAttribute( 'src', '#null' );
+			range = document.createRange();
+
+			broken = {};
+
+			p.appendChild( t1 );
+			p.appendChild( span );
+			span.appendChild( img );
+			span.appendChild( t2 );
+
+			document.body.appendChild( p );
+
+			range.setStart( t1, 1 );
+			range.setEnd( span, 0 );
+
+			// A selection ending just inside another element shouldn't select that whole element
+			// Broken in Chrome <= 55 and Firefox
+			broken.getClientRects = broken.getBoundingClientRect = range.getClientRects().length > 1;
+
+			if ( !broken.getClientRects ) {
+				// A selection across a wrapped image should give a rect for that image
+				// Regression in Chrome 55
+				range.setEnd( t2, 1 );
+				broken.getClientRects = broken.getBoundingClientRect = range.getClientRects().length < 3;
+			}
+
+			if ( !broken.getBoundingClientRect ) {
+				// Safari doesn't return a valid bounding rect for collapsed ranges
+				// Equivalent to range.collapse( true ) which isn't well supported
+				range.setEnd( range.startContainer, range.startOffset );
+				boundingRect = range.getBoundingClientRect();
+				broken.getBoundingClientRect = boundingRect.top === 0 && boundingRect.left === 0;
+			}
+
+			document.body.removeChild( p );
+
+			// Detect IE<=10 where zooming scaling is broken
+			// eslint-disable-next-line no-new-func
+			jscriptVersion = window.ActiveXObject && new Function( '/*@cc_on return @_jscript_version; @*/' )();
+			broken.ieZoom = jscriptVersion && jscriptVersion <= 10;
+		}
+		return broken;
+	}
+
+	/**
+	 * Compensate for the current zoom level in IE<=10
+	 *
+	 * getClientRects returns values in real pixels in these browsers,
+	 * so using them in your CSS will result in them getting scaled again.
+	 *
+	 * @private
+	 * @param {ClientRectList|ClientRect[]|ClientRect|Object|null} rectOrRects Rect or list of rects to fix
+	 * @return {ClientRectList|ClientRect[]|ClientRect|Object|null} Fixed rect or list of rects
+	 */
+	function zoomFix( rectOrRects ) {
+		var zoom;
+		if ( !rectOrRects ) {
+			return rectOrRects;
+		}
+		// Optimisation when zoom level is 1: return original object
+		if ( screen.deviceXDPI === screen.logicalXDPI ) {
+			return rectOrRects;
+		}
+		// Rect list: map this function to each rect
+		if ( 'length' in rectOrRects ) {
+			return Array.prototype.map.call( rectOrRects, zoomFix );
+		}
+		// Single rect: Adjust by zoom factor
+		zoom = screen.deviceXDPI / screen.logicalXDPI;
+		return {
+			top: rectOrRects.top / zoom,
+			bottom: rectOrRects.bottom / zoom,
+			left: rectOrRects.left / zoom,
+			right: rectOrRects.right / zoom,
+			width: rectOrRects.width / zoom,
+			height: rectOrRects.height / zoom
+		};
+	}
+
+	/**
+	 * Push one array-like object onto another.
+	 *
+	 * @param {Object} arr Array or array-like object. Will be modified
+	 * @param {Object} data Array-like object of items to insert.
+	 * @return {number} length of the new array
+	 */
+	function batchPush( arr, data ) {
+		// We need to push insertion in batches, because of parameter list length limits which vary
+		// cross-browser - 1024 seems to be a safe batch size on all browsers
+		var length,
+			index = 0,
+			batchSize = 1024;
+		if ( batchSize >= data.length ) {
+			// Avoid slicing for small lists
+			return Array.prototype.push.apply( arr, data );
+		}
+		while ( index < data.length ) {
+			// Call arr.push( i0, i1, i2, ..., i1023 );
+			length = Array.prototype.push.apply(
+				arr, Array.prototype.slice.call( data, index, index + batchSize )
+			);
+			index += batchSize;
+		}
+		return length;
+	}
+
+	/**
+	 * Get client rectangles from a range
+	 *
+	 * @param {Range} range Range
+	 * @return {ClientRectList|ClientRect[]} ClientRectList or list of ClientRect objects describing range
+	 */
+	rangeFix.getClientRects = function ( range ) {
+		var rects, endContainer, endOffset, partialRange,
+			broken = isBroken();
+
+		if ( broken.ieZoom ) {
+			return zoomFix( range.getClientRects() );
+		} else if ( !broken.getClientRects ) {
+			return range.getClientRects();
+		}
+
+		// Chrome gets the end container rects wrong when spanning
+		// nodes so we need to traverse up the tree from the endContainer until
+		// we reach the common ancestor, then we can add on from start to where
+		// we got up to
+		// https://code.google.com/p/chromium/issues/detail?id=324437
+		rects = [];
+		endContainer = range.endContainer;
+		endOffset = range.endOffset;
+		partialRange = document.createRange();
+
+		while ( endContainer !== range.commonAncestorContainer ) {
+			partialRange.setStart( endContainer, 0 );
+			partialRange.setEnd( endContainer, endOffset );
+
+			batchPush( rects, partialRange.getClientRects() );
+
+			endOffset = Array.prototype.indexOf.call( endContainer.parentNode.childNodes, endContainer );
+			endContainer = endContainer.parentNode;
+		}
+
+		// Once we've reached the common ancestor, add on the range from the
+		// original start position to where we ended up.
+		partialRange = range.cloneRange();
+		partialRange.setEnd( endContainer, endOffset );
+		batchPush( rects, partialRange.getClientRects() );
+		return rects;
+	};
+
+	/**
+	 * Get bounding rectangle from a range
+	 *
+	 * @param {Range} range Range
+	 * @return {ClientRect|Object|null} ClientRect or ClientRect-like object describing
+	 *                                  bounding rectangle, or null if not computable
+	 */
+	rangeFix.getBoundingClientRect = function ( range ) {
+		var i, l, boundingRect, rect, nativeBoundingRect, broken,
+			rects = this.getClientRects( range );
+
+		// If there are no rects return null, otherwise we'll fall through to
+		// getBoundingClientRect, which in Chrome and Firefox becomes [0,0,0,0].
+		if ( rects.length === 0 ) {
+			return null;
+		}
+
+		nativeBoundingRect = range.getBoundingClientRect();
+		broken = isBroken();
+
+		if ( broken.ieZoom ) {
+			return zoomFix( nativeBoundingRect );
+		} else if ( !broken.getBoundingClientRect ) {
+			return nativeBoundingRect;
+		}
+
+		// When nativeRange is a collapsed cursor at the end of a line or
+		// the start of a line, the bounding rect is [0,0,0,0] in Chrome.
+		// getClientRects returns two rects, one correct, and one at the
+		// end of the next line / start of the previous line. We can't tell
+		// here which one to use so just pick the first. This matches
+		// Firefox's behaviour, which tells you the cursor is at the end
+		// of the previous line when it is at the start of the line.
+		// See https://code.google.com/p/chromium/issues/detail?id=426017
+		if ( nativeBoundingRect.width === 0 && nativeBoundingRect.height === 0 ) {
+			return rects[ 0 ];
+		}
+
+		for ( i = 0, l = rects.length; i < l; i++ ) {
+			rect = rects[ i ];
+			if ( !boundingRect ) {
+				boundingRect = {
+					left: rect.left,
+					top: rect.top,
+					right: rect.right,
+					bottom: rect.bottom
+				};
+			} else {
+				boundingRect.left = Math.min( boundingRect.left, rect.left );
+				boundingRect.top = Math.min( boundingRect.top, rect.top );
+				boundingRect.right = Math.max( boundingRect.right, rect.right );
+				boundingRect.bottom = Math.max( boundingRect.bottom, rect.bottom );
+			}
+		}
+		if ( boundingRect ) {
+			boundingRect.width = boundingRect.right - boundingRect.left;
+			boundingRect.height = boundingRect.bottom - boundingRect.top;
+		}
+		return boundingRect;
+	};
+
+	// Expose
+	window.RangeFix = rangeFix;
+
+} )();
+
+
+/***/ }),
+/* 2 */
+/***/ (function(module, exports, __webpack_require__) {
+
+var __WEBPACK_AMD_DEFINE_RESULT__;// TinyColor v1.4.1
+// https://github.com/bgrins/TinyColor
+// Brian Grinstead, MIT License
+
+(function(Math) {
+
+var trimLeft = /^\s+/,
+    trimRight = /\s+$/,
+    tinyCounter = 0,
+    mathRound = Math.round,
+    mathMin = Math.min,
+    mathMax = Math.max,
+    mathRandom = Math.random;
+
+function tinycolor (color, opts) {
+
+    color = (color) ? color : '';
+    opts = opts || { };
+
+    // If input is already a tinycolor, return itself
+    if (color instanceof tinycolor) {
+       return color;
+    }
+    // If we are called as a function, call using new instead
+    if (!(this instanceof tinycolor)) {
+        return new tinycolor(color, opts);
+    }
+
+    var rgb = inputToRGB(color);
+    this._originalInput = color,
+    this._r = rgb.r,
+    this._g = rgb.g,
+    this._b = rgb.b,
+    this._a = rgb.a,
+    this._roundA = mathRound(100*this._a) / 100,
+    this._format = opts.format || rgb.format;
+    this._gradientType = opts.gradientType;
+
+    // Don't let the range of [0,255] come back in [0,1].
+    // Potentially lose a little bit of precision here, but will fix issues where
+    // .5 gets interpreted as half of the total, instead of half of 1
+    // If it was supposed to be 128, this was already taken care of by `inputToRgb`
+    if (this._r < 1) { this._r = mathRound(this._r); }
+    if (this._g < 1) { this._g = mathRound(this._g); }
+    if (this._b < 1) { this._b = mathRound(this._b); }
+
+    this._ok = rgb.ok;
+    this._tc_id = tinyCounter++;
+}
+
+tinycolor.prototype = {
+    isDark: function() {
+        return this.getBrightness() < 128;
+    },
+    isLight: function() {
+        return !this.isDark();
+    },
+    isValid: function() {
+        return this._ok;
+    },
+    getOriginalInput: function() {
+      return this._originalInput;
+    },
+    getFormat: function() {
+        return this._format;
+    },
+    getAlpha: function() {
+        return this._a;
+    },
+    getBrightness: function() {
+        //http://www.w3.org/TR/AERT#color-contrast
+        var rgb = this.toRgb();
+        return (rgb.r * 299 + rgb.g * 587 + rgb.b * 114) / 1000;
+    },
+    getLuminance: function() {
+        //http://www.w3.org/TR/2008/REC-WCAG20-20081211/#relativeluminancedef
+        var rgb = this.toRgb();
+        var RsRGB, GsRGB, BsRGB, R, G, B;
+        RsRGB = rgb.r/255;
+        GsRGB = rgb.g/255;
+        BsRGB = rgb.b/255;
+
+        if (RsRGB <= 0.03928) {R = RsRGB / 12.92;} else {R = Math.pow(((RsRGB + 0.055) / 1.055), 2.4);}
+        if (GsRGB <= 0.03928) {G = GsRGB / 12.92;} else {G = Math.pow(((GsRGB + 0.055) / 1.055), 2.4);}
+        if (BsRGB <= 0.03928) {B = BsRGB / 12.92;} else {B = Math.pow(((BsRGB + 0.055) / 1.055), 2.4);}
+        return (0.2126 * R) + (0.7152 * G) + (0.0722 * B);
+    },
+    setAlpha: function(value) {
+        this._a = boundAlpha(value);
+        this._roundA = mathRound(100*this._a) / 100;
+        return this;
+    },
+    toHsv: function() {
+        var hsv = rgbToHsv(this._r, this._g, this._b);
+        return { h: hsv.h * 360, s: hsv.s, v: hsv.v, a: this._a };
+    },
+    toHsvString: function() {
+        var hsv = rgbToHsv(this._r, this._g, this._b);
+        var h = mathRound(hsv.h * 360), s = mathRound(hsv.s * 100), v = mathRound(hsv.v * 100);
+        return (this._a == 1) ?
+          "hsv("  + h + ", " + s + "%, " + v + "%)" :
+          "hsva(" + h + ", " + s + "%, " + v + "%, "+ this._roundA + ")";
+    },
+    toHsl: function() {
+        var hsl = rgbToHsl(this._r, this._g, this._b);
+        return { h: hsl.h * 360, s: hsl.s, l: hsl.l, a: this._a };
+    },
+    toHslString: function() {
+        var hsl = rgbToHsl(this._r, this._g, this._b);
+        var h = mathRound(hsl.h * 360), s = mathRound(hsl.s * 100), l = mathRound(hsl.l * 100);
+        return (this._a == 1) ?
+          "hsl("  + h + ", " + s + "%, " + l + "%)" :
+          "hsla(" + h + ", " + s + "%, " + l + "%, "+ this._roundA + ")";
+    },
+    toHex: function(allow3Char) {
+        return rgbToHex(this._r, this._g, this._b, allow3Char);
+    },
+    toHexString: function(allow3Char) {
+        return '#' + this.toHex(allow3Char);
+    },
+    toHex8: function(allow4Char) {
+        return rgbaToHex(this._r, this._g, this._b, this._a, allow4Char);
+    },
+    toHex8String: function(allow4Char) {
+        return '#' + this.toHex8(allow4Char);
+    },
+    toRgb: function() {
+        return { r: mathRound(this._r), g: mathRound(this._g), b: mathRound(this._b), a: this._a };
+    },
+    toRgbString: function() {
+        return (this._a == 1) ?
+          "rgb("  + mathRound(this._r) + ", " + mathRound(this._g) + ", " + mathRound(this._b) + ")" :
+          "rgba(" + mathRound(this._r) + ", " + mathRound(this._g) + ", " + mathRound(this._b) + ", " + this._roundA + ")";
+    },
+    toPercentageRgb: function() {
+        return { r: mathRound(bound01(this._r, 255) * 100) + "%", g: mathRound(bound01(this._g, 255) * 100) + "%", b: mathRound(bound01(this._b, 255) * 100) + "%", a: this._a };
+    },
+    toPercentageRgbString: function() {
+        return (this._a == 1) ?
+          "rgb("  + mathRound(bound01(this._r, 255) * 100) + "%, " + mathRound(bound01(this._g, 255) * 100) + "%, " + mathRound(bound01(this._b, 255) * 100) + "%)" :
+          "rgba(" + mathRound(bound01(this._r, 255) * 100) + "%, " + mathRound(bound01(this._g, 255) * 100) + "%, " + mathRound(bound01(this._b, 255) * 100) + "%, " + this._roundA + ")";
+    },
+    toName: function() {
+        if (this._a === 0) {
+            return "transparent";
+        }
+
+        if (this._a < 1) {
+            return false;
+        }
+
+        return hexNames[rgbToHex(this._r, this._g, this._b, true)] || false;
+    },
+    toFilter: function(secondColor) {
+        var hex8String = '#' + rgbaToArgbHex(this._r, this._g, this._b, this._a);
+        var secondHex8String = hex8String;
+        var gradientType = this._gradientType ? "GradientType = 1, " : "";
+
+        if (secondColor) {
+            var s = tinycolor(secondColor);
+            secondHex8String = '#' + rgbaToArgbHex(s._r, s._g, s._b, s._a);
+        }
+
+        return "progid:DXImageTransform.Microsoft.gradient("+gradientType+"startColorstr="+hex8String+",endColorstr="+secondHex8String+")";
+    },
+    toString: function(format) {
+        var formatSet = !!format;
+        format = format || this._format;
+
+        var formattedString = false;
+        var hasAlpha = this._a < 1 && this._a >= 0;
+        var needsAlphaFormat = !formatSet && hasAlpha && (format === "hex" || format === "hex6" || format === "hex3" || format === "hex4" || format === "hex8" || format === "name");
+
+        if (needsAlphaFormat) {
+            // Special case for "transparent", all other non-alpha formats
+            // will return rgba when there is transparency.
+            if (format === "name" && this._a === 0) {
+                return this.toName();
+            }
+            return this.toRgbString();
+        }
+        if (format === "rgb") {
+            formattedString = this.toRgbString();
+        }
+        if (format === "prgb") {
+            formattedString = this.toPercentageRgbString();
+        }
+        if (format === "hex" || format === "hex6") {
+            formattedString = this.toHexString();
+        }
+        if (format === "hex3") {
+            formattedString = this.toHexString(true);
+        }
+        if (format === "hex4") {
+            formattedString = this.toHex8String(true);
+        }
+        if (format === "hex8") {
+            formattedString = this.toHex8String();
+        }
+        if (format === "name") {
+            formattedString = this.toName();
+        }
+        if (format === "hsl") {
+            formattedString = this.toHslString();
+        }
+        if (format === "hsv") {
+            formattedString = this.toHsvString();
+        }
+
+        return formattedString || this.toHexString();
+    },
+    clone: function() {
+        return tinycolor(this.toString());
+    },
+
+    _applyModification: function(fn, args) {
+        var color = fn.apply(null, [this].concat([].slice.call(args)));
+        this._r = color._r;
+        this._g = color._g;
+        this._b = color._b;
+        this.setAlpha(color._a);
+        return this;
+    },
+    lighten: function() {
+        return this._applyModification(lighten, arguments);
+    },
+    brighten: function() {
+        return this._applyModification(brighten, arguments);
+    },
+    darken: function() {
+        return this._applyModification(darken, arguments);
+    },
+    desaturate: function() {
+        return this._applyModification(desaturate, arguments);
+    },
+    saturate: function() {
+        return this._applyModification(saturate, arguments);
+    },
+    greyscale: function() {
+        return this._applyModification(greyscale, arguments);
+    },
+    spin: function() {
+        return this._applyModification(spin, arguments);
+    },
+
+    _applyCombination: function(fn, args) {
+        return fn.apply(null, [this].concat([].slice.call(args)));
+    },
+    analogous: function() {
+        return this._applyCombination(analogous, arguments);
+    },
+    complement: function() {
+        return this._applyCombination(complement, arguments);
+    },
+    monochromatic: function() {
+        return this._applyCombination(monochromatic, arguments);
+    },
+    splitcomplement: function() {
+        return this._applyCombination(splitcomplement, arguments);
+    },
+    triad: function() {
+        return this._applyCombination(triad, arguments);
+    },
+    tetrad: function() {
+        return this._applyCombination(tetrad, arguments);
+    }
+};
+
+// If input is an object, force 1 into "1.0" to handle ratios properly
+// String input requires "1.0" as input, so 1 will be treated as 1
+tinycolor.fromRatio = function(color, opts) {
+    if (typeof color == "object") {
+        var newColor = {};
+        for (var i in color) {
+            if (color.hasOwnProperty(i)) {
+                if (i === "a") {
+                    newColor[i] = color[i];
+                }
+                else {
+                    newColor[i] = convertToPercentage(color[i]);
+                }
+            }
+        }
+        color = newColor;
+    }
+
+    return tinycolor(color, opts);
+};
+
+// Given a string or object, convert that input to RGB
+// Possible string inputs:
+//
+//     "red"
+//     "#f00" or "f00"
+//     "#ff0000" or "ff0000"
+//     "#ff000000" or "ff000000"
+//     "rgb 255 0 0" or "rgb (255, 0, 0)"
+//     "rgb 1.0 0 0" or "rgb (1, 0, 0)"
+//     "rgba (255, 0, 0, 1)" or "rgba 255, 0, 0, 1"
+//     "rgba (1.0, 0, 0, 1)" or "rgba 1.0, 0, 0, 1"
+//     "hsl(0, 100%, 50%)" or "hsl 0 100% 50%"
+//     "hsla(0, 100%, 50%, 1)" or "hsla 0 100% 50%, 1"
+//     "hsv(0, 100%, 100%)" or "hsv 0 100% 100%"
+//
+function inputToRGB(color) {
+
+    var rgb = { r: 0, g: 0, b: 0 };
+    var a = 1;
+    var s = null;
+    var v = null;
+    var l = null;
+    var ok = false;
+    var format = false;
+
+    if (typeof color == "string") {
+        color = stringInputToObject(color);
+    }
+
+    if (typeof color == "object") {
+        if (isValidCSSUnit(color.r) && isValidCSSUnit(color.g) && isValidCSSUnit(color.b)) {
+            rgb = rgbToRgb(color.r, color.g, color.b);
+            ok = true;
+            format = String(color.r).substr(-1) === "%" ? "prgb" : "rgb";
+        }
+        else if (isValidCSSUnit(color.h) && isValidCSSUnit(color.s) && isValidCSSUnit(color.v)) {
+            s = convertToPercentage(color.s);
+            v = convertToPercentage(color.v);
+            rgb = hsvToRgb(color.h, s, v);
+            ok = true;
+            format = "hsv";
+        }
+        else if (isValidCSSUnit(color.h) && isValidCSSUnit(color.s) && isValidCSSUnit(color.l)) {
+            s = convertToPercentage(color.s);
+            l = convertToPercentage(color.l);
+            rgb = hslToRgb(color.h, s, l);
+            ok = true;
+            format = "hsl";
+        }
+
+        if (color.hasOwnProperty("a")) {
+            a = color.a;
+        }
+    }
+
+    a = boundAlpha(a);
+
+    return {
+        ok: ok,
+        format: color.format || format,
+        r: mathMin(255, mathMax(rgb.r, 0)),
+        g: mathMin(255, mathMax(rgb.g, 0)),
+        b: mathMin(255, mathMax(rgb.b, 0)),
+        a: a
+    };
+}
+
+
+// Conversion Functions
+// --------------------
+
+// `rgbToHsl`, `rgbToHsv`, `hslToRgb`, `hsvToRgb` modified from:
+// <http://mjijackson.com/2008/02/rgb-to-hsl-and-rgb-to-hsv-color-model-conversion-algorithms-in-javascript>
+
+// `rgbToRgb`
+// Handle bounds / percentage checking to conform to CSS color spec
+// <http://www.w3.org/TR/css3-color/>
+// *Assumes:* r, g, b in [0, 255] or [0, 1]
+// *Returns:* { r, g, b } in [0, 255]
+function rgbToRgb(r, g, b){
+    return {
+        r: bound01(r, 255) * 255,
+        g: bound01(g, 255) * 255,
+        b: bound01(b, 255) * 255
+    };
+}
+
+// `rgbToHsl`
+// Converts an RGB color value to HSL.
+// *Assumes:* r, g, and b are contained in [0, 255] or [0, 1]
+// *Returns:* { h, s, l } in [0,1]
+function rgbToHsl(r, g, b) {
+
+    r = bound01(r, 255);
+    g = bound01(g, 255);
+    b = bound01(b, 255);
+
+    var max = mathMax(r, g, b), min = mathMin(r, g, b);
+    var h, s, l = (max + min) / 2;
+
+    if(max == min) {
+        h = s = 0; // achromatic
+    }
+    else {
+        var d = max - min;
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        switch(max) {
+            case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+            case g: h = (b - r) / d + 2; break;
+            case b: h = (r - g) / d + 4; break;
+        }
+
+        h /= 6;
+    }
+
+    return { h: h, s: s, l: l };
+}
+
+// `hslToRgb`
+// Converts an HSL color value to RGB.
+// *Assumes:* h is contained in [0, 1] or [0, 360] and s and l are contained [0, 1] or [0, 100]
+// *Returns:* { r, g, b } in the set [0, 255]
+function hslToRgb(h, s, l) {
+    var r, g, b;
+
+    h = bound01(h, 360);
+    s = bound01(s, 100);
+    l = bound01(l, 100);
+
+    function hue2rgb(p, q, t) {
+        if(t < 0) t += 1;
+        if(t > 1) t -= 1;
+        if(t < 1/6) return p + (q - p) * 6 * t;
+        if(t < 1/2) return q;
+        if(t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+        return p;
+    }
+
+    if(s === 0) {
+        r = g = b = l; // achromatic
+    }
+    else {
+        var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        var p = 2 * l - q;
+        r = hue2rgb(p, q, h + 1/3);
+        g = hue2rgb(p, q, h);
+        b = hue2rgb(p, q, h - 1/3);
+    }
+
+    return { r: r * 255, g: g * 255, b: b * 255 };
+}
+
+// `rgbToHsv`
+// Converts an RGB color value to HSV
+// *Assumes:* r, g, and b are contained in the set [0, 255] or [0, 1]
+// *Returns:* { h, s, v } in [0,1]
+function rgbToHsv(r, g, b) {
+
+    r = bound01(r, 255);
+    g = bound01(g, 255);
+    b = bound01(b, 255);
+
+    var max = mathMax(r, g, b), min = mathMin(r, g, b);
+    var h, s, v = max;
+
+    var d = max - min;
+    s = max === 0 ? 0 : d / max;
+
+    if(max == min) {
+        h = 0; // achromatic
+    }
+    else {
+        switch(max) {
+            case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+            case g: h = (b - r) / d + 2; break;
+            case b: h = (r - g) / d + 4; break;
+        }
+        h /= 6;
+    }
+    return { h: h, s: s, v: v };
+}
+
+// `hsvToRgb`
+// Converts an HSV color value to RGB.
+// *Assumes:* h is contained in [0, 1] or [0, 360] and s and v are contained in [0, 1] or [0, 100]
+// *Returns:* { r, g, b } in the set [0, 255]
+ function hsvToRgb(h, s, v) {
+
+    h = bound01(h, 360) * 6;
+    s = bound01(s, 100);
+    v = bound01(v, 100);
+
+    var i = Math.floor(h),
+        f = h - i,
+        p = v * (1 - s),
+        q = v * (1 - f * s),
+        t = v * (1 - (1 - f) * s),
+        mod = i % 6,
+        r = [v, q, p, p, t, v][mod],
+        g = [t, v, v, q, p, p][mod],
+        b = [p, p, t, v, v, q][mod];
+
+    return { r: r * 255, g: g * 255, b: b * 255 };
+}
+
+// `rgbToHex`
+// Converts an RGB color to hex
+// Assumes r, g, and b are contained in the set [0, 255]
+// Returns a 3 or 6 character hex
+function rgbToHex(r, g, b, allow3Char) {
+
+    var hex = [
+        pad2(mathRound(r).toString(16)),
+        pad2(mathRound(g).toString(16)),
+        pad2(mathRound(b).toString(16))
+    ];
+
+    // Return a 3 character hex if possible
+    if (allow3Char && hex[0].charAt(0) == hex[0].charAt(1) && hex[1].charAt(0) == hex[1].charAt(1) && hex[2].charAt(0) == hex[2].charAt(1)) {
+        return hex[0].charAt(0) + hex[1].charAt(0) + hex[2].charAt(0);
+    }
+
+    return hex.join("");
+}
+
+// `rgbaToHex`
+// Converts an RGBA color plus alpha transparency to hex
+// Assumes r, g, b are contained in the set [0, 255] and
+// a in [0, 1]. Returns a 4 or 8 character rgba hex
+function rgbaToHex(r, g, b, a, allow4Char) {
+
+    var hex = [
+        pad2(mathRound(r).toString(16)),
+        pad2(mathRound(g).toString(16)),
+        pad2(mathRound(b).toString(16)),
+        pad2(convertDecimalToHex(a))
+    ];
+
+    // Return a 4 character hex if possible
+    if (allow4Char && hex[0].charAt(0) == hex[0].charAt(1) && hex[1].charAt(0) == hex[1].charAt(1) && hex[2].charAt(0) == hex[2].charAt(1) && hex[3].charAt(0) == hex[3].charAt(1)) {
+        return hex[0].charAt(0) + hex[1].charAt(0) + hex[2].charAt(0) + hex[3].charAt(0);
+    }
+
+    return hex.join("");
+}
+
+// `rgbaToArgbHex`
+// Converts an RGBA color to an ARGB Hex8 string
+// Rarely used, but required for "toFilter()"
+function rgbaToArgbHex(r, g, b, a) {
+
+    var hex = [
+        pad2(convertDecimalToHex(a)),
+        pad2(mathRound(r).toString(16)),
+        pad2(mathRound(g).toString(16)),
+        pad2(mathRound(b).toString(16))
+    ];
+
+    return hex.join("");
+}
+
+// `equals`
+// Can be called with any tinycolor input
+tinycolor.equals = function (color1, color2) {
+    if (!color1 || !color2) { return false; }
+    return tinycolor(color1).toRgbString() == tinycolor(color2).toRgbString();
+};
+
+tinycolor.random = function() {
+    return tinycolor.fromRatio({
+        r: mathRandom(),
+        g: mathRandom(),
+        b: mathRandom()
+    });
+};
+
+
+// Modification Functions
+// ----------------------
+// Thanks to less.js for some of the basics here
+// <https://github.com/cloudhead/less.js/blob/master/lib/less/functions.js>
+
+function desaturate(color, amount) {
+    amount = (amount === 0) ? 0 : (amount || 10);
+    var hsl = tinycolor(color).toHsl();
+    hsl.s -= amount / 100;
+    hsl.s = clamp01(hsl.s);
+    return tinycolor(hsl);
+}
+
+function saturate(color, amount) {
+    amount = (amount === 0) ? 0 : (amount || 10);
+    var hsl = tinycolor(color).toHsl();
+    hsl.s += amount / 100;
+    hsl.s = clamp01(hsl.s);
+    return tinycolor(hsl);
+}
+
+function greyscale(color) {
+    return tinycolor(color).desaturate(100);
+}
+
+function lighten (color, amount) {
+    amount = (amount === 0) ? 0 : (amount || 10);
+    var hsl = tinycolor(color).toHsl();
+    hsl.l += amount / 100;
+    hsl.l = clamp01(hsl.l);
+    return tinycolor(hsl);
+}
+
+function brighten(color, amount) {
+    amount = (amount === 0) ? 0 : (amount || 10);
+    var rgb = tinycolor(color).toRgb();
+    rgb.r = mathMax(0, mathMin(255, rgb.r - mathRound(255 * - (amount / 100))));
+    rgb.g = mathMax(0, mathMin(255, rgb.g - mathRound(255 * - (amount / 100))));
+    rgb.b = mathMax(0, mathMin(255, rgb.b - mathRound(255 * - (amount / 100))));
+    return tinycolor(rgb);
+}
+
+function darken (color, amount) {
+    amount = (amount === 0) ? 0 : (amount || 10);
+    var hsl = tinycolor(color).toHsl();
+    hsl.l -= amount / 100;
+    hsl.l = clamp01(hsl.l);
+    return tinycolor(hsl);
+}
+
+// Spin takes a positive or negative amount within [-360, 360] indicating the change of hue.
+// Values outside of this range will be wrapped into this range.
+function spin(color, amount) {
+    var hsl = tinycolor(color).toHsl();
+    var hue = (hsl.h + amount) % 360;
+    hsl.h = hue < 0 ? 360 + hue : hue;
+    return tinycolor(hsl);
+}
+
+// Combination Functions
+// ---------------------
+// Thanks to jQuery xColor for some of the ideas behind these
+// <https://github.com/infusion/jQuery-xcolor/blob/master/jquery.xcolor.js>
+
+function complement(color) {
+    var hsl = tinycolor(color).toHsl();
+    hsl.h = (hsl.h + 180) % 360;
+    return tinycolor(hsl);
+}
+
+function triad(color) {
+    var hsl = tinycolor(color).toHsl();
+    var h = hsl.h;
+    return [
+        tinycolor(color),
+        tinycolor({ h: (h + 120) % 360, s: hsl.s, l: hsl.l }),
+        tinycolor({ h: (h + 240) % 360, s: hsl.s, l: hsl.l })
+    ];
+}
+
+function tetrad(color) {
+    var hsl = tinycolor(color).toHsl();
+    var h = hsl.h;
+    return [
+        tinycolor(color),
+        tinycolor({ h: (h + 90) % 360, s: hsl.s, l: hsl.l }),
+        tinycolor({ h: (h + 180) % 360, s: hsl.s, l: hsl.l }),
+        tinycolor({ h: (h + 270) % 360, s: hsl.s, l: hsl.l })
+    ];
+}
+
+function splitcomplement(color) {
+    var hsl = tinycolor(color).toHsl();
+    var h = hsl.h;
+    return [
+        tinycolor(color),
+        tinycolor({ h: (h + 72) % 360, s: hsl.s, l: hsl.l}),
+        tinycolor({ h: (h + 216) % 360, s: hsl.s, l: hsl.l})
+    ];
+}
+
+function analogous(color, results, slices) {
+    results = results || 6;
+    slices = slices || 30;
+
+    var hsl = tinycolor(color).toHsl();
+    var part = 360 / slices;
+    var ret = [tinycolor(color)];
+
+    for (hsl.h = ((hsl.h - (part * results >> 1)) + 720) % 360; --results; ) {
+        hsl.h = (hsl.h + part) % 360;
+        ret.push(tinycolor(hsl));
+    }
+    return ret;
+}
+
+function monochromatic(color, results) {
+    results = results || 6;
+    var hsv = tinycolor(color).toHsv();
+    var h = hsv.h, s = hsv.s, v = hsv.v;
+    var ret = [];
+    var modification = 1 / results;
+
+    while (results--) {
+        ret.push(tinycolor({ h: h, s: s, v: v}));
+        v = (v + modification) % 1;
+    }
+
+    return ret;
+}
+
+// Utility Functions
+// ---------------------
+
+tinycolor.mix = function(color1, color2, amount) {
+    amount = (amount === 0) ? 0 : (amount || 50);
+
+    var rgb1 = tinycolor(color1).toRgb();
+    var rgb2 = tinycolor(color2).toRgb();
+
+    var p = amount / 100;
+
+    var rgba = {
+        r: ((rgb2.r - rgb1.r) * p) + rgb1.r,
+        g: ((rgb2.g - rgb1.g) * p) + rgb1.g,
+        b: ((rgb2.b - rgb1.b) * p) + rgb1.b,
+        a: ((rgb2.a - rgb1.a) * p) + rgb1.a
+    };
+
+    return tinycolor(rgba);
+};
+
+
+// Readability Functions
+// ---------------------
+// <http://www.w3.org/TR/2008/REC-WCAG20-20081211/#contrast-ratiodef (WCAG Version 2)
+
+// `contrast`
+// Analyze the 2 colors and returns the color contrast defined by (WCAG Version 2)
+tinycolor.readability = function(color1, color2) {
+    var c1 = tinycolor(color1);
+    var c2 = tinycolor(color2);
+    return (Math.max(c1.getLuminance(),c2.getLuminance())+0.05) / (Math.min(c1.getLuminance(),c2.getLuminance())+0.05);
+};
+
+// `isReadable`
+// Ensure that foreground and background color combinations meet WCAG2 guidelines.
+// The third argument is an optional Object.
+//      the 'level' property states 'AA' or 'AAA' - if missing or invalid, it defaults to 'AA';
+//      the 'size' property states 'large' or 'small' - if missing or invalid, it defaults to 'small'.
+// If the entire object is absent, isReadable defaults to {level:"AA",size:"small"}.
+
+// *Example*
+//    tinycolor.isReadable("#000", "#111") => false
+//    tinycolor.isReadable("#000", "#111",{level:"AA",size:"large"}) => false
+tinycolor.isReadable = function(color1, color2, wcag2) {
+    var readability = tinycolor.readability(color1, color2);
+    var wcag2Parms, out;
+
+    out = false;
+
+    wcag2Parms = validateWCAG2Parms(wcag2);
+    switch (wcag2Parms.level + wcag2Parms.size) {
+        case "AAsmall":
+        case "AAAlarge":
+            out = readability >= 4.5;
+            break;
+        case "AAlarge":
+            out = readability >= 3;
+            break;
+        case "AAAsmall":
+            out = readability >= 7;
+            break;
+    }
+    return out;
+
+};
+
+// `mostReadable`
+// Given a base color and a list of possible foreground or background
+// colors for that base, returns the most readable color.
+// Optionally returns Black or White if the most readable color is unreadable.
+// *Example*
+//    tinycolor.mostReadable(tinycolor.mostReadable("#123", ["#124", "#125"],{includeFallbackColors:false}).toHexString(); // "#112255"
+//    tinycolor.mostReadable(tinycolor.mostReadable("#123", ["#124", "#125"],{includeFallbackColors:true}).toHexString();  // "#ffffff"
+//    tinycolor.mostReadable("#a8015a", ["#faf3f3"],{includeFallbackColors:true,level:"AAA",size:"large"}).toHexString(); // "#faf3f3"
+//    tinycolor.mostReadable("#a8015a", ["#faf3f3"],{includeFallbackColors:true,level:"AAA",size:"small"}).toHexString(); // "#ffffff"
+tinycolor.mostReadable = function(baseColor, colorList, args) {
+    var bestColor = null;
+    var bestScore = 0;
+    var readability;
+    var includeFallbackColors, level, size ;
+    args = args || {};
+    includeFallbackColors = args.includeFallbackColors ;
+    level = args.level;
+    size = args.size;
+
+    for (var i= 0; i < colorList.length ; i++) {
+        readability = tinycolor.readability(baseColor, colorList[i]);
+        if (readability > bestScore) {
+            bestScore = readability;
+            bestColor = tinycolor(colorList[i]);
+        }
+    }
+
+    if (tinycolor.isReadable(baseColor, bestColor, {"level":level,"size":size}) || !includeFallbackColors) {
+        return bestColor;
+    }
+    else {
+        args.includeFallbackColors=false;
+        return tinycolor.mostReadable(baseColor,["#fff", "#000"],args);
+    }
+};
+
+
+// Big List of Colors
+// ------------------
+// <http://www.w3.org/TR/css3-color/#svg-color>
+var names = tinycolor.names = {
+    aliceblue: "f0f8ff",
+    antiquewhite: "faebd7",
+    aqua: "0ff",
+    aquamarine: "7fffd4",
+    azure: "f0ffff",
+    beige: "f5f5dc",
+    bisque: "ffe4c4",
+    black: "000",
+    blanchedalmond: "ffebcd",
+    blue: "00f",
+    blueviolet: "8a2be2",
+    brown: "a52a2a",
+    burlywood: "deb887",
+    burntsienna: "ea7e5d",
+    cadetblue: "5f9ea0",
+    chartreuse: "7fff00",
+    chocolate: "d2691e",
+    coral: "ff7f50",
+    cornflowerblue: "6495ed",
+    cornsilk: "fff8dc",
+    crimson: "dc143c",
+    cyan: "0ff",
+    darkblue: "00008b",
+    darkcyan: "008b8b",
+    darkgoldenrod: "b8860b",
+    darkgray: "a9a9a9",
+    darkgreen: "006400",
+    darkgrey: "a9a9a9",
+    darkkhaki: "bdb76b",
+    darkmagenta: "8b008b",
+    darkolivegreen: "556b2f",
+    darkorange: "ff8c00",
+    darkorchid: "9932cc",
+    darkred: "8b0000",
+    darksalmon: "e9967a",
+    darkseagreen: "8fbc8f",
+    darkslateblue: "483d8b",
+    darkslategray: "2f4f4f",
+    darkslategrey: "2f4f4f",
+    darkturquoise: "00ced1",
+    darkviolet: "9400d3",
+    deeppink: "ff1493",
+    deepskyblue: "00bfff",
+    dimgray: "696969",
+    dimgrey: "696969",
+    dodgerblue: "1e90ff",
+    firebrick: "b22222",
+    floralwhite: "fffaf0",
+    forestgreen: "228b22",
+    fuchsia: "f0f",
+    gainsboro: "dcdcdc",
+    ghostwhite: "f8f8ff",
+    gold: "ffd700",
+    goldenrod: "daa520",
+    gray: "808080",
+    green: "008000",
+    greenyellow: "adff2f",
+    grey: "808080",
+    honeydew: "f0fff0",
+    hotpink: "ff69b4",
+    indianred: "cd5c5c",
+    indigo: "4b0082",
+    ivory: "fffff0",
+    khaki: "f0e68c",
+    lavender: "e6e6fa",
+    lavenderblush: "fff0f5",
+    lawngreen: "7cfc00",
+    lemonchiffon: "fffacd",
+    lightblue: "add8e6",
+    lightcoral: "f08080",
+    lightcyan: "e0ffff",
+    lightgoldenrodyellow: "fafad2",
+    lightgray: "d3d3d3",
+    lightgreen: "90ee90",
+    lightgrey: "d3d3d3",
+    lightpink: "ffb6c1",
+    lightsalmon: "ffa07a",
+    lightseagreen: "20b2aa",
+    lightskyblue: "87cefa",
+    lightslategray: "789",
+    lightslategrey: "789",
+    lightsteelblue: "b0c4de",
+    lightyellow: "ffffe0",
+    lime: "0f0",
+    limegreen: "32cd32",
+    linen: "faf0e6",
+    magenta: "f0f",
+    maroon: "800000",
+    mediumaquamarine: "66cdaa",
+    mediumblue: "0000cd",
+    mediumorchid: "ba55d3",
+    mediumpurple: "9370db",
+    mediumseagreen: "3cb371",
+    mediumslateblue: "7b68ee",
+    mediumspringgreen: "00fa9a",
+    mediumturquoise: "48d1cc",
+    mediumvioletred: "c71585",
+    midnightblue: "191970",
+    mintcream: "f5fffa",
+    mistyrose: "ffe4e1",
+    moccasin: "ffe4b5",
+    navajowhite: "ffdead",
+    navy: "000080",
+    oldlace: "fdf5e6",
+    olive: "808000",
+    olivedrab: "6b8e23",
+    orange: "ffa500",
+    orangered: "ff4500",
+    orchid: "da70d6",
+    palegoldenrod: "eee8aa",
+    palegreen: "98fb98",
+    paleturquoise: "afeeee",
+    palevioletred: "db7093",
+    papayawhip: "ffefd5",
+    peachpuff: "ffdab9",
+    peru: "cd853f",
+    pink: "ffc0cb",
+    plum: "dda0dd",
+    powderblue: "b0e0e6",
+    purple: "800080",
+    rebeccapurple: "663399",
+    red: "f00",
+    rosybrown: "bc8f8f",
+    royalblue: "4169e1",
+    saddlebrown: "8b4513",
+    salmon: "fa8072",
+    sandybrown: "f4a460",
+    seagreen: "2e8b57",
+    seashell: "fff5ee",
+    sienna: "a0522d",
+    silver: "c0c0c0",
+    skyblue: "87ceeb",
+    slateblue: "6a5acd",
+    slategray: "708090",
+    slategrey: "708090",
+    snow: "fffafa",
+    springgreen: "00ff7f",
+    steelblue: "4682b4",
+    tan: "d2b48c",
+    teal: "008080",
+    thistle: "d8bfd8",
+    tomato: "ff6347",
+    turquoise: "40e0d0",
+    violet: "ee82ee",
+    wheat: "f5deb3",
+    white: "fff",
+    whitesmoke: "f5f5f5",
+    yellow: "ff0",
+    yellowgreen: "9acd32"
+};
+
+// Make it easy to access colors via `hexNames[hex]`
+var hexNames = tinycolor.hexNames = flip(names);
+
+
+// Utilities
+// ---------
+
+// `{ 'name1': 'val1' }` becomes `{ 'val1': 'name1' }`
+function flip(o) {
+    var flipped = { };
+    for (var i in o) {
+        if (o.hasOwnProperty(i)) {
+            flipped[o[i]] = i;
+        }
+    }
+    return flipped;
+}
+
+// Return a valid alpha value [0,1] with all invalid values being set to 1
+function boundAlpha(a) {
+    a = parseFloat(a);
+
+    if (isNaN(a) || a < 0 || a > 1) {
+        a = 1;
+    }
+
+    return a;
+}
+
+// Take input from [0, n] and return it as [0, 1]
+function bound01(n, max) {
+    if (isOnePointZero(n)) { n = "100%"; }
+
+    var processPercent = isPercentage(n);
+    n = mathMin(max, mathMax(0, parseFloat(n)));
+
+    // Automatically convert percentage into number
+    if (processPercent) {
+        n = parseInt(n * max, 10) / 100;
+    }
+
+    // Handle floating point rounding errors
+    if ((Math.abs(n - max) < 0.000001)) {
+        return 1;
+    }
+
+    // Convert into [0, 1] range if it isn't already
+    return (n % max) / parseFloat(max);
+}
+
+// Force a number between 0 and 1
+function clamp01(val) {
+    return mathMin(1, mathMax(0, val));
+}
+
+// Parse a base-16 hex value into a base-10 integer
+function parseIntFromHex(val) {
+    return parseInt(val, 16);
+}
+
+// Need to handle 1.0 as 100%, since once it is a number, there is no difference between it and 1
+// <http://stackoverflow.com/questions/7422072/javascript-how-to-detect-number-as-a-decimal-including-1-0>
+function isOnePointZero(n) {
+    return typeof n == "string" && n.indexOf('.') != -1 && parseFloat(n) === 1;
+}
+
+// Check to see if string passed in is a percentage
+function isPercentage(n) {
+    return typeof n === "string" && n.indexOf('%') != -1;
+}
+
+// Force a hex value to have 2 characters
+function pad2(c) {
+    return c.length == 1 ? '0' + c : '' + c;
+}
+
+// Replace a decimal with it's percentage value
+function convertToPercentage(n) {
+    if (n <= 1) {
+        n = (n * 100) + "%";
+    }
+
+    return n;
+}
+
+// Converts a decimal to a hex value
+function convertDecimalToHex(d) {
+    return Math.round(parseFloat(d) * 255).toString(16);
+}
+// Converts a hex value to a decimal
+function convertHexToDecimal(h) {
+    return (parseIntFromHex(h) / 255);
+}
+
+var matchers = (function() {
+
+    // <http://www.w3.org/TR/css3-values/#integers>
+    var CSS_INTEGER = "[-\\+]?\\d+%?";
+
+    // <http://www.w3.org/TR/css3-values/#number-value>
+    var CSS_NUMBER = "[-\\+]?\\d*\\.\\d+%?";
+
+    // Allow positive/negative integer/number.  Don't capture the either/or, just the entire outcome.
+    var CSS_UNIT = "(?:" + CSS_NUMBER + ")|(?:" + CSS_INTEGER + ")";
+
+    // Actual matching.
+    // Parentheses and commas are optional, but not required.
+    // Whitespace can take the place of commas or opening paren
+    var PERMISSIVE_MATCH3 = "[\\s|\\(]+(" + CSS_UNIT + ")[,|\\s]+(" + CSS_UNIT + ")[,|\\s]+(" + CSS_UNIT + ")\\s*\\)?";
+    var PERMISSIVE_MATCH4 = "[\\s|\\(]+(" + CSS_UNIT + ")[,|\\s]+(" + CSS_UNIT + ")[,|\\s]+(" + CSS_UNIT + ")[,|\\s]+(" + CSS_UNIT + ")\\s*\\)?";
+
+    return {
+        CSS_UNIT: new RegExp(CSS_UNIT),
+        rgb: new RegExp("rgb" + PERMISSIVE_MATCH3),
+        rgba: new RegExp("rgba" + PERMISSIVE_MATCH4),
+        hsl: new RegExp("hsl" + PERMISSIVE_MATCH3),
+        hsla: new RegExp("hsla" + PERMISSIVE_MATCH4),
+        hsv: new RegExp("hsv" + PERMISSIVE_MATCH3),
+        hsva: new RegExp("hsva" + PERMISSIVE_MATCH4),
+        hex3: /^#?([0-9a-fA-F]{1})([0-9a-fA-F]{1})([0-9a-fA-F]{1})$/,
+        hex6: /^#?([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/,
+        hex4: /^#?([0-9a-fA-F]{1})([0-9a-fA-F]{1})([0-9a-fA-F]{1})([0-9a-fA-F]{1})$/,
+        hex8: /^#?([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/
+    };
+})();
+
+// `isValidCSSUnit`
+// Take in a single string / number and check to see if it looks like a CSS unit
+// (see `matchers` above for definition).
+function isValidCSSUnit(color) {
+    return !!matchers.CSS_UNIT.exec(color);
+}
+
+// `stringInputToObject`
+// Permissive string parsing.  Take in a number of formats, and output an object
+// based on detected format.  Returns `{ r, g, b }` or `{ h, s, l }` or `{ h, s, v}`
+function stringInputToObject(color) {
+
+    color = color.replace(trimLeft,'').replace(trimRight, '').toLowerCase();
+    var named = false;
+    if (names[color]) {
+        color = names[color];
+        named = true;
+    }
+    else if (color == 'transparent') {
+        return { r: 0, g: 0, b: 0, a: 0, format: "name" };
+    }
+
+    // Try to match string input using regular expressions.
+    // Keep most of the number bounding out of this function - don't worry about [0,1] or [0,100] or [0,360]
+    // Just return an object and let the conversion functions handle that.
+    // This way the result will be the same whether the tinycolor is initialized with string or object.
+    var match;
+    if ((match = matchers.rgb.exec(color))) {
+        return { r: match[1], g: match[2], b: match[3] };
+    }
+    if ((match = matchers.rgba.exec(color))) {
+        return { r: match[1], g: match[2], b: match[3], a: match[4] };
+    }
+    if ((match = matchers.hsl.exec(color))) {
+        return { h: match[1], s: match[2], l: match[3] };
+    }
+    if ((match = matchers.hsla.exec(color))) {
+        return { h: match[1], s: match[2], l: match[3], a: match[4] };
+    }
+    if ((match = matchers.hsv.exec(color))) {
+        return { h: match[1], s: match[2], v: match[3] };
+    }
+    if ((match = matchers.hsva.exec(color))) {
+        return { h: match[1], s: match[2], v: match[3], a: match[4] };
+    }
+    if ((match = matchers.hex8.exec(color))) {
+        return {
+            r: parseIntFromHex(match[1]),
+            g: parseIntFromHex(match[2]),
+            b: parseIntFromHex(match[3]),
+            a: convertHexToDecimal(match[4]),
+            format: named ? "name" : "hex8"
+        };
+    }
+    if ((match = matchers.hex6.exec(color))) {
+        return {
+            r: parseIntFromHex(match[1]),
+            g: parseIntFromHex(match[2]),
+            b: parseIntFromHex(match[3]),
+            format: named ? "name" : "hex"
+        };
+    }
+    if ((match = matchers.hex4.exec(color))) {
+        return {
+            r: parseIntFromHex(match[1] + '' + match[1]),
+            g: parseIntFromHex(match[2] + '' + match[2]),
+            b: parseIntFromHex(match[3] + '' + match[3]),
+            a: convertHexToDecimal(match[4] + '' + match[4]),
+            format: named ? "name" : "hex8"
+        };
+    }
+    if ((match = matchers.hex3.exec(color))) {
+        return {
+            r: parseIntFromHex(match[1] + '' + match[1]),
+            g: parseIntFromHex(match[2] + '' + match[2]),
+            b: parseIntFromHex(match[3] + '' + match[3]),
+            format: named ? "name" : "hex"
+        };
+    }
+
+    return false;
+}
+
+function validateWCAG2Parms(parms) {
+    // return valid WCAG2 parms for isReadable.
+    // If input parms are invalid, return {"level":"AA", "size":"small"}
+    var level, size;
+    parms = parms || {"level":"AA", "size":"small"};
+    level = (parms.level || "AA").toUpperCase();
+    size = (parms.size || "small").toLowerCase();
+    if (level !== "AA" && level !== "AAA") {
+        level = "AA";
+    }
+    if (size !== "small" && size !== "large") {
+        size = "small";
+    }
+    return {"level":level, "size":size};
+}
+
+// Node: Export function
+if (typeof module !== "undefined" && module.exports) {
+    module.exports = tinycolor;
+}
+// AMD/requirejs: Define the module
+else if (true) {
+    !(__WEBPACK_AMD_DEFINE_RESULT__ = function () {return tinycolor;}.call(exports, __webpack_require__, exports, module),
+				__WEBPACK_AMD_DEFINE_RESULT__ !== undefined && (module.exports = __WEBPACK_AMD_DEFINE_RESULT__));
+}
+// Browser: Expose to window
+else {
+    window.tinycolor = tinycolor;
+}
+
+})(Math);
+
+
+/***/ }),
+/* 3 */
+/***/ (function(module, exports) {
+
+module.exports = __WEBPACK_EXTERNAL_MODULE_3__;
+
+/***/ }),
+/* 4 */
+/***/ (function(module, exports) {
+
+// removed by extract-text-webpack-plugin
+
+/***/ }),
+/* 5 */,
+/* 6 */
+/***/ (function(module, exports, __webpack_require__) {
+
+__webpack_require__(0);
+module.exports = __webpack_require__(4);
+
+
+/***/ })
+/******/ ]);
+});
+},{"quill":37}],35:[function(require,module,exports){
 var diff = require('fast-diff');
 var equal = require('deep-equal');
 var extend = require('extend');
@@ -4079,7 +6114,7 @@ Delta.prototype.transformPosition = function (index, priority) {
 
 module.exports = Delta;
 
-},{"./op":34,"deep-equal":5,"extend":8,"fast-diff":9}],34:[function(require,module,exports){
+},{"./op":36,"deep-equal":7,"extend":10,"fast-diff":11}],36:[function(require,module,exports){
 var equal = require('deep-equal');
 var extend = require('extend');
 
@@ -4220,7 +6255,7 @@ Iterator.prototype.peekType = function () {
 
 module.exports = lib;
 
-},{"deep-equal":5,"extend":8}],35:[function(require,module,exports){
+},{"deep-equal":7,"extend":10}],37:[function(require,module,exports){
 (function (Buffer){
 /*!
  * Quill Editor v1.3.2
@@ -15517,7 +17552,7 @@ module.exports = __webpack_require__(63);
 /******/ ]);
 });
 }).call(this,require("buffer").Buffer)
-},{"buffer":4}],36:[function(require,module,exports){
+},{"buffer":4}],38:[function(require,module,exports){
 "use strict";
 var Observable_1 = require("rxjs/Observable");
 var BehaviorSubject_1 = require("rxjs/BehaviorSubject");
@@ -15573,7 +17608,7 @@ function connect(url, input, websocketFactory, jsonParse) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.default = connect;
 
-},{"rxjs/BehaviorSubject":37,"rxjs/Observable":40}],37:[function(require,module,exports){
+},{"rxjs/BehaviorSubject":39,"rxjs/Observable":42}],39:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -15623,7 +17658,7 @@ var BehaviorSubject = (function (_super) {
 }(Subject_1.Subject));
 exports.BehaviorSubject = BehaviorSubject;
 
-},{"./Subject":44,"./util/ObjectUnsubscribedError":61}],38:[function(require,module,exports){
+},{"./Subject":46,"./util/ObjectUnsubscribedError":63}],40:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -15660,7 +17695,7 @@ var InnerSubscriber = (function (_super) {
 }(Subscriber_1.Subscriber));
 exports.InnerSubscriber = InnerSubscriber;
 
-},{"./Subscriber":46}],39:[function(require,module,exports){
+},{"./Subscriber":48}],41:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('./Observable');
 /**
@@ -15788,7 +17823,7 @@ var Notification = (function () {
 }());
 exports.Notification = Notification;
 
-},{"./Observable":40}],40:[function(require,module,exports){
+},{"./Observable":42}],42:[function(require,module,exports){
 "use strict";
 var root_1 = require('./util/root');
 var toSubscriber_1 = require('./util/toSubscriber');
@@ -16045,7 +18080,7 @@ var Observable = (function () {
 }());
 exports.Observable = Observable;
 
-},{"./symbol/observable":59,"./util/root":70,"./util/toSubscriber":72}],41:[function(require,module,exports){
+},{"./symbol/observable":61,"./util/root":72,"./util/toSubscriber":74}],43:[function(require,module,exports){
 "use strict";
 exports.empty = {
     closed: true,
@@ -16054,7 +18089,7 @@ exports.empty = {
     complete: function () { }
 };
 
-},{}],42:[function(require,module,exports){
+},{}],44:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -16085,7 +18120,7 @@ var OuterSubscriber = (function (_super) {
 }(Subscriber_1.Subscriber));
 exports.OuterSubscriber = OuterSubscriber;
 
-},{"./Subscriber":46}],43:[function(require,module,exports){
+},{"./Subscriber":48}],45:[function(require,module,exports){
 "use strict";
 /**
  * An execution context and a data structure to order tasks and schedule their
@@ -16135,7 +18170,7 @@ var Scheduler = (function () {
 }());
 exports.Scheduler = Scheduler;
 
-},{}],44:[function(require,module,exports){
+},{}],46:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -16304,7 +18339,7 @@ var AnonymousSubject = (function (_super) {
 }(Subject));
 exports.AnonymousSubject = AnonymousSubject;
 
-},{"./Observable":40,"./SubjectSubscription":45,"./Subscriber":46,"./Subscription":47,"./symbol/rxSubscriber":60,"./util/ObjectUnsubscribedError":61}],45:[function(require,module,exports){
+},{"./Observable":42,"./SubjectSubscription":47,"./Subscriber":48,"./Subscription":49,"./symbol/rxSubscriber":62,"./util/ObjectUnsubscribedError":63}],47:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -16345,7 +18380,7 @@ var SubjectSubscription = (function (_super) {
 }(Subscription_1.Subscription));
 exports.SubjectSubscription = SubjectSubscription;
 
-},{"./Subscription":47}],46:[function(require,module,exports){
+},{"./Subscription":49}],48:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -16610,7 +18645,7 @@ var SafeSubscriber = (function (_super) {
     return SafeSubscriber;
 }(Subscriber));
 
-},{"./Observer":41,"./Subscription":47,"./symbol/rxSubscriber":60,"./util/isFunction":67}],47:[function(require,module,exports){
+},{"./Observer":43,"./Subscription":49,"./symbol/rxSubscriber":62,"./util/isFunction":69}],49:[function(require,module,exports){
 "use strict";
 var isArray_1 = require('./util/isArray');
 var isObject_1 = require('./util/isObject');
@@ -16804,25 +18839,25 @@ function flattenUnsubscriptionErrors(errors) {
     return errors.reduce(function (errs, err) { return errs.concat((err instanceof UnsubscriptionError_1.UnsubscriptionError) ? err.errors : err); }, []);
 }
 
-},{"./util/UnsubscriptionError":62,"./util/errorObject":63,"./util/isArray":64,"./util/isFunction":67,"./util/isObject":68,"./util/tryCatch":73}],48:[function(require,module,exports){
+},{"./util/UnsubscriptionError":64,"./util/errorObject":65,"./util/isArray":66,"./util/isFunction":69,"./util/isObject":70,"./util/tryCatch":75}],50:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('../../Observable');
 var delay_1 = require('../../operator/delay');
 Observable_1.Observable.prototype.delay = delay_1.delay;
 
-},{"../../Observable":40,"../../operator/delay":51}],49:[function(require,module,exports){
+},{"../../Observable":42,"../../operator/delay":53}],51:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('../../Observable');
 var map_1 = require('../../operator/map');
 Observable_1.Observable.prototype.map = map_1.map;
 
-},{"../../Observable":40,"../../operator/map":52}],50:[function(require,module,exports){
+},{"../../Observable":42,"../../operator/map":54}],52:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('../../Observable');
 var retryWhen_1 = require('../../operator/retryWhen');
 Observable_1.Observable.prototype.retryWhen = retryWhen_1.retryWhen;
 
-},{"../../Observable":40,"../../operator/retryWhen":53}],51:[function(require,module,exports){
+},{"../../Observable":42,"../../operator/retryWhen":55}],53:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -16958,7 +18993,7 @@ var DelayMessage = (function () {
     return DelayMessage;
 }());
 
-},{"../Notification":39,"../Subscriber":46,"../scheduler/async":57,"../util/isDate":66}],52:[function(require,module,exports){
+},{"../Notification":41,"../Subscriber":48,"../scheduler/async":59,"../util/isDate":68}],54:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17046,7 +19081,7 @@ var MapSubscriber = (function (_super) {
     return MapSubscriber;
 }(Subscriber_1.Subscriber));
 
-},{"../Subscriber":46}],53:[function(require,module,exports){
+},{"../Subscriber":48}],55:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17148,7 +19183,7 @@ var RetryWhenSubscriber = (function (_super) {
     return RetryWhenSubscriber;
 }(OuterSubscriber_1.OuterSubscriber));
 
-},{"../OuterSubscriber":42,"../Subject":44,"../util/errorObject":63,"../util/subscribeToResult":71,"../util/tryCatch":73}],54:[function(require,module,exports){
+},{"../OuterSubscriber":44,"../Subject":46,"../util/errorObject":65,"../util/subscribeToResult":73,"../util/tryCatch":75}],56:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17193,7 +19228,7 @@ var Action = (function (_super) {
 }(Subscription_1.Subscription));
 exports.Action = Action;
 
-},{"../Subscription":47}],55:[function(require,module,exports){
+},{"../Subscription":49}],57:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17336,7 +19371,7 @@ var AsyncAction = (function (_super) {
 }(Action_1.Action));
 exports.AsyncAction = AsyncAction;
 
-},{"../util/root":70,"./Action":54}],56:[function(require,module,exports){
+},{"../util/root":72,"./Action":56}],58:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17388,7 +19423,7 @@ var AsyncScheduler = (function (_super) {
 }(Scheduler_1.Scheduler));
 exports.AsyncScheduler = AsyncScheduler;
 
-},{"../Scheduler":43}],57:[function(require,module,exports){
+},{"../Scheduler":45}],59:[function(require,module,exports){
 "use strict";
 var AsyncAction_1 = require('./AsyncAction');
 var AsyncScheduler_1 = require('./AsyncScheduler');
@@ -17436,7 +19471,7 @@ var AsyncScheduler_1 = require('./AsyncScheduler');
  */
 exports.async = new AsyncScheduler_1.AsyncScheduler(AsyncAction_1.AsyncAction);
 
-},{"./AsyncAction":55,"./AsyncScheduler":56}],58:[function(require,module,exports){
+},{"./AsyncAction":57,"./AsyncScheduler":58}],60:[function(require,module,exports){
 "use strict";
 var root_1 = require('../util/root');
 function symbolIteratorPonyfill(root) {
@@ -17475,7 +19510,7 @@ exports.iterator = symbolIteratorPonyfill(root_1.root);
  */
 exports.$$iterator = exports.iterator;
 
-},{"../util/root":70}],59:[function(require,module,exports){
+},{"../util/root":72}],61:[function(require,module,exports){
 "use strict";
 var root_1 = require('../util/root');
 function getSymbolObservable(context) {
@@ -17502,7 +19537,7 @@ exports.observable = getSymbolObservable(root_1.root);
  */
 exports.$$observable = exports.observable;
 
-},{"../util/root":70}],60:[function(require,module,exports){
+},{"../util/root":72}],62:[function(require,module,exports){
 "use strict";
 var root_1 = require('../util/root');
 var Symbol = root_1.root.Symbol;
@@ -17513,7 +19548,7 @@ exports.rxSubscriber = (typeof Symbol === 'function' && typeof Symbol.for === 'f
  */
 exports.$$rxSubscriber = exports.rxSubscriber;
 
-},{"../util/root":70}],61:[function(require,module,exports){
+},{"../util/root":72}],63:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17541,7 +19576,7 @@ var ObjectUnsubscribedError = (function (_super) {
 }(Error));
 exports.ObjectUnsubscribedError = ObjectUnsubscribedError;
 
-},{}],62:[function(require,module,exports){
+},{}],64:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17567,48 +19602,48 @@ var UnsubscriptionError = (function (_super) {
 }(Error));
 exports.UnsubscriptionError = UnsubscriptionError;
 
-},{}],63:[function(require,module,exports){
+},{}],65:[function(require,module,exports){
 "use strict";
 // typeof any so that it we don't have to cast when comparing a result to the error object
 exports.errorObject = { e: {} };
 
-},{}],64:[function(require,module,exports){
+},{}],66:[function(require,module,exports){
 "use strict";
 exports.isArray = Array.isArray || (function (x) { return x && typeof x.length === 'number'; });
 
-},{}],65:[function(require,module,exports){
+},{}],67:[function(require,module,exports){
 "use strict";
 exports.isArrayLike = (function (x) { return x && typeof x.length === 'number'; });
 
-},{}],66:[function(require,module,exports){
+},{}],68:[function(require,module,exports){
 "use strict";
 function isDate(value) {
     return value instanceof Date && !isNaN(+value);
 }
 exports.isDate = isDate;
 
-},{}],67:[function(require,module,exports){
+},{}],69:[function(require,module,exports){
 "use strict";
 function isFunction(x) {
     return typeof x === 'function';
 }
 exports.isFunction = isFunction;
 
-},{}],68:[function(require,module,exports){
+},{}],70:[function(require,module,exports){
 "use strict";
 function isObject(x) {
     return x != null && typeof x === 'object';
 }
 exports.isObject = isObject;
 
-},{}],69:[function(require,module,exports){
+},{}],71:[function(require,module,exports){
 "use strict";
 function isPromise(value) {
     return value && typeof value.subscribe !== 'function' && typeof value.then === 'function';
 }
 exports.isPromise = isPromise;
 
-},{}],70:[function(require,module,exports){
+},{}],72:[function(require,module,exports){
 (function (global){
 "use strict";
 // CommonJS / Node have global context exposed as "global" variable.
@@ -17630,7 +19665,7 @@ exports.root = _root;
 })();
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],71:[function(require,module,exports){
+},{}],73:[function(require,module,exports){
 "use strict";
 var root_1 = require('./root');
 var isArrayLike_1 = require('./isArrayLike');
@@ -17709,7 +19744,7 @@ function subscribeToResult(outerSubscriber, result, outerValue, outerIndex) {
 }
 exports.subscribeToResult = subscribeToResult;
 
-},{"../InnerSubscriber":38,"../Observable":40,"../symbol/iterator":58,"../symbol/observable":59,"./isArrayLike":65,"./isObject":68,"./isPromise":69,"./root":70}],72:[function(require,module,exports){
+},{"../InnerSubscriber":40,"../Observable":42,"../symbol/iterator":60,"../symbol/observable":61,"./isArrayLike":67,"./isObject":70,"./isPromise":71,"./root":72}],74:[function(require,module,exports){
 "use strict";
 var Subscriber_1 = require('../Subscriber');
 var rxSubscriber_1 = require('../symbol/rxSubscriber');
@@ -17730,7 +19765,7 @@ function toSubscriber(nextOrObserver, error, complete) {
 }
 exports.toSubscriber = toSubscriber;
 
-},{"../Observer":41,"../Subscriber":46,"../symbol/rxSubscriber":60}],73:[function(require,module,exports){
+},{"../Observer":43,"../Subscriber":48,"../symbol/rxSubscriber":62}],75:[function(require,module,exports){
 "use strict";
 var errorObject_1 = require('./errorObject');
 var tryCatchTarget;
@@ -17750,4 +19785,4 @@ function tryCatch(fn) {
 exports.tryCatch = tryCatch;
 ;
 
-},{"./errorObject":63}]},{},[1]);
+},{"./errorObject":65}]},{},[1]);

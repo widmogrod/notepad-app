@@ -21,22 +21,21 @@ wss.broadcast = function broadcast(data) {
 };
 
 const {createFromOrderer} = require('js-crdt/build/text');
-const {createVectorClock2} = require('js-crdt/build/order');
-const {serialiseOperations, deserialise} = require('./build/serialiser');
+const {createVectorClock} = require('js-crdt/build/order');
+const {serialiseOperations, deserialiseOperations} = require('./build/serialiser');
 
-let database = createFromOrderer(createVectorClock2('server'));
+let database = createFromOrderer(createVectorClock('server'));
 
 wss.on('connection', function connection(ws) {
   // Restore database state
-  database.reduce((_, operations, order) => {
-    ws.send(JSON.stringify(serialiseOperations(order, operations)));
+  database.reduce((_, orderedOperations) => {
+    ws.send(JSON.stringify(serialiseOperations(orderedOperations)));
   }, null);
 
   ws.on('message', function incoming(data) {
-    // console.log(data)
     // Update database state
-    const partial = deserialise(JSON.parse(data));
-    database = database.next().merge(partial);
+    const partial = deserialiseOperations(JSON.parse(data));
+    database = database.next().mergeOperations(partial);
 
     // Broadcast to everyone else.
     wss.clients.forEach(function each(client) {
