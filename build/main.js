@@ -85,7 +85,8 @@ messages
         .retain(0)
         .insert(js_crdt_1.default.text.renderString(database));
     editor.setContents(dd);
-    const currentSelection = quillSelectionToCrdt(editor.getSelection(true));
+    const maybeSelection = editor.getSelection(true);
+    const currentSelection = quillSelectionToCrdt(maybeSelection ? maybeSelection : new text_1.Selection(clientID, 0, 0));
     const selections = js_crdt_1.default.text.getSelections(database, currentSelection);
     selections.reduce((_, s) => {
         if (s.origin === clientID) {
