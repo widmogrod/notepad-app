@@ -31,6 +31,7 @@ var editor = new Quill('#editor', {
     modules: {
         toolbar: false,
     },
+    formats: [],
     theme: 'snow'
 });
 editor.focus();
@@ -76,7 +77,7 @@ messages
     database = database.mergeOperations(oo);
     // diff?
     // database.diff(database.mergeOperations(oo));
-    const selection = js_crdt_1.default.text.selectionFunc(database, quillSelectionToCrdt(editor.getSelection()));
+    const selection = js_crdt_1.default.text.selectionFunc(database, quillSelectionToCrdt(editor.getSelection(true)));
     const dd = new QuillDelta()
         .retain(0)
         .insert(js_crdt_1.default.text.renderString(database));
