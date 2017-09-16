@@ -7,12 +7,15 @@ import "rxjs/add/operator/delay";
 import { QueueingSubject } from 'queueing-subject';
 import websocketConnect from 'rxjs-websockets';
 import {serialiseOperations, deserialiseOperations} from './serialiser';
+import * as ColorHash from 'color-hash';
 
 function uuid() {
   const array = new Uint8Array(2);
   crypto.getRandomValues(array);
   return array.join('-')
 }
+
+const colorHash = new ColorHash();
 
 let host = window.document.location.host.replace(/:.*/, '');
 let port = window.document.location.port;
@@ -109,14 +112,22 @@ messages
     // diff?
     // database.diff(database.mergeOperations(oo));
 
-    const selection = crdt.text.getSelection(database, quillSelectionToCrdt(editor.getSelection(true)))
-
     const dd = new QuillDelta()
       .retain(0)
       .insert(crdt.text.renderString(database))
 
     editor.setContents(dd);
-    editor.setSelection(crdtSelectionToQuill(selection))
+
+    const currentSelection = quillSelectionToCrdt(editor.getSelection(true));
+    const selections = crdt.text.getSelections(database, currentSelection);
+
+    selections.reduce((_, s: Selection) => {
+      if (s.origin === clientID) {
+        editor.setSelection(crdtSelectionToQuill(s))
+      } else {
+        cursors.setCursor(s.origin, crdtSelectionToQuill(s), s.origin, colorHash.hex(s.origin));
+      }
+    }, null);
   });
 
 interface QSelection {

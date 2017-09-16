@@ -8,11 +8,13 @@ require("rxjs/add/operator/delay");
 const queueing_subject_1 = require("queueing-subject");
 const rxjs_websockets_1 = require("rxjs-websockets");
 const serialiser_1 = require("./serialiser");
+const ColorHash = require("color-hash");
 function uuid() {
     const array = new Uint8Array(2);
     crypto.getRandomValues(array);
     return array.join('-');
 }
+const colorHash = new ColorHash();
 let host = window.document.location.host.replace(/:.*/, '');
 let port = window.document.location.port;
 let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
@@ -79,12 +81,20 @@ messages
     database = database.mergeOperations(oo);
     // diff?
     // database.diff(database.mergeOperations(oo));
-    const selection = js_crdt_1.default.text.getSelection(database, quillSelectionToCrdt(editor.getSelection(true)));
     const dd = new QuillDelta()
         .retain(0)
         .insert(js_crdt_1.default.text.renderString(database));
     editor.setContents(dd);
-    editor.setSelection(crdtSelectionToQuill(selection));
+    const currentSelection = quillSelectionToCrdt(editor.getSelection(true));
+    const selections = js_crdt_1.default.text.getSelections(database, currentSelection);
+    selections.reduce((_, s) => {
+        if (s.origin === clientID) {
+            editor.setSelection(crdtSelectionToQuill(s));
+        }
+        else {
+            cursors.setCursor(s.origin, crdtSelectionToQuill(s), s.origin, colorHash.hex(s.origin));
+        }
+    }, null);
 });
 function quillSelectionToCrdt(s) {
     return new text_1.Selection(clientID, s.index, s.length);
