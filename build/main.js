@@ -25,7 +25,6 @@ let database = js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.
 const publish = new queueing_subject_1.QueueingSubject();
 // this method returns an object which contains two observables
 const { messages, connectionStatus } = rxjs_websockets_1.default(WebSocketURL, publish);
-connectionStatus.subscribe(e => console.log({ status: e }));
 // This is hack to properly require quill :/
 const Quill = require("quill");
 const QuillDelta = require("quill-delta");
@@ -49,21 +48,25 @@ editor.on('text-change', function (delta, oldDelta, source) {
             r.pos = o.retain;
         }
         else if (o.insert) {
-            r.op = new js_crdt_1.default.text.Insert(r.pos, o.insert);
+            // because for Quill when you replace selected text with other text
+            // first you do insert and then delete :/
+            r.ops.unshift(new js_crdt_1.default.text.Insert(r.pos, o.insert));
         }
         else if (o.delete) {
-            r.op = new js_crdt_1.default.text.Delete(r.pos, o.delete);
+            // because for Quill when you replace selected text with other text
+            // first you do insert and then delete :/
+            r.ops.unshift(new js_crdt_1.default.text.Delete(r.pos, o.delete));
         }
         return r;
-    }, { pos: 0, op: null });
-    if (r.op) {
+    }, { pos: 0, ops: [] });
+    if (r.ops.length) {
         database = database.next();
-        let op = database.apply(r.op);
+        let oo = r.ops.reduce((oo, op) => database.apply(op), null);
         const range = editor.getSelection(true);
         if (range) {
-            op = database.apply(quillSelectionToCrdt(range));
+            oo = database.apply(quillSelectionToCrdt(range));
         }
-        publish.next(serialiser_1.serialiseOperations(op));
+        publish.next(serialiser_1.serialiseOperations(oo));
         updateSelection();
     }
 });

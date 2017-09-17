@@ -1,5 +1,5 @@
 import crdt from 'js-crdt';
-import {Insert, Delete, Selection, Operation} from 'js-crdt/build/text';
+import {Insert, Delete, Selection, Operation, OrderedOperations} from 'js-crdt/build/text';
 import {Observable, Observer, Scheduler} from 'rxjs/Rx';
 import "rxjs/add/operator/map";
 import "rxjs/add/operator/retryWhen";
@@ -32,8 +32,6 @@ const publish = new QueueingSubject()
 // this method returns an object which contains two observables
 const { messages, connectionStatus } = websocketConnect(WebSocketURL, publish)
 
-connectionStatus.subscribe(e => console.log({status: e}));
-
 // This is hack to properly require quill :/
 import * as Quill from 'quill';
 import * as QuillDelta from 'quill-delta'
@@ -63,7 +61,7 @@ let cursors = editor.getModule('cursors');
 
 interface OperationReducer {
   pos: number;
-  op: Operation;
+  ops: Operation[];
 }
 
 editor.on('text-change', function(delta: Delta, oldDelta: Delta, source: QSource) {
@@ -75,27 +73,32 @@ editor.on('text-change', function(delta: Delta, oldDelta: Delta, source: QSource
     if ((<QRetain>o).retain) {
       r.pos = (<QRetain>o).retain;
     } else if ((<QInsert>o).insert) {
-      r.op = new crdt.text.Insert(r.pos, (<QInsert>o).insert);
+      // because for Quill when you replace selected text with other text
+      // first you do insert and then delete :/
+      r.ops.unshift(new crdt.text.Insert(r.pos, (<QInsert>o).insert));
     } else if ((<QDelete>o).delete) {
-      r.op = new crdt.text.Delete(r.pos, (<QDelete>o).delete);
+      // because for Quill when you replace selected text with other text
+      // first you do insert and then delete :/
+      r.ops.unshift(new crdt.text.Delete(r.pos, (<QDelete>o).delete));
     }
 
     return r;
-  }, {pos: 0, op: null});
+  }, {pos: 0, ops: []});
 
-  if (r.op) {
+  if (r.ops.length) {
     database = database.next();
-    let op = database.apply(r.op);
+    let oo = r.ops.reduce<OrderedOperations>((oo, op) => database.apply(op), null);
 
     const range = editor.getSelection(true);
     if (range) {
-      op = database.apply(quillSelectionToCrdt(range));
+      oo = database.apply(quillSelectionToCrdt(range));
     }
 
-    publish.next(serialiseOperations(op));
+    publish.next(serialiseOperations(oo));
     updateSelection();
   }
 });
+
 editor.on('selection-change', function(range: QSelection, oldRange: QSelection, source: QSource) {
   if (source !== 'user') {
     return;

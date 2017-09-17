@@ -26,7 +26,6 @@ let database = js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.
 const publish = new queueing_subject_1.QueueingSubject();
 // this method returns an object which contains two observables
 const { messages, connectionStatus } = rxjs_websockets_1.default(WebSocketURL, publish);
-connectionStatus.subscribe(e => console.log({ status: e }));
 // This is hack to properly require quill :/
 const Quill = require("quill");
 const QuillDelta = require("quill-delta");
@@ -50,21 +49,25 @@ editor.on('text-change', function (delta, oldDelta, source) {
             r.pos = o.retain;
         }
         else if (o.insert) {
-            r.op = new js_crdt_1.default.text.Insert(r.pos, o.insert);
+            // because for Quill when you replace selected text with other text
+            // first you do insert and then delete :/
+            r.ops.unshift(new js_crdt_1.default.text.Insert(r.pos, o.insert));
         }
         else if (o.delete) {
-            r.op = new js_crdt_1.default.text.Delete(r.pos, o.delete);
+            // because for Quill when you replace selected text with other text
+            // first you do insert and then delete :/
+            r.ops.unshift(new js_crdt_1.default.text.Delete(r.pos, o.delete));
         }
         return r;
-    }, { pos: 0, op: null });
-    if (r.op) {
+    }, { pos: 0, ops: [] });
+    if (r.ops.length) {
         database = database.next();
-        let op = database.apply(r.op);
+        let oo = r.ops.reduce((oo, op) => database.apply(op), null);
         const range = editor.getSelection(true);
         if (range) {
-            op = database.apply(quillSelectionToCrdt(range));
+            oo = database.apply(quillSelectionToCrdt(range));
         }
-        publish.next(serialiser_1.serialiseOperations(op));
+        publish.next(serialiser_1.serialiseOperations(oo));
         updateSelection();
     }
 });
@@ -3887,45 +3890,58 @@ function selectionUpdate(selection, op) {
         return selection;
     }
     if (op instanceof insert_1.Insert) {
-        if (op.at < selection.at) {
+        // Don't move cursor when insert is done at the same position
+        if (selection.isCursor() && op.at === selection.at) {
+            return selection;
+        }
+        // is after selection:
+        //       sssss
+        //           iii
+        //             iiiiii
+        if (op.at >= selection.endsAt) {
+            return selection;
+        }
+        // is before selection or on the same position:
+        //       sssss
+        //       iii
+        // iiii
+        //  iiiiii
+        if (op.at <= selection.at) {
             return selection.moveRightBy(op.length);
         }
-        else if (op.at === selection.at) {
-            return selection.isCursor()
-                ? selection
-                : selection.moveRightBy(op.length);
-        }
-        else if (selection.isInside(op.at)) {
-            return selection.expandBy(op.length);
-        }
-        return selection;
+        // is inside selection:
+        //       sssss
+        //        i
+        //           iiii
+        return selection.expandBy(op.length);
     }
     if (op instanceof delete_1.Delete) {
-        if (op.at < selection.at) {
-            if (selection.isInside(op.endsAt)) {
-                return selection
-                    .moveRightBy(op.at - selection.at)
-                    .expandBy(selection.at - op.endsAt);
-            }
-            else if (op.endsAt < selection.at) {
-                return selection
-                    .moveRightBy(-op.length);
-            }
-            else {
-                return selection
-                    .moveRightBy(op.at - selection.at)
-                    .expandBy(-selection.length);
-            }
+        // is before selection:
+        //       ssssss
+        //  ddd
+        if (op.endsAt < selection.at) {
+            return selection.moveRightBy(-op.length);
         }
-        else if (op.at === selection.at) {
-            return selection
-                .expandBy(selection.at - op.endsAt);
+        // is after selection:
+        //       ssssss
+        //               ddddd
+        if (op.at > selection.endsAt) {
+            return selection;
         }
-        else if (selection.isInside(op.at)) {
-            return selection
-                .expandBy(op.at - selection.endsAt);
+        // starts inside selection block:
+        //       ssssss
+        //       dddddddddd
+        //       ddd
+        //         ddd
+        //         ddddddddd
+        if (op.at >= selection.at) {
+            return selection.expandBy(-Math.min(selection.endsAt - op.at, op.length));
         }
-        return selection;
+        // ends inside selection:
+        //       ssssss
+        //     dddd
+        //   dddddddd
+        return selection.expandBy(selection.at - op.endsAt).moveRightBy(op.at - selection.at);
     }
     return selection;
 }
