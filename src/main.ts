@@ -85,9 +85,15 @@ editor.on('text-change', function(delta: Delta, oldDelta: Delta, source: QSource
 
   if (r.op) {
     database = database.next();
-    database.apply(r.op);
-    let op = database.apply(quillSelectionToCrdt(editor.getSelection(true)));
+    let op = database.apply(r.op);
+
+    const range = editor.getSelection(true);
+    if (range) {
+      op = database.apply(quillSelectionToCrdt(range));
+    }
+
     publish.next(serialiseOperations(op));
+    updateSelection();
   }
 });
 editor.on('selection-change', function(range: QSelection, oldRange: QSelection, source: QSource) {
@@ -117,19 +123,22 @@ messages
       .insert(crdt.text.renderString(database))
 
     editor.setContents(dd);
-
-    const maybeSelection = editor.getSelection(true);
-    const currentSelection = quillSelectionToCrdt(maybeSelection ? maybeSelection : new Selection(clientID, 0, 0));
-    const selections = crdt.text.getSelections(database, currentSelection);
-
-    selections.reduce((_, s: Selection) => {
-      if (s.origin === clientID) {
-        editor.setSelection(crdtSelectionToQuill(s))
-      } else {
-        cursors.setCursor(s.origin, crdtSelectionToQuill(s), s.origin, colorHash.hex(s.origin));
-      }
-    }, null);
+    updateSelection();
   });
+
+function updateSelection() {
+  const maybeSelection = editor.getSelection(true);
+  const currentSelection = quillSelectionToCrdt(maybeSelection ? maybeSelection : new Selection(clientID, 0, 0));
+  const selections = crdt.text.getSelections(database, currentSelection);
+
+  selections.reduce((_, s: Selection) => {
+    if (s.origin === clientID) {
+      editor.setSelection(crdtSelectionToQuill(s))
+    } else {
+      cursors.setCursor(s.origin, crdtSelectionToQuill(s), s.origin, colorHash.hex(s.origin));
+    }
+  }, null);
+}
 
 interface QSelection {
   index: number;

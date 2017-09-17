@@ -59,9 +59,13 @@ editor.on('text-change', function (delta, oldDelta, source) {
     }, { pos: 0, op: null });
     if (r.op) {
         database = database.next();
-        database.apply(r.op);
-        let op = database.apply(quillSelectionToCrdt(editor.getSelection(true)));
+        let op = database.apply(r.op);
+        const range = editor.getSelection(true);
+        if (range) {
+            op = database.apply(quillSelectionToCrdt(range));
+        }
         publish.next(serialiser_1.serialiseOperations(op));
+        updateSelection();
     }
 });
 editor.on('selection-change', function (range, oldRange, source) {
@@ -86,6 +90,9 @@ messages
         .retain(0)
         .insert(js_crdt_1.default.text.renderString(database));
     editor.setContents(dd);
+    updateSelection();
+});
+function updateSelection() {
     const maybeSelection = editor.getSelection(true);
     const currentSelection = quillSelectionToCrdt(maybeSelection ? maybeSelection : new text_1.Selection(clientID, 0, 0));
     const selections = js_crdt_1.default.text.getSelections(database, currentSelection);
@@ -97,7 +104,7 @@ messages
             cursors.setCursor(s.origin, crdtSelectionToQuill(s), s.origin, colorHash.hex(s.origin));
         }
     }, null);
-});
+}
 function quillSelectionToCrdt(s) {
     return new text_1.Selection(clientID, s.index, s.length);
 }
@@ -3739,6 +3746,9 @@ class Selection {
         this.length = length < 0 ? 0 : length;
         this.endsAt = this.at + this.length;
     }
+    isCursor() {
+        return this.length === 0;
+    }
     hasSameOrgin(b) {
         return this.origin === b.origin;
     }
@@ -3858,8 +3868,7 @@ function getSelections(text, fallback) {
         return oo.operations.reduce((map, o) => {
             return map.reduce((map, s, key) => {
                 if (o instanceof selection_1.Selection) {
-                    const xxx = map.get(o.origin);
-                    if (!xxx) {
+                    if (!map.get(o.origin)) {
                         return map.set(o.origin, o);
                     }
                 }
@@ -3878,31 +3887,43 @@ function selectionUpdate(selection, op) {
         return selection;
     }
     if (op instanceof insert_1.Insert) {
-        if (op.at <= selection.at) {
-            return selection
-                .moveRightBy(op.length);
+        if (op.at < selection.at) {
+            return selection.moveRightBy(op.length);
+        }
+        else if (op.at === selection.at) {
+            return selection.isCursor()
+                ? selection
+                : selection.moveRightBy(op.length);
         }
         else if (selection.isInside(op.at)) {
-            return selection
-                .expandBy(op.length);
+            return selection.expandBy(op.length);
         }
         return selection;
     }
     if (op instanceof delete_1.Delete) {
-        if (op.at <= selection.at) {
+        if (op.at < selection.at) {
             if (selection.isInside(op.endsAt)) {
                 return selection
                     .moveRightBy(op.at - selection.at)
                     .expandBy(selection.at - op.endsAt);
             }
-            else {
+            else if (op.endsAt < selection.at) {
                 return selection
                     .moveRightBy(-op.length);
             }
+            else {
+                return selection
+                    .moveRightBy(op.at - selection.at)
+                    .expandBy(-selection.length);
+            }
+        }
+        else if (op.at === selection.at) {
+            return selection
+                .expandBy(selection.at - op.endsAt);
         }
         else if (selection.isInside(op.at)) {
             return selection
-                .expandBy(-op.length);
+                .expandBy(op.at - selection.endsAt);
         }
         return selection;
     }
