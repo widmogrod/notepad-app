@@ -58,9 +58,13 @@ editor.on('text-change', function (delta, oldDelta, source) {
     }, { pos: 0, op: null });
     if (r.op) {
         database = database.next();
-        database.apply(r.op);
-        let op = database.apply(quillSelectionToCrdt(editor.getSelection(true)));
+        let op = database.apply(r.op);
+        const range = editor.getSelection(true);
+        if (range) {
+            op = database.apply(quillSelectionToCrdt(range));
+        }
         publish.next(serialiser_1.serialiseOperations(op));
+        updateSelection();
     }
 });
 editor.on('selection-change', function (range, oldRange, source) {
@@ -85,6 +89,9 @@ messages
         .retain(0)
         .insert(js_crdt_1.default.text.renderString(database));
     editor.setContents(dd);
+    updateSelection();
+});
+function updateSelection() {
     const maybeSelection = editor.getSelection(true);
     const currentSelection = quillSelectionToCrdt(maybeSelection ? maybeSelection : new text_1.Selection(clientID, 0, 0));
     const selections = js_crdt_1.default.text.getSelections(database, currentSelection);
@@ -96,7 +103,7 @@ messages
             cursors.setCursor(s.origin, crdtSelectionToQuill(s), s.origin, colorHash.hex(s.origin));
         }
     }, null);
-});
+}
 function quillSelectionToCrdt(s) {
     return new text_1.Selection(clientID, s.index, s.length);
 }
