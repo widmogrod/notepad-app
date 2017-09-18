@@ -1,4 +1,5 @@
 import {Insert, Delete, Selection, Operation, OrderedOperations} from 'js-crdt/build/text';
+import {nextTick} from 'process';
 
 type QRetain = {retain: number}
 type QInsert = {insert: string}
@@ -25,8 +26,12 @@ export class CRDTOperations {
   }
 
   private initEvents() {
-    this.quill.on('text-change', this.onTextChange.bind(this));
-    this.quill.on('selection-change', this.onSelectionChange.bind(this));
+    this.quill.on('text-change', (delta: QDelta, oldDelta: QDelta, source: QSource) =>{
+      nextTick(() => this.onTextChange(delta, oldDelta, source));
+    });
+    this.quill.on('selection-change', (range: QRange, oldRange: QRange, source: QSource) => {
+      nextTick(() => this.onSelectionChange(range, oldRange, source));
+    });
   }
 
   private onTextChange(delta: QDelta, oldDelta: QDelta, source: QSource) {

@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const text_1 = require("js-crdt/build/text");
+const process_1 = require("process");
 class CRDTOperations {
     constructor(quill, options) {
         this.quill = quill;
@@ -8,8 +9,12 @@ class CRDTOperations {
         this.initEvents();
     }
     initEvents() {
-        this.quill.on('text-change', this.onTextChange.bind(this));
-        this.quill.on('selection-change', this.onSelectionChange.bind(this));
+        this.quill.on('text-change', (delta, oldDelta, source) => {
+            process_1.nextTick(() => this.onTextChange(delta, oldDelta, source));
+        });
+        this.quill.on('selection-change', (range, oldRange, source) => {
+            process_1.nextTick(() => this.onSelectionChange(range, oldRange, source));
+        });
     }
     onTextChange(delta, oldDelta, source) {
         if (source !== "user") {

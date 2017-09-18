@@ -1,7 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const text_1 = require("js-crdt/build/text");
-const QuillDelta = require("quill-delta");
 class QuillContentUpdater {
     constructor(quill) {
         this.quill = quill;
@@ -17,10 +16,7 @@ class QuillContentUpdater {
     }
     renderRemoteChange(t) {
         t.onRemoteChange((oo, text) => {
-            const dd = new QuillDelta()
-                .retain(0)
-                .insert(text_1.renderString(text));
-            this.quill.setContents(dd);
+            this.quill.setText(text_1.renderString(text));
         });
     }
 }

@@ -1,5 +1,4 @@
 import {Text, Operation, OrderedOperations, renderString} from 'js-crdt/build/text';
-import * as QuillDelta from 'quill-delta'
 
 interface Sync {
   localChange(ops: Operation[]);
@@ -22,13 +21,7 @@ export class QuillContentUpdater {
 
   private renderRemoteChange(t: Sync) {
     t.onRemoteChange((oo: OrderedOperations, text: Text) => {
-      const dd = new QuillDelta()
-        .retain(0)
-        .insert(renderString(text))
-
-      this.quill.setContents(dd);
+      this.quill.setText(renderString(text));
     });
   }
 }
-
-

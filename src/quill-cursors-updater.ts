@@ -1,5 +1,6 @@
 import {Text, OrderedOperations, Selection, getSelections} from 'js-crdt/build/text';
 import {selectionToRange} from './quill-adapter';
+import {nextTick} from 'process';
 
 interface Sync {
   onLocalChange(fn);
