@@ -87,7 +87,6 @@ function createStringToColor(di) {
 const DI = {};
 DI.clientId = uuid();
 DI.editorId = '#editor';
-DI.clientId = uuid();
 DI.wsURL = websocketURL();
 DI.colorHash = new ColorHash();
 DI.editor = creteQuill(DI);
