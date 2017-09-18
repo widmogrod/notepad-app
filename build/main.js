@@ -14,7 +14,6 @@ const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '');
 const clientID = uuid();
 // This is hack to properly require quill :/
 const Quill = require("quill");
-const QuillDelta = require("quill-delta");
 require("quill-cursors");
 const quill_adapter_1 = require("./quill-adapter");
 Quill.register('modules/crdtOperations', quill_adapter_1.CRDTOperations);
@@ -32,15 +31,9 @@ let editor = new Quill('#editor', {
 editor.focus();
 const text_sync_1 = require("./text-sync");
 const textSync = new text_sync_1.TextSync(js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(clientID)));
-textSync.onRemoteChange((oo, text) => {
-    const dd = new QuillDelta()
-        .retain(0)
-        .insert(js_crdt_1.default.text.renderString(text));
-    editor.setContents(dd);
-});
-editor.on('text-operations', (ops) => {
-    textSync.localChange(ops);
-});
+const quill_content_updater_1 = require("./quill-content-updater");
+const contentUpdater = new quill_content_updater_1.QuillContentUpdater(editor);
+contentUpdater.register(textSync);
 const quill_cursors_updater_1 = require("./quill-cursors-updater");
 const colorHash = new ColorHash();
 const cursorUpdater = new quill_cursors_updater_1.QuillCursorsUpdater(editor.getModule('cursors'), editor, clientID, colorHash.hex.bind(colorHash));

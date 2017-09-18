@@ -31,7 +31,7 @@ class CommunicationWS {
 }
 exports.CommunicationWS = CommunicationWS;
 
-},{"./serialiser":5,"queueing-subject":38,"rxjs-websockets":43,"rxjs/add/operator/delay":55,"rxjs/add/operator/map":56,"rxjs/add/operator/retryWhen":57}],2:[function(require,module,exports){
+},{"./serialiser":6,"queueing-subject":39,"rxjs-websockets":44,"rxjs/add/operator/delay":56,"rxjs/add/operator/map":57,"rxjs/add/operator/retryWhen":58}],2:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const js_crdt_1 = require("js-crdt");
@@ -48,7 +48,6 @@ const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '');
 const clientID = uuid();
 // This is hack to properly require quill :/
 const Quill = require("quill");
-const QuillDelta = require("quill-delta");
 require("quill-cursors");
 const quill_adapter_1 = require("./quill-adapter");
 Quill.register('modules/crdtOperations', quill_adapter_1.CRDTOperations);
@@ -66,15 +65,9 @@ let editor = new Quill('#editor', {
 editor.focus();
 const text_sync_1 = require("./text-sync");
 const textSync = new text_sync_1.TextSync(js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(clientID)));
-textSync.onRemoteChange((oo, text) => {
-    const dd = new QuillDelta()
-        .retain(0)
-        .insert(js_crdt_1.default.text.renderString(text));
-    editor.setContents(dd);
-});
-editor.on('text-operations', (ops) => {
-    textSync.localChange(ops);
-});
+const quill_content_updater_1 = require("./quill-content-updater");
+const contentUpdater = new quill_content_updater_1.QuillContentUpdater(editor);
+contentUpdater.register(textSync);
 const quill_cursors_updater_1 = require("./quill-cursors-updater");
 const colorHash = new ColorHash();
 const cursorUpdater = new quill_cursors_updater_1.QuillCursorsUpdater(editor.getModule('cursors'), editor, clientID, colorHash.hex.bind(colorHash));
@@ -83,7 +76,7 @@ const communication_ws_1 = require("./communication-ws");
 const communicationWS = new communication_ws_1.CommunicationWS(WebSocketURL);
 communicationWS.register(textSync);
 
-},{"./communication-ws":1,"./quill-adapter":3,"./quill-cursors-updater":4,"./text-sync":6,"color-hash":10,"js-crdt":21,"quill":42,"quill-cursors":39,"quill-delta":40}],3:[function(require,module,exports){
+},{"./communication-ws":1,"./quill-adapter":3,"./quill-content-updater":4,"./quill-cursors-updater":5,"./text-sync":7,"color-hash":11,"js-crdt":22,"quill":43,"quill-cursors":40}],3:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const text_1 = require("js-crdt/build/text");
@@ -159,7 +152,36 @@ function deltaToOperations(delta) {
 }
 exports.deltaToOperations = deltaToOperations;
 
-},{"js-crdt/build/text":33}],4:[function(require,module,exports){
+},{"js-crdt/build/text":34}],4:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const text_1 = require("js-crdt/build/text");
+const QuillDelta = require("quill-delta");
+class QuillContentUpdater {
+    constructor(quill) {
+        this.quill = quill;
+    }
+    register(t) {
+        this.recordLocalChange(t);
+        this.renderRemoteChange(t);
+    }
+    recordLocalChange(t) {
+        this.quill.on('text-operations', (ops) => {
+            t.localChange(ops);
+        });
+    }
+    renderRemoteChange(t) {
+        t.onRemoteChange((oo, text) => {
+            const dd = new QuillDelta()
+                .retain(0)
+                .insert(text_1.renderString(text));
+            this.quill.setContents(dd);
+        });
+    }
+}
+exports.QuillContentUpdater = QuillContentUpdater;
+
+},{"js-crdt/build/text":34,"quill-delta":41}],5:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const text_1 = require("js-crdt/build/text");
@@ -190,7 +212,7 @@ class QuillCursorsUpdater {
 }
 exports.QuillCursorsUpdater = QuillCursorsUpdater;
 
-},{"./quill-adapter":3,"js-crdt/build/text":33}],5:[function(require,module,exports){
+},{"./quill-adapter":3,"js-crdt/build/text":34}],6:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const js_crdt_1 = require("js-crdt");
@@ -269,7 +291,7 @@ function deserialiseOperations({ order, operations }) {
 }
 exports.deserialiseOperations = deserialiseOperations;
 
-},{"js-crdt":21}],6:[function(require,module,exports){
+},{"js-crdt":22}],7:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const EventEmitter = require("events");
@@ -308,7 +330,7 @@ class TextSync {
 }
 exports.TextSync = TextSync;
 
-},{"events":14}],7:[function(require,module,exports){
+},{"events":15}],8:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -424,7 +446,7 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],8:[function(require,module,exports){
+},{}],9:[function(require,module,exports){
 (function (global){
 /*!
  * The buffer module from node.js, for the browser.
@@ -2217,7 +2239,7 @@ function isnan (val) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"base64-js":7,"ieee754":17,"isarray":18}],9:[function(require,module,exports){
+},{"base64-js":8,"ieee754":18,"isarray":19}],10:[function(require,module,exports){
 /**
  * BKDR Hash (modified version)
  *
@@ -2243,7 +2265,7 @@ var BKDRHash = function(str) {
 
 module.exports = BKDRHash;
 
-},{}],10:[function(require,module,exports){
+},{}],11:[function(require,module,exports){
 var BKDRHash = require('./bkdr-hash');
 
 /**
@@ -2362,7 +2384,7 @@ ColorHash.prototype.hex = function(str) {
 
 module.exports = ColorHash;
 
-},{"./bkdr-hash":9}],11:[function(require,module,exports){
+},{"./bkdr-hash":10}],12:[function(require,module,exports){
 var pSlice = Array.prototype.slice;
 var objectKeys = require('./lib/keys.js');
 var isArguments = require('./lib/is_arguments.js');
@@ -2458,7 +2480,7 @@ function objEquiv(a, b, opts) {
   return typeof a === typeof b;
 }
 
-},{"./lib/is_arguments.js":12,"./lib/keys.js":13}],12:[function(require,module,exports){
+},{"./lib/is_arguments.js":13,"./lib/keys.js":14}],13:[function(require,module,exports){
 var supportsArgumentsClass = (function(){
   return Object.prototype.toString.call(arguments)
 })() == '[object Arguments]';
@@ -2480,7 +2502,7 @@ function unsupported(object){
     false;
 };
 
-},{}],13:[function(require,module,exports){
+},{}],14:[function(require,module,exports){
 exports = module.exports = typeof Object.keys === 'function'
   ? Object.keys : shim;
 
@@ -2491,7 +2513,7 @@ function shim (obj) {
   return keys;
 }
 
-},{}],14:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -2795,7 +2817,7 @@ function isUndefined(arg) {
   return arg === void 0;
 }
 
-},{}],15:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 'use strict';
 
 var hasOwn = Object.prototype.hasOwnProperty;
@@ -2883,7 +2905,7 @@ module.exports = function extend() {
 	return target;
 };
 
-},{}],16:[function(require,module,exports){
+},{}],17:[function(require,module,exports){
 /**
  * This library modifies the diff-patch-match library by Neil Fraser
  * by removing the patch and match functionality and certain advanced
@@ -3583,7 +3605,7 @@ function merge_tuples (diffs, start, length) {
   return diffs;
 }
 
-},{}],17:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = nBytes * 8 - mLen - 1
@@ -3669,14 +3691,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],18:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 var toString = {}.toString;
 
 module.exports = Array.isArray || function (arr) {
   return toString.call(arr) == '[object Array]';
 };
 
-},{}],19:[function(require,module,exports){
+},{}],20:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function merge(a, b) {
@@ -3715,7 +3737,7 @@ function axioms(assert, a, b, c) {
 }
 exports.axioms = axioms;
 
-},{}],20:[function(require,module,exports){
+},{}],21:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Increment {
@@ -3735,7 +3757,7 @@ class Increment {
 }
 exports.Increment = Increment;
 
-},{}],21:[function(require,module,exports){
+},{}],22:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const functions = require("./functions");
@@ -3751,7 +3773,7 @@ exports.default = {
     text,
 };
 
-},{"./functions":19,"./increment":20,"./order":23,"./structures":25,"./text":33}],22:[function(require,module,exports){
+},{"./functions":20,"./increment":21,"./order":24,"./structures":26,"./text":34}],23:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const naive_array_list_1 = require("../structures/naive-array-list");
@@ -3763,7 +3785,7 @@ function createVectorClock(id, version, vector) {
 }
 exports.createVectorClock = createVectorClock;
 
-},{"../structures/naive-array-list":26,"../structures/sorted-set-array":30,"./vector-clock":24}],23:[function(require,module,exports){
+},{"../structures/naive-array-list":27,"../structures/sorted-set-array":31,"./vector-clock":25}],24:[function(require,module,exports){
 "use strict";
 function __export(m) {
     for (var p in m) if (!exports.hasOwnProperty(p)) exports[p] = m[p];
@@ -3772,7 +3794,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 __export(require("./vector-clock"));
 __export(require("./factory"));
 
-},{"./factory":22,"./vector-clock":24}],24:[function(require,module,exports){
+},{"./factory":23,"./vector-clock":25}],25:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Id {
@@ -3879,7 +3901,7 @@ class VectorClock {
 }
 exports.VectorClock = VectorClock;
 
-},{}],25:[function(require,module,exports){
+},{}],26:[function(require,module,exports){
 "use strict";
 function __export(m) {
     for (var p in m) if (!exports.hasOwnProperty(p)) exports[p] = m[p];
@@ -3891,7 +3913,7 @@ __export(require("./set-axioms"));
 __export(require("./ordered-map"));
 __export(require("./sorted-set-array"));
 
-},{"./naive-array-list":26,"./naive-immutable-map":27,"./ordered-map":28,"./set-axioms":29,"./sorted-set-array":30}],26:[function(require,module,exports){
+},{"./naive-array-list":27,"./naive-immutable-map":28,"./ordered-map":29,"./set-axioms":30,"./sorted-set-array":31}],27:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class NaiveArrayList {
@@ -3931,7 +3953,7 @@ class NaiveArrayList {
 }
 exports.NaiveArrayList = NaiveArrayList;
 
-},{}],27:[function(require,module,exports){
+},{}],28:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class NaiveImmutableMap {
@@ -3960,7 +3982,7 @@ class NaiveImmutableMap {
 }
 exports.NaiveImmutableMap = NaiveImmutableMap;
 
-},{}],28:[function(require,module,exports){
+},{}],29:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Indexed {
@@ -4010,7 +4032,7 @@ class OrderedMap {
 }
 exports.OrderedMap = OrderedMap;
 
-},{}],29:[function(require,module,exports){
+},{}],30:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function equal(a, b) {
@@ -4035,7 +4057,7 @@ function axioms(assert, a, b, c) {
 }
 exports.axioms = axioms;
 
-},{}],30:[function(require,module,exports){
+},{}],31:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function divide(lower, upper, elements, item, onNew, onExists) {
@@ -4118,7 +4140,7 @@ class SortedSetArray {
 }
 exports.SortedSetArray = SortedSetArray;
 
-},{}],31:[function(require,module,exports){
+},{}],32:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Delete {
@@ -4132,7 +4154,7 @@ class Delete {
 }
 exports.Delete = Delete;
 
-},{}],32:[function(require,module,exports){
+},{}],33:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const naive_array_list_1 = require("../structures/naive-array-list");
@@ -4145,7 +4167,7 @@ function createFromOrderer(order) {
 }
 exports.createFromOrderer = createFromOrderer;
 
-},{"../structures/naive-array-list":26,"../structures/naive-immutable-map":27,"../structures/ordered-map":28,"../structures/sorted-set-array":30,"./text":36}],33:[function(require,module,exports){
+},{"../structures/naive-array-list":27,"../structures/naive-immutable-map":28,"../structures/ordered-map":29,"../structures/sorted-set-array":31,"./text":37}],34:[function(require,module,exports){
 "use strict";
 function __export(m) {
     for (var p in m) if (!exports.hasOwnProperty(p)) exports[p] = m[p];
@@ -4158,7 +4180,7 @@ __export(require("./text"));
 __export(require("./utils"));
 __export(require("./factory"));
 
-},{"./delete":31,"./factory":32,"./insert":34,"./selection":35,"./text":36,"./utils":37}],34:[function(require,module,exports){
+},{"./delete":32,"./factory":33,"./insert":35,"./selection":36,"./text":37,"./utils":38}],35:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Insert {
@@ -4173,7 +4195,7 @@ class Insert {
 }
 exports.Insert = Insert;
 
-},{}],35:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Selection {
@@ -4204,7 +4226,7 @@ class Selection {
 }
 exports.Selection = Selection;
 
-},{}],36:[function(require,module,exports){
+},{}],37:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const functions_1 = require("../functions");
@@ -4261,7 +4283,7 @@ class Text {
 }
 exports.Text = Text;
 
-},{"../functions":19}],37:[function(require,module,exports){
+},{"../functions":20}],38:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const delete_1 = require("./delete");
@@ -4400,7 +4422,7 @@ function selectionUpdate(selection, op) {
 }
 exports.selectionUpdate = selectionUpdate;
 
-},{"../structures/naive-immutable-map":27,"./delete":31,"./insert":34,"./selection":35}],38:[function(require,module,exports){
+},{"../structures/naive-immutable-map":28,"./delete":32,"./insert":35,"./selection":36}],39:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -4434,7 +4456,7 @@ var QueueingSubject = (function (_super) {
 }(Subject_1.Subject));
 exports.QueueingSubject = QueueingSubject;
 
-},{"rxjs/Subject":51}],39:[function(require,module,exports){
+},{"rxjs/Subject":52}],40:[function(require,module,exports){
 (function webpackUniversalModuleDefinition(root, factory) {
 	if(typeof exports === 'object' && typeof module === 'object')
 		module.exports = factory(require("quill"));
@@ -6278,7 +6300,7 @@ module.exports = __webpack_require__(4);
 /***/ })
 /******/ ]);
 });
-},{"quill":42}],40:[function(require,module,exports){
+},{"quill":43}],41:[function(require,module,exports){
 var diff = require('fast-diff');
 var equal = require('deep-equal');
 var extend = require('extend');
@@ -6605,7 +6627,7 @@ Delta.prototype.transformPosition = function (index, priority) {
 
 module.exports = Delta;
 
-},{"./op":41,"deep-equal":11,"extend":15,"fast-diff":16}],41:[function(require,module,exports){
+},{"./op":42,"deep-equal":12,"extend":16,"fast-diff":17}],42:[function(require,module,exports){
 var equal = require('deep-equal');
 var extend = require('extend');
 
@@ -6746,7 +6768,7 @@ Iterator.prototype.peekType = function () {
 
 module.exports = lib;
 
-},{"deep-equal":11,"extend":15}],42:[function(require,module,exports){
+},{"deep-equal":12,"extend":16}],43:[function(require,module,exports){
 (function (Buffer){
 /*!
  * Quill Editor v1.3.2
@@ -18043,7 +18065,7 @@ module.exports = __webpack_require__(63);
 /******/ ]);
 });
 }).call(this,require("buffer").Buffer)
-},{"buffer":8}],43:[function(require,module,exports){
+},{"buffer":9}],44:[function(require,module,exports){
 "use strict";
 var Observable_1 = require("rxjs/Observable");
 var BehaviorSubject_1 = require("rxjs/BehaviorSubject");
@@ -18099,7 +18121,7 @@ function connect(url, input, websocketFactory, jsonParse) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.default = connect;
 
-},{"rxjs/BehaviorSubject":44,"rxjs/Observable":47}],44:[function(require,module,exports){
+},{"rxjs/BehaviorSubject":45,"rxjs/Observable":48}],45:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -18149,7 +18171,7 @@ var BehaviorSubject = (function (_super) {
 }(Subject_1.Subject));
 exports.BehaviorSubject = BehaviorSubject;
 
-},{"./Subject":51,"./util/ObjectUnsubscribedError":68}],45:[function(require,module,exports){
+},{"./Subject":52,"./util/ObjectUnsubscribedError":69}],46:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -18186,7 +18208,7 @@ var InnerSubscriber = (function (_super) {
 }(Subscriber_1.Subscriber));
 exports.InnerSubscriber = InnerSubscriber;
 
-},{"./Subscriber":53}],46:[function(require,module,exports){
+},{"./Subscriber":54}],47:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('./Observable');
 /**
@@ -18314,7 +18336,7 @@ var Notification = (function () {
 }());
 exports.Notification = Notification;
 
-},{"./Observable":47}],47:[function(require,module,exports){
+},{"./Observable":48}],48:[function(require,module,exports){
 "use strict";
 var root_1 = require('./util/root');
 var toSubscriber_1 = require('./util/toSubscriber');
@@ -18571,7 +18593,7 @@ var Observable = (function () {
 }());
 exports.Observable = Observable;
 
-},{"./symbol/observable":66,"./util/root":77,"./util/toSubscriber":79}],48:[function(require,module,exports){
+},{"./symbol/observable":67,"./util/root":78,"./util/toSubscriber":80}],49:[function(require,module,exports){
 "use strict";
 exports.empty = {
     closed: true,
@@ -18580,7 +18602,7 @@ exports.empty = {
     complete: function () { }
 };
 
-},{}],49:[function(require,module,exports){
+},{}],50:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -18611,7 +18633,7 @@ var OuterSubscriber = (function (_super) {
 }(Subscriber_1.Subscriber));
 exports.OuterSubscriber = OuterSubscriber;
 
-},{"./Subscriber":53}],50:[function(require,module,exports){
+},{"./Subscriber":54}],51:[function(require,module,exports){
 "use strict";
 /**
  * An execution context and a data structure to order tasks and schedule their
@@ -18661,7 +18683,7 @@ var Scheduler = (function () {
 }());
 exports.Scheduler = Scheduler;
 
-},{}],51:[function(require,module,exports){
+},{}],52:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -18830,7 +18852,7 @@ var AnonymousSubject = (function (_super) {
 }(Subject));
 exports.AnonymousSubject = AnonymousSubject;
 
-},{"./Observable":47,"./SubjectSubscription":52,"./Subscriber":53,"./Subscription":54,"./symbol/rxSubscriber":67,"./util/ObjectUnsubscribedError":68}],52:[function(require,module,exports){
+},{"./Observable":48,"./SubjectSubscription":53,"./Subscriber":54,"./Subscription":55,"./symbol/rxSubscriber":68,"./util/ObjectUnsubscribedError":69}],53:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -18871,7 +18893,7 @@ var SubjectSubscription = (function (_super) {
 }(Subscription_1.Subscription));
 exports.SubjectSubscription = SubjectSubscription;
 
-},{"./Subscription":54}],53:[function(require,module,exports){
+},{"./Subscription":55}],54:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -19136,7 +19158,7 @@ var SafeSubscriber = (function (_super) {
     return SafeSubscriber;
 }(Subscriber));
 
-},{"./Observer":48,"./Subscription":54,"./symbol/rxSubscriber":67,"./util/isFunction":74}],54:[function(require,module,exports){
+},{"./Observer":49,"./Subscription":55,"./symbol/rxSubscriber":68,"./util/isFunction":75}],55:[function(require,module,exports){
 "use strict";
 var isArray_1 = require('./util/isArray');
 var isObject_1 = require('./util/isObject');
@@ -19330,25 +19352,25 @@ function flattenUnsubscriptionErrors(errors) {
     return errors.reduce(function (errs, err) { return errs.concat((err instanceof UnsubscriptionError_1.UnsubscriptionError) ? err.errors : err); }, []);
 }
 
-},{"./util/UnsubscriptionError":69,"./util/errorObject":70,"./util/isArray":71,"./util/isFunction":74,"./util/isObject":75,"./util/tryCatch":80}],55:[function(require,module,exports){
+},{"./util/UnsubscriptionError":70,"./util/errorObject":71,"./util/isArray":72,"./util/isFunction":75,"./util/isObject":76,"./util/tryCatch":81}],56:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('../../Observable');
 var delay_1 = require('../../operator/delay');
 Observable_1.Observable.prototype.delay = delay_1.delay;
 
-},{"../../Observable":47,"../../operator/delay":58}],56:[function(require,module,exports){
+},{"../../Observable":48,"../../operator/delay":59}],57:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('../../Observable');
 var map_1 = require('../../operator/map');
 Observable_1.Observable.prototype.map = map_1.map;
 
-},{"../../Observable":47,"../../operator/map":59}],57:[function(require,module,exports){
+},{"../../Observable":48,"../../operator/map":60}],58:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('../../Observable');
 var retryWhen_1 = require('../../operator/retryWhen');
 Observable_1.Observable.prototype.retryWhen = retryWhen_1.retryWhen;
 
-},{"../../Observable":47,"../../operator/retryWhen":60}],58:[function(require,module,exports){
+},{"../../Observable":48,"../../operator/retryWhen":61}],59:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -19484,7 +19506,7 @@ var DelayMessage = (function () {
     return DelayMessage;
 }());
 
-},{"../Notification":46,"../Subscriber":53,"../scheduler/async":64,"../util/isDate":73}],59:[function(require,module,exports){
+},{"../Notification":47,"../Subscriber":54,"../scheduler/async":65,"../util/isDate":74}],60:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -19572,7 +19594,7 @@ var MapSubscriber = (function (_super) {
     return MapSubscriber;
 }(Subscriber_1.Subscriber));
 
-},{"../Subscriber":53}],60:[function(require,module,exports){
+},{"../Subscriber":54}],61:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -19674,7 +19696,7 @@ var RetryWhenSubscriber = (function (_super) {
     return RetryWhenSubscriber;
 }(OuterSubscriber_1.OuterSubscriber));
 
-},{"../OuterSubscriber":49,"../Subject":51,"../util/errorObject":70,"../util/subscribeToResult":78,"../util/tryCatch":80}],61:[function(require,module,exports){
+},{"../OuterSubscriber":50,"../Subject":52,"../util/errorObject":71,"../util/subscribeToResult":79,"../util/tryCatch":81}],62:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -19719,7 +19741,7 @@ var Action = (function (_super) {
 }(Subscription_1.Subscription));
 exports.Action = Action;
 
-},{"../Subscription":54}],62:[function(require,module,exports){
+},{"../Subscription":55}],63:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -19862,7 +19884,7 @@ var AsyncAction = (function (_super) {
 }(Action_1.Action));
 exports.AsyncAction = AsyncAction;
 
-},{"../util/root":77,"./Action":61}],63:[function(require,module,exports){
+},{"../util/root":78,"./Action":62}],64:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -19914,7 +19936,7 @@ var AsyncScheduler = (function (_super) {
 }(Scheduler_1.Scheduler));
 exports.AsyncScheduler = AsyncScheduler;
 
-},{"../Scheduler":50}],64:[function(require,module,exports){
+},{"../Scheduler":51}],65:[function(require,module,exports){
 "use strict";
 var AsyncAction_1 = require('./AsyncAction');
 var AsyncScheduler_1 = require('./AsyncScheduler');
@@ -19962,7 +19984,7 @@ var AsyncScheduler_1 = require('./AsyncScheduler');
  */
 exports.async = new AsyncScheduler_1.AsyncScheduler(AsyncAction_1.AsyncAction);
 
-},{"./AsyncAction":62,"./AsyncScheduler":63}],65:[function(require,module,exports){
+},{"./AsyncAction":63,"./AsyncScheduler":64}],66:[function(require,module,exports){
 "use strict";
 var root_1 = require('../util/root');
 function symbolIteratorPonyfill(root) {
@@ -20001,7 +20023,7 @@ exports.iterator = symbolIteratorPonyfill(root_1.root);
  */
 exports.$$iterator = exports.iterator;
 
-},{"../util/root":77}],66:[function(require,module,exports){
+},{"../util/root":78}],67:[function(require,module,exports){
 "use strict";
 var root_1 = require('../util/root');
 function getSymbolObservable(context) {
@@ -20028,7 +20050,7 @@ exports.observable = getSymbolObservable(root_1.root);
  */
 exports.$$observable = exports.observable;
 
-},{"../util/root":77}],67:[function(require,module,exports){
+},{"../util/root":78}],68:[function(require,module,exports){
 "use strict";
 var root_1 = require('../util/root');
 var Symbol = root_1.root.Symbol;
@@ -20039,7 +20061,7 @@ exports.rxSubscriber = (typeof Symbol === 'function' && typeof Symbol.for === 'f
  */
 exports.$$rxSubscriber = exports.rxSubscriber;
 
-},{"../util/root":77}],68:[function(require,module,exports){
+},{"../util/root":78}],69:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -20067,7 +20089,7 @@ var ObjectUnsubscribedError = (function (_super) {
 }(Error));
 exports.ObjectUnsubscribedError = ObjectUnsubscribedError;
 
-},{}],69:[function(require,module,exports){
+},{}],70:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -20093,48 +20115,48 @@ var UnsubscriptionError = (function (_super) {
 }(Error));
 exports.UnsubscriptionError = UnsubscriptionError;
 
-},{}],70:[function(require,module,exports){
+},{}],71:[function(require,module,exports){
 "use strict";
 // typeof any so that it we don't have to cast when comparing a result to the error object
 exports.errorObject = { e: {} };
 
-},{}],71:[function(require,module,exports){
+},{}],72:[function(require,module,exports){
 "use strict";
 exports.isArray = Array.isArray || (function (x) { return x && typeof x.length === 'number'; });
 
-},{}],72:[function(require,module,exports){
+},{}],73:[function(require,module,exports){
 "use strict";
 exports.isArrayLike = (function (x) { return x && typeof x.length === 'number'; });
 
-},{}],73:[function(require,module,exports){
+},{}],74:[function(require,module,exports){
 "use strict";
 function isDate(value) {
     return value instanceof Date && !isNaN(+value);
 }
 exports.isDate = isDate;
 
-},{}],74:[function(require,module,exports){
+},{}],75:[function(require,module,exports){
 "use strict";
 function isFunction(x) {
     return typeof x === 'function';
 }
 exports.isFunction = isFunction;
 
-},{}],75:[function(require,module,exports){
+},{}],76:[function(require,module,exports){
 "use strict";
 function isObject(x) {
     return x != null && typeof x === 'object';
 }
 exports.isObject = isObject;
 
-},{}],76:[function(require,module,exports){
+},{}],77:[function(require,module,exports){
 "use strict";
 function isPromise(value) {
     return value && typeof value.subscribe !== 'function' && typeof value.then === 'function';
 }
 exports.isPromise = isPromise;
 
-},{}],77:[function(require,module,exports){
+},{}],78:[function(require,module,exports){
 (function (global){
 "use strict";
 // CommonJS / Node have global context exposed as "global" variable.
@@ -20156,7 +20178,7 @@ exports.root = _root;
 })();
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],78:[function(require,module,exports){
+},{}],79:[function(require,module,exports){
 "use strict";
 var root_1 = require('./root');
 var isArrayLike_1 = require('./isArrayLike');
@@ -20235,7 +20257,7 @@ function subscribeToResult(outerSubscriber, result, outerValue, outerIndex) {
 }
 exports.subscribeToResult = subscribeToResult;
 
-},{"../InnerSubscriber":45,"../Observable":47,"../symbol/iterator":65,"../symbol/observable":66,"./isArrayLike":72,"./isObject":75,"./isPromise":76,"./root":77}],79:[function(require,module,exports){
+},{"../InnerSubscriber":46,"../Observable":48,"../symbol/iterator":66,"../symbol/observable":67,"./isArrayLike":73,"./isObject":76,"./isPromise":77,"./root":78}],80:[function(require,module,exports){
 "use strict";
 var Subscriber_1 = require('../Subscriber');
 var rxSubscriber_1 = require('../symbol/rxSubscriber');
@@ -20256,7 +20278,7 @@ function toSubscriber(nextOrObserver, error, complete) {
 }
 exports.toSubscriber = toSubscriber;
 
-},{"../Observer":48,"../Subscriber":53,"../symbol/rxSubscriber":67}],80:[function(require,module,exports){
+},{"../Observer":49,"../Subscriber":54,"../symbol/rxSubscriber":68}],81:[function(require,module,exports){
 "use strict";
 var errorObject_1 = require('./errorObject');
 var tryCatchTarget;
@@ -20276,5 +20298,5 @@ function tryCatch(fn) {
 exports.tryCatch = tryCatch;
 ;
 
-},{"./errorObject":70}]},{},[2])(2)
+},{"./errorObject":71}]},{},[2])(2)
 });
