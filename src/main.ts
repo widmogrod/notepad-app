@@ -2,7 +2,7 @@ import crdt from 'js-crdt';
 import {Text, Operation, OrderedOperations} from 'js-crdt/build/text';
 import * as ColorHash from 'color-hash';
 
-function uuid() {
+function uuid(): string {
   const array = new Uint8Array(2);
   crypto.getRandomValues(array);
   return array.join('-')
@@ -23,13 +23,23 @@ import {CRDTOperations} from './quill-adapter';
 
 Quill.register('modules/crdtOperations', CRDTOperations)
 
-function creteQuill(config) {
-  return  new Quill(config.editorId, {
+import {TextSync} from './text-sync';
+import {QuillContentUpdater} from './quill-content-updater';
+import {QuillCursorsUpdater} from './quill-cursors-updater';
+import {CommunicationWS} from './communication-ws';
+
+interface CreateQuillDependencies {
+  editorId: string
+  clientId: string
+}
+
+function creteQuill(di): Quill {
+  return  new Quill(di.editorId, {
     modules: {
       toolbar: false,
       cursors: true,
       crdtOperations: {
-        selectionOrigin: config.clientID,
+        selectionOrigin: di.clientId,
       },
     },
     formats: [],
@@ -37,55 +47,66 @@ function creteQuill(config) {
   });
 }
 
-import {TextSync} from './text-sync';
-import {QuillContentUpdater} from './quill-content-updater';
-import {QuillCursorsUpdater} from './quill-cursors-updater';
-import {CommunicationWS} from './communication-ws';
-
-function createContentUpdater(editor): QuillContentUpdater {
-  return new QuillContentUpdater(editor);
+interface CreateContentUpdaterDependencies {
+  editor: Quill
 }
 
-function createCursorUpdater(editor, config, colorHash): QuillCursorsUpdater {
+function createContentUpdater(di): QuillContentUpdater {
+  return new QuillContentUpdater(di.editor);
+}
+
+function createCursorUpdater(di): QuillCursorsUpdater {
   return new QuillCursorsUpdater(
-    editor.getModule('cursors'),
-    editor,
-    config.clientID,
-    colorHash.hex.bind(colorHash),
+    di.editor.getModule('cursors'),
+    di.editor,
+    di.clientId,
+    di.stringToColor,
   );
 }
 
-function createCommunicationWS(config: {wsURL: string}): CommunicationWS {
-  return new CommunicationWS(config.wsURL);
+function createCommunicationWS(di): CommunicationWS {
+  return new CommunicationWS(di.wsURL);
 }
 
-function createTextSync(config: {clientID: string}): TextSync {
+function createTextSync(di): TextSync {
   return new TextSync(
     crdt.text.createFromOrderer(
-      crdt.order.createVectorClock(config.clientID),
+      crdt.order.createVectorClock(di.clientId),
     ),
   );
 }
 
-const config = {
-  editorId: '#editor',
-  clientID: uuid(),
-  wsURL : websocketURL(),
-};
-
-const colorHash = new ColorHash();
-const editor = creteQuill(config);
-const contentUpdater = createContentUpdater(editor)
-const cursorUpdater =  createCursorUpdater(editor, config, colorHash);
-const communicationWS = createCommunicationWS(config);
-const textSync = createTextSync(config);
-
-function main() {
-  contentUpdater.register(textSync);
-  cursorUpdater.register(textSync);
-  communicationWS.register(textSync);
-
-  editor.focus();
+interface StringToColorDependencies {
+  colorHash: ColorHash;
 }
 
-main();
+function createStringToColor(di): (s: string) => string {
+  return (s: string) => di.colorHash.hex(s);
+}
+
+interface Map<T> {
+    [key: string]: T;
+}
+
+let DI: Map<any> = {
+    editorId: '#editor',
+    clientId: uuid(),
+    wsURL : websocketURL(),
+};
+
+DI.colorHash = new ColorHash();
+DI.editor = creteQuill(DI);
+DI.stringToColor = createStringToColor(DI);
+DI.contentUpdater = createContentUpdater(DI);
+DI.cursorUpdater = createCursorUpdater(DI);
+DI.communicationWS = createCommunicationWS(DI);
+DI.textSync = createTextSync(DI);
+
+function main(di) {
+  di.contentUpdater.register(di.textSync);
+  di.cursorUpdater.register(di.textSync);
+  di.communicationWS.register(di.textSync);
+  di.editor.focus();
+}
+
+main(DI);
