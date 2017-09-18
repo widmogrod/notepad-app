@@ -50,11 +50,11 @@ function createTextSync(di) {
 function createStringToColor(di) {
     return (s) => di.colorHash.hex(s);
 }
-let DI = {
-    editorId: '#editor',
-    clientId: uuid(),
-    wsURL: websocketURL(),
-};
+const DI = {};
+DI.clientId = uuid();
+DI.editorId = '#editor';
+DI.clientId = uuid();
+DI.wsURL = websocketURL();
 DI.colorHash = new ColorHash();
 DI.editor = creteQuill(DI);
 DI.stringToColor = createStringToColor(DI);

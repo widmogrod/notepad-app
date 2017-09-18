@@ -33,7 +33,7 @@ interface CreateQuillDependencies {
   clientId: string
 }
 
-function creteQuill(di): Quill {
+function creteQuill(di: CreateQuillDependencies): Quill {
   return  new Quill(di.editorId, {
     modules: {
       toolbar: false,
@@ -51,11 +51,17 @@ interface CreateContentUpdaterDependencies {
   editor: Quill
 }
 
-function createContentUpdater(di): QuillContentUpdater {
+function createContentUpdater(di: CreateContentUpdaterDependencies): QuillContentUpdater {
   return new QuillContentUpdater(di.editor);
 }
 
-function createCursorUpdater(di): QuillCursorsUpdater {
+interface CreateCursorUpdaterDependencies {
+  editor: Quill;
+  clientId: string;
+  stringToColor: StringToColorFunc;
+}
+
+function createCursorUpdater(di: CreateCursorUpdaterDependencies): QuillCursorsUpdater {
   return new QuillCursorsUpdater(
     di.editor.getModule('cursors'),
     di.editor,
@@ -64,11 +70,19 @@ function createCursorUpdater(di): QuillCursorsUpdater {
   );
 }
 
-function createCommunicationWS(di): CommunicationWS {
+interface CreateCommunicationWSDependencies {
+  wsURL: string;
+}
+
+function createCommunicationWS(di: CreateCommunicationWSDependencies): CommunicationWS {
   return new CommunicationWS(di.wsURL);
 }
 
-function createTextSync(di): TextSync {
+interface CreateTextSyncDependencies {
+  clientId: string;
+}
+
+function createTextSync(di: CreateTextSyncDependencies): TextSync {
   return new TextSync(
     crdt.text.createFromOrderer(
       crdt.order.createVectorClock(di.clientId),
@@ -80,20 +94,31 @@ interface StringToColorDependencies {
   colorHash: ColorHash;
 }
 
-function createStringToColor(di): (s: string) => string {
+type StringToColorFunc = (s: string) => string;
+
+function createStringToColor(di: StringToColorDependencies): StringToColorFunc {
   return (s: string) => di.colorHash.hex(s);
 }
 
-interface Map<T> {
-    [key: string]: T;
+interface DeIi {
+  editorId: string;
+  clientId: string;
+  wsURL: string;
+  colorHash: ColorHash;
+  editor: Quill;
+  stringToColor: StringToColorFunc;
+  contentUpdater: QuillContentUpdater;
+  cursorUpdater: QuillCursorsUpdater;
+  communicationWS: CommunicationWS;
+  textSync: TextSync;
 }
 
-let DI: Map<any> = {
-    editorId: '#editor',
-    clientId: uuid(),
-    wsURL : websocketURL(),
-};
+const DI = <DeIi>{};
 
+DI.clientId = uuid();
+DI.editorId = '#editor';
+DI.clientId = uuid();
+DI.wsURL = websocketURL();
 DI.colorHash = new ColorHash();
 DI.editor = creteQuill(DI);
 DI.stringToColor = createStringToColor(DI);
@@ -102,7 +127,7 @@ DI.cursorUpdater = createCursorUpdater(DI);
 DI.communicationWS = createCommunicationWS(DI);
 DI.textSync = createTextSync(DI);
 
-function main(di) {
+function main(di: DeIi) {
   di.contentUpdater.register(di.textSync);
   di.cursorUpdater.register(di.textSync);
   di.communicationWS.register(di.textSync);
