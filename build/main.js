@@ -40,41 +40,8 @@ let editor = new Quill('#editor', {
     theme: 'snow'
 });
 editor.focus();
-const EventEmitter = require("events");
-class TextSync {
-    constructor(text) {
-        this.text = text;
-        this.events = new EventEmitter();
-    }
-    localChange(ops) {
-        if (!ops || !ops.length) {
-            return;
-        }
-        const previous = this.text;
-        this.text = this.text.next();
-        const oo = this.text.apply(...ops);
-        this.triggerLocalModelUpdate(oo, this.text, previous);
-    }
-    remoteChange(oo) {
-        const previous = this.text;
-        this.text = this.text.next();
-        this.text = this.text.mergeOperations(oo);
-        this.triggerRemoteModelUpdate(oo, this.text, previous);
-    }
-    triggerLocalModelUpdate(oo, text, previous) {
-        this.events.emit('local-change', oo, text, previous);
-    }
-    triggerRemoteModelUpdate(oo, text, previous) {
-        this.events.emit('remote-change', oo, text, previous);
-    }
-    onLocalChange(fn) {
-        this.events.on('local-change', fn);
-    }
-    onRemoteChange(fn) {
-        this.events.on('remote-change', fn);
-    }
-}
-const textSync = new TextSync(js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(clientID)));
+const text_sync_1 = require("./text-sync");
+const textSync = new text_sync_1.TextSync(js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(clientID)));
 textSync.onLocalChange((oo, text) => {
     publish.next(serialiser_1.serialiseOperations(oo));
 });
