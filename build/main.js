@@ -1,118 +1,71 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const js_crdt_1 = require("js-crdt");
-const text_1 = require("js-crdt/build/text");
-require("rxjs/add/operator/map");
-require("rxjs/add/operator/retryWhen");
-require("rxjs/add/operator/delay");
-const queueing_subject_1 = require("queueing-subject");
-const rxjs_websockets_1 = require("rxjs-websockets");
-const serialiser_1 = require("./serialiser");
 const ColorHash = require("color-hash");
 function uuid() {
     const array = new Uint8Array(2);
     crypto.getRandomValues(array);
     return array.join('-');
 }
-const colorHash = new ColorHash();
-let host = window.document.location.host.replace(/:.*/, '');
-let port = window.document.location.port;
-let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
-const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '');
-const clientID = uuid();
-let database = js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(clientID));
-// this subject queues as necessary to ensure every message is delivered
-const publish = new queueing_subject_1.QueueingSubject();
-// this method returns an object which contains two observables
-const { messages, connectionStatus } = rxjs_websockets_1.default(WebSocketURL, publish);
+function websocketURL() {
+    let host = window.document.location.host.replace(/:.*/, '');
+    let port = window.document.location.port;
+    let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
+    return protocol + '://' + host + (port ? (':' + port) : '');
+}
 // This is hack to properly require quill :/
 const Quill = require("quill");
-const QuillDelta = require("quill-delta");
 require("quill-cursors");
-let editor = new Quill('#editor', {
-    modules: {
-        toolbar: false,
-        cursors: true,
-    },
-    formats: [],
-    theme: 'snow'
-});
-editor.focus();
-let cursors = editor.getModule('cursors');
-editor.on('text-change', function (delta, oldDelta, source) {
-    if (source !== "user") {
-        return;
-    }
-    const r = delta.ops.reduce((r, o) => {
-        if (o.retain) {
-            r.pos = o.retain;
-        }
-        else if (o.insert) {
-            // because for Quill when you replace selected text with other text
-            // first you do insert and then delete :/
-            r.ops.unshift(new js_crdt_1.default.text.Insert(r.pos, o.insert));
-        }
-        else if (o.delete) {
-            // because for Quill when you replace selected text with other text
-            // first you do insert and then delete :/
-            r.ops.unshift(new js_crdt_1.default.text.Delete(r.pos, o.delete));
-        }
-        return r;
-    }, { pos: 0, ops: [] });
-    if (r.ops.length) {
-        database = database.next();
-        let oo = r.ops.reduce((oo, op) => database.apply(op), null);
-        const range = editor.getSelection(true);
-        if (range) {
-            oo = database.apply(quillSelectionToCrdt(range));
-        }
-        publish.next(serialiser_1.serialiseOperations(oo));
-        updateSelection();
-    }
-});
-editor.on('selection-change', function (range, oldRange, source) {
-    if (source !== 'user') {
-        return;
-    }
-    if (range) {
-        database = database.next();
-        let op = database.apply(quillSelectionToCrdt(range));
-        publish.next(serialiser_1.serialiseOperations(op));
-    }
-});
-messages
-    .retryWhen(errors => errors.delay(10000))
-    .map(serialiser_1.deserialiseOperations)
-    .subscribe(oo => {
-    database = database.next();
-    database = database.mergeOperations(oo);
-    // diff?
-    // database.diff(database.mergeOperations(oo));
-    const dd = new QuillDelta()
-        .retain(0)
-        .insert(js_crdt_1.default.text.renderString(database));
-    editor.setContents(dd);
-    updateSelection();
-});
-function updateSelection() {
-    const maybeSelection = editor.getSelection(true);
-    const currentSelection = quillSelectionToCrdt(maybeSelection ? maybeSelection : new text_1.Selection(clientID, 0, 0));
-    const selections = js_crdt_1.default.text.getSelections(database, currentSelection);
-    selections.reduce((_, s) => {
-        if (s.origin === clientID) {
-            editor.setSelection(crdtSelectionToQuill(s));
-        }
-        else {
-            cursors.setCursor(s.origin, crdtSelectionToQuill(s), s.origin, colorHash.hex(s.origin));
-        }
-    }, null);
+const quill_adapter_1 = require("./quill-adapter");
+Quill.register('modules/crdtOperations', quill_adapter_1.CRDTOperations);
+const text_sync_1 = require("./text-sync");
+const quill_content_updater_1 = require("./quill-content-updater");
+const quill_cursors_updater_1 = require("./quill-cursors-updater");
+const communication_ws_1 = require("./communication-ws");
+function creteQuill(di) {
+    return new Quill(di.editorId, {
+        modules: {
+            toolbar: false,
+            cursors: true,
+            crdtOperations: {
+                selectionOrigin: di.clientId,
+            },
+        },
+        formats: [],
+        theme: 'snow'
+    });
 }
-function quillSelectionToCrdt(s) {
-    return new text_1.Selection(clientID, s.index, s.length);
+function createContentUpdater(di) {
+    return new quill_content_updater_1.QuillContentUpdater(di.editor);
 }
-function crdtSelectionToQuill(s) {
-    return {
-        index: s.at,
-        length: s.length,
-    };
+function createCursorUpdater(di) {
+    return new quill_cursors_updater_1.QuillCursorsUpdater(di.editor.getModule('cursors'), di.editor, di.clientId, di.stringToColor);
 }
+function createCommunicationWS(di) {
+    return new communication_ws_1.CommunicationWS(di.wsURL);
+}
+function createTextSync(di) {
+    return new text_sync_1.TextSync(js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(di.clientId)));
+}
+function createStringToColor(di) {
+    return (s) => di.colorHash.hex(s);
+}
+const DI = {};
+DI.clientId = uuid();
+DI.editorId = '#editor';
+DI.clientId = uuid();
+DI.wsURL = websocketURL();
+DI.colorHash = new ColorHash();
+DI.editor = creteQuill(DI);
+DI.stringToColor = createStringToColor(DI);
+DI.contentUpdater = createContentUpdater(DI);
+DI.cursorUpdater = createCursorUpdater(DI);
+DI.communicationWS = createCommunicationWS(DI);
+DI.textSync = createTextSync(DI);
+function main(di) {
+    di.contentUpdater.register(di.textSync);
+    di.cursorUpdater.register(di.textSync);
+    di.communicationWS.register(di.textSync);
+    di.editor.focus();
+}
+main(DI);
