@@ -1,5 +1,5 @@
 import crdt from 'js-crdt';
-import {Insert, Delete, Selection, Operation, OrderedOperations} from 'js-crdt/build/text';
+import {Text, Insert, Delete, Selection, Operation, OrderedOperations} from 'js-crdt/build/text';
 import {Observable, Observer, Scheduler} from 'rxjs/Rx';
 import "rxjs/add/operator/map";
 import "rxjs/add/operator/retryWhen";
@@ -24,7 +24,6 @@ let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
 const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '')
 
 const clientID = uuid();
-let database = crdt.text.createFromOrderer(crdt.order.createVectorClock(clientID));
 
 // this subject queues as necessary to ensure every message is delivered
 const publish = new QueueingSubject()
@@ -36,129 +35,126 @@ const { messages, connectionStatus } = websocketConnect(WebSocketURL, publish)
 import * as Quill from 'quill';
 import * as QuillDelta from 'quill-delta'
 import 'quill-cursors';
+import {CRDTOperations, rangeToSelection, selectionToRange} from './quill-adapter';
 
-type QRetain = {retain: number}
-type QInsert = {insert: string}
-type QDelete = {delete: number}
-type QOperation = QRetain | QInsert | QDelete;
-type QSource = "user" | "api"
-
-interface Delta {
-  ops: QOperation[]
-}
+Quill.register('modules/crdtOperations', CRDTOperations)
 
 let editor = new Quill('#editor', {
   modules: {
     toolbar: false,
     cursors: true,
+    crdtOperations: {
+      selectionOrigin: clientID,
+    },
   },
   formats: [],
   theme: 'snow'
 });
 editor.focus();
 
-let cursors = editor.getModule('cursors');
+type ChangeFunc = (oo: OrderedOperations, text: Text, previous: Text) => void;
 
-interface OperationReducer {
-  pos: number;
-  ops: Operation[];
+import * as EventEmitter from 'events';
+
+class TextSync {
+  private events: EventEmitter;
+  constructor(private text: Text) {
+    this.events = new EventEmitter();
+  }
+
+  public localChange(ops: Operation[]) {
+    if (!ops || !ops.length) {
+      return;
+    }
+
+    const previous = this.text;
+    this.text = this.text.next();
+    const oo = this.text.apply(...ops);
+
+    this.triggerLocalModelUpdate(oo, this.text, previous)
+  }
+
+  public remoteChange(oo: OrderedOperations) {
+    const previous = this.text;
+    this.text = this.text.next();
+    this.text = this.text.mergeOperations(oo);
+
+    this.triggerRemoteModelUpdate(oo, this.text, previous);
+  }
+
+  public triggerLocalModelUpdate(oo: OrderedOperations, text: Text, previous: Text) {
+    this.events.emit('local-change', oo, text, previous)
+  }
+
+  public triggerRemoteModelUpdate(oo: OrderedOperations, text: Text, previous: Text) {
+    this.events.emit('remote-change', oo, text, previous)
+  }
+
+  public onLocalChange(fn: ChangeFunc) {
+    this.events.on('local-change', fn);
+  }
+
+  public onRemoteChange(fn: ChangeFunc) {
+    this.events.on('remote-change', fn);
+  }
 }
 
-editor.on('text-change', function(delta: Delta, oldDelta: Delta, source: QSource) {
-  if (source !== "user") {
-    return;
-  }
+const textSync = new TextSync(
+  crdt.text.createFromOrderer(
+    crdt.order.createVectorClock(clientID),
+  ),
+);
 
-  const r = delta.ops.reduce((r: OperationReducer, o: QOperation) => {
-    if ((<QRetain>o).retain) {
-      r.pos = (<QRetain>o).retain;
-    } else if ((<QInsert>o).insert) {
-      // because for Quill when you replace selected text with other text
-      // first you do insert and then delete :/
-      r.ops.unshift(new crdt.text.Insert(r.pos, (<QInsert>o).insert));
-    } else if ((<QDelete>o).delete) {
-      // because for Quill when you replace selected text with other text
-      // first you do insert and then delete :/
-      r.ops.unshift(new crdt.text.Delete(r.pos, (<QDelete>o).delete));
-    }
+textSync.onLocalChange((oo: OrderedOperations, text: Text) => {
+  publish.next(serialiseOperations(oo));
+});
+textSync.onRemoteChange((oo: OrderedOperations, text: Text) => {
+  const dd = new QuillDelta()
+    .retain(0)
+    .insert(crdt.text.renderString(text))
 
-    return r;
-  }, {pos: 0, ops: []});
-
-  if (r.ops.length) {
-    database = database.next();
-    let oo = r.ops.reduce<OrderedOperations>((oo, op) => database.apply(op), null);
-
-    const range = editor.getSelection(true);
-    if (range) {
-      oo = database.apply(quillSelectionToCrdt(range));
-    }
-
-    publish.next(serialiseOperations(oo));
-    updateSelection();
-  }
+  editor.setContents(dd);
 });
 
-editor.on('selection-change', function(range: QSelection, oldRange: QSelection, source: QSource) {
-  if (source !== 'user') {
-    return;
-  }
-
-  if (range) {
-    database = database.next();
-    let op = database.apply(quillSelectionToCrdt(range))
-    publish.next(serialiseOperations(op));
-  }
+editor.on('text-operations', (ops: Operation[]) => {
+  textSync.localChange(ops);
 });
-
 
 messages
   .retryWhen(errors => errors.delay(10000))
   .map(deserialiseOperations)
   .subscribe(oo => {
-    database = database.next();
-    database = database.mergeOperations(oo);
-    // diff?
-    // database.diff(database.mergeOperations(oo));
-
-    const dd = new QuillDelta()
-      .retain(0)
-      .insert(crdt.text.renderString(database))
-
-    editor.setContents(dd);
-    updateSelection();
+    textSync.remoteChange(oo);
   });
 
-function updateSelection() {
-  const maybeSelection = editor.getSelection(true);
-  const currentSelection = quillSelectionToCrdt(maybeSelection ? maybeSelection : new Selection(clientID, 0, 0));
-  const selections = crdt.text.getSelections(database, currentSelection);
+class QuillCursorsUpdater {
+  constructor(private cursors) {}
 
-  selections.reduce((_, s: Selection) => {
-    if (s.origin === clientID) {
-      editor.setSelection(crdtSelectionToQuill(s))
-    } else {
-      cursors.setCursor(s.origin, crdtSelectionToQuill(s), s.origin, colorHash.hex(s.origin));
-    }
-  }, null);
+  public register(m: TextSync) {
+    m.onLocalChange((oo: OrderedOperations, text: Text) => this.updateSelection(text))
+    m.onRemoteChange((oo: OrderedOperations, text: Text) => this.updateSelection(text))
+  }
+
+  private updateSelection(text: Text) {
+    const defaultSelection = new Selection(clientID, 0, 0);
+    const selections = crdt.text.getSelections(text, defaultSelection);
+
+    selections.reduce((_, s: Selection) => {
+      if (s.origin === clientID) {
+        editor.setSelection(selectionToRange(s));
+      } else {
+        this.cursors.setCursor(s.origin, selectionToRange(s), s.origin, colorHash.hex(s.origin));
+      }
+    }, null);
+  }
 }
 
-interface QSelection {
-  index: number;
-  length: number;
-}
+const cursorUpdater = new QuillCursorsUpdater(
+  editor.getModule('cursors'),
+);
 
-function quillSelectionToCrdt(s: QSelection): Selection {
-  return new Selection(
-    clientID,
-    s.index,
-    s.length,
-  );
-}
+cursorUpdater.register(textSync);
 
-function crdtSelectionToQuill(s: Selection): QSelection {
-  return {
-    index: s.at,
-    length: s.length,
-  };
-}
+export default {
+  textSync,
+};

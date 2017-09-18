@@ -20,7 +20,6 @@ let port = window.document.location.port;
 let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
 const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '');
 const clientID = uuid();
-let database = js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(clientID));
 // this subject queues as necessary to ensure every message is delivered
 const publish = new queueing_subject_1.QueueingSubject();
 // this method returns an object which contains two observables
@@ -29,90 +28,96 @@ const { messages, connectionStatus } = rxjs_websockets_1.default(WebSocketURL, p
 const Quill = require("quill");
 const QuillDelta = require("quill-delta");
 require("quill-cursors");
+const quill_adapter_1 = require("./quill-adapter");
+Quill.register('modules/crdtOperations', quill_adapter_1.CRDTOperations);
 let editor = new Quill('#editor', {
     modules: {
         toolbar: false,
         cursors: true,
+        crdtOperations: {
+            selectionOrigin: clientID,
+        },
     },
     formats: [],
     theme: 'snow'
 });
 editor.focus();
-let cursors = editor.getModule('cursors');
-editor.on('text-change', function (delta, oldDelta, source) {
-    if (source !== "user") {
-        return;
+const EventEmitter = require("events");
+class TextSync {
+    constructor(text) {
+        this.text = text;
+        this.events = new EventEmitter();
     }
-    const r = delta.ops.reduce((r, o) => {
-        if (o.retain) {
-            r.pos = o.retain;
+    localChange(ops) {
+        if (!ops || !ops.length) {
+            return;
         }
-        else if (o.insert) {
-            // because for Quill when you replace selected text with other text
-            // first you do insert and then delete :/
-            r.ops.unshift(new js_crdt_1.default.text.Insert(r.pos, o.insert));
-        }
-        else if (o.delete) {
-            // because for Quill when you replace selected text with other text
-            // first you do insert and then delete :/
-            r.ops.unshift(new js_crdt_1.default.text.Delete(r.pos, o.delete));
-        }
-        return r;
-    }, { pos: 0, ops: [] });
-    if (r.ops.length) {
-        database = database.next();
-        let oo = r.ops.reduce((oo, op) => database.apply(op), null);
-        const range = editor.getSelection(true);
-        if (range) {
-            oo = database.apply(quillSelectionToCrdt(range));
-        }
-        publish.next(serialiser_1.serialiseOperations(oo));
-        updateSelection();
+        const previous = this.text;
+        this.text = this.text.next();
+        const oo = this.text.apply(...ops);
+        this.triggerLocalModelUpdate(oo, this.text, previous);
     }
+    remoteChange(oo) {
+        const previous = this.text;
+        this.text = this.text.next();
+        this.text = this.text.mergeOperations(oo);
+        this.triggerRemoteModelUpdate(oo, this.text, previous);
+    }
+    triggerLocalModelUpdate(oo, text, previous) {
+        this.events.emit('local-change', oo, text, previous);
+    }
+    triggerRemoteModelUpdate(oo, text, previous) {
+        this.events.emit('remote-change', oo, text, previous);
+    }
+    onLocalChange(fn) {
+        this.events.on('local-change', fn);
+    }
+    onRemoteChange(fn) {
+        this.events.on('remote-change', fn);
+    }
+}
+const textSync = new TextSync(js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(clientID)));
+textSync.onLocalChange((oo, text) => {
+    publish.next(serialiser_1.serialiseOperations(oo));
 });
-editor.on('selection-change', function (range, oldRange, source) {
-    if (source !== 'user') {
-        return;
-    }
-    if (range) {
-        database = database.next();
-        let op = database.apply(quillSelectionToCrdt(range));
-        publish.next(serialiser_1.serialiseOperations(op));
-    }
+textSync.onRemoteChange((oo, text) => {
+    const dd = new QuillDelta()
+        .retain(0)
+        .insert(js_crdt_1.default.text.renderString(text));
+    editor.setContents(dd);
+});
+editor.on('text-operations', (ops) => {
+    textSync.localChange(ops);
 });
 messages
     .retryWhen(errors => errors.delay(10000))
     .map(serialiser_1.deserialiseOperations)
     .subscribe(oo => {
-    database = database.next();
-    database = database.mergeOperations(oo);
-    // diff?
-    // database.diff(database.mergeOperations(oo));
-    const dd = new QuillDelta()
-        .retain(0)
-        .insert(js_crdt_1.default.text.renderString(database));
-    editor.setContents(dd);
-    updateSelection();
+    textSync.remoteChange(oo);
 });
-function updateSelection() {
-    const maybeSelection = editor.getSelection(true);
-    const currentSelection = quillSelectionToCrdt(maybeSelection ? maybeSelection : new text_1.Selection(clientID, 0, 0));
-    const selections = js_crdt_1.default.text.getSelections(database, currentSelection);
-    selections.reduce((_, s) => {
-        if (s.origin === clientID) {
-            editor.setSelection(crdtSelectionToQuill(s));
-        }
-        else {
-            cursors.setCursor(s.origin, crdtSelectionToQuill(s), s.origin, colorHash.hex(s.origin));
-        }
-    }, null);
+class QuillCursorsUpdater {
+    constructor(cursors) {
+        this.cursors = cursors;
+    }
+    register(m) {
+        m.onLocalChange((oo, text) => this.updateSelection(text));
+        m.onRemoteChange((oo, text) => this.updateSelection(text));
+    }
+    updateSelection(text) {
+        const defaultSelection = new text_1.Selection(clientID, 0, 0);
+        const selections = js_crdt_1.default.text.getSelections(text, defaultSelection);
+        selections.reduce((_, s) => {
+            if (s.origin === clientID) {
+                editor.setSelection(quill_adapter_1.selectionToRange(s));
+            }
+            else {
+                this.cursors.setCursor(s.origin, quill_adapter_1.selectionToRange(s), s.origin, colorHash.hex(s.origin));
+            }
+        }, null);
+    }
 }
-function quillSelectionToCrdt(s) {
-    return new text_1.Selection(clientID, s.index, s.length);
-}
-function crdtSelectionToQuill(s) {
-    return {
-        index: s.at,
-        length: s.length,
-    };
-}
+const cursorUpdater = new QuillCursorsUpdater(editor.getModule('cursors'));
+cursorUpdater.register(textSync);
+exports.default = {
+    textSync,
+};
