@@ -41,40 +41,64 @@ function uuid() {
     crypto.getRandomValues(array);
     return array.join('-');
 }
-let host = window.document.location.host.replace(/:.*/, '');
-let port = window.document.location.port;
-let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
-const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '');
-const clientID = uuid();
+function websocketURL() {
+    let host = window.document.location.host.replace(/:.*/, '');
+    let port = window.document.location.port;
+    let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
+    return protocol + '://' + host + (port ? (':' + port) : '');
+}
 // This is hack to properly require quill :/
 const Quill = require("quill");
 require("quill-cursors");
 const quill_adapter_1 = require("./quill-adapter");
 Quill.register('modules/crdtOperations', quill_adapter_1.CRDTOperations);
-let editor = new Quill('#editor', {
-    modules: {
-        toolbar: false,
-        cursors: true,
-        crdtOperations: {
-            selectionOrigin: clientID,
+function creteQuill(config) {
+    return new Quill(config.editorId, {
+        modules: {
+            toolbar: false,
+            cursors: true,
+            crdtOperations: {
+                selectionOrigin: config.clientID,
+            },
         },
-    },
-    formats: [],
-    theme: 'snow'
-});
-editor.focus();
+        formats: [],
+        theme: 'snow'
+    });
+}
 const text_sync_1 = require("./text-sync");
-const textSync = new text_sync_1.TextSync(js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(clientID)));
 const quill_content_updater_1 = require("./quill-content-updater");
-const contentUpdater = new quill_content_updater_1.QuillContentUpdater(editor);
-contentUpdater.register(textSync);
 const quill_cursors_updater_1 = require("./quill-cursors-updater");
-const colorHash = new ColorHash();
-const cursorUpdater = new quill_cursors_updater_1.QuillCursorsUpdater(editor.getModule('cursors'), editor, clientID, colorHash.hex.bind(colorHash));
-cursorUpdater.register(textSync);
 const communication_ws_1 = require("./communication-ws");
-const communicationWS = new communication_ws_1.CommunicationWS(WebSocketURL);
-communicationWS.register(textSync);
+function createContentUpdater(editor) {
+    return new quill_content_updater_1.QuillContentUpdater(editor);
+}
+function createCursorUpdater(editor, config, colorHash) {
+    return new quill_cursors_updater_1.QuillCursorsUpdater(editor.getModule('cursors'), editor, config.clientID, colorHash.hex.bind(colorHash));
+}
+function createCommunicationWS(config) {
+    return new communication_ws_1.CommunicationWS(config.wsURL);
+}
+function createTextSync(config) {
+    return new text_sync_1.TextSync(js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(config.clientID)));
+}
+const config = {
+    editorId: '#editor',
+    clientID: uuid(),
+    wsURL: websocketURL(),
+};
+const colorHash = new ColorHash();
+const editor = creteQuill(config);
+const contentUpdater = createContentUpdater(editor);
+const cursorUpdater = createCursorUpdater(editor, config, colorHash);
+const communicationWS = createCommunicationWS(config);
+const textSync = createTextSync(config);
+function main() {
+    contentUpdater.register(textSync);
+    cursorUpdater.register(textSync);
+    communicationWS.register(textSync);
+    editor.focus();
+}
+main();
 
 },{"./communication-ws":1,"./quill-adapter":3,"./quill-content-updater":4,"./quill-cursors-updater":5,"./text-sync":7,"color-hash":11,"js-crdt":22,"quill":43,"quill-cursors":40}],3:[function(require,module,exports){
 "use strict";

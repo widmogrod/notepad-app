@@ -8,13 +8,13 @@ function uuid() {
   return array.join('-')
 }
 
-let host = window.document.location.host.replace(/:.*/, '');
-let port = window.document.location.port;
-let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
+function websocketURL(): string {
+  let host = window.document.location.host.replace(/:.*/, '');
+  let port = window.document.location.port;
+  let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
 
-const WebSocketURL = protocol + '://' + host + (port ? (':' + port) : '')
-
-const clientID = uuid();
+  return protocol + '://' + host + (port ? (':' + port) : '')
+}
 
 // This is hack to properly require quill :/
 import * as Quill from 'quill';
@@ -23,44 +23,69 @@ import {CRDTOperations} from './quill-adapter';
 
 Quill.register('modules/crdtOperations', CRDTOperations)
 
-let editor = new Quill('#editor', {
-  modules: {
-    toolbar: false,
-    cursors: true,
-    crdtOperations: {
-      selectionOrigin: clientID,
+function creteQuill(config) {
+  return  new Quill(config.editorId, {
+    modules: {
+      toolbar: false,
+      cursors: true,
+      crdtOperations: {
+        selectionOrigin: config.clientID,
+      },
     },
-  },
-  formats: [],
-  theme: 'snow'
-});
-editor.focus();
+    formats: [],
+    theme: 'snow'
+  });
+}
 
 import {TextSync} from './text-sync';
-
-const textSync = new TextSync(
-  crdt.text.createFromOrderer(
-    crdt.order.createVectorClock(clientID),
-  ),
-);
-
 import {QuillContentUpdater} from './quill-content-updater';
-
-const contentUpdater = new QuillContentUpdater(editor);
-contentUpdater.register(textSync);
-
 import {QuillCursorsUpdater} from './quill-cursors-updater';
-
-const colorHash = new ColorHash();
-const cursorUpdater = new QuillCursorsUpdater(
-  editor.getModule('cursors'),
-  editor,
-  clientID,
-  colorHash.hex.bind(colorHash),
-);
-cursorUpdater.register(textSync);
-
 import {CommunicationWS} from './communication-ws';
 
-const communicationWS = new CommunicationWS(WebSocketURL);
-communicationWS.register(textSync);
+function createContentUpdater(editor): QuillContentUpdater {
+  return new QuillContentUpdater(editor);
+}
+
+function createCursorUpdater(editor, config, colorHash): QuillCursorsUpdater {
+  return new QuillCursorsUpdater(
+    editor.getModule('cursors'),
+    editor,
+    config.clientID,
+    colorHash.hex.bind(colorHash),
+  );
+}
+
+function createCommunicationWS(config: {wsURL: string}): CommunicationWS {
+  return new CommunicationWS(config.wsURL);
+}
+
+function createTextSync(config: {clientID: string}): TextSync {
+  return new TextSync(
+    crdt.text.createFromOrderer(
+      crdt.order.createVectorClock(config.clientID),
+    ),
+  );
+}
+
+const config = {
+  editorId: '#editor',
+  clientID: uuid(),
+  wsURL : websocketURL(),
+};
+
+const colorHash = new ColorHash();
+const editor = creteQuill(config);
+const contentUpdater = createContentUpdater(editor)
+const cursorUpdater =  createCursorUpdater(editor, config, colorHash);
+const communicationWS = createCommunicationWS(config);
+const textSync = createTextSync(config);
+
+function main() {
+  contentUpdater.register(textSync);
+  cursorUpdater.register(textSync);
+  communicationWS.register(textSync);
+
+  editor.focus();
+}
+
+main();
