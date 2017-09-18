@@ -15,7 +15,6 @@ function uuid() {
   return array.join('-')
 }
 
-const colorHash = new ColorHash();
 
 let host = window.document.location.host.replace(/:.*/, '');
 let port = window.document.location.port;
@@ -127,30 +126,15 @@ messages
     textSync.remoteChange(oo);
   });
 
-class QuillCursorsUpdater {
-  constructor(private cursors) {}
 
-  public register(m: TextSync) {
-    m.onLocalChange((oo: OrderedOperations, text: Text) => this.updateSelection(text))
-    m.onRemoteChange((oo: OrderedOperations, text: Text) => this.updateSelection(text))
-  }
+import {QuillCursorsUpdater} from './quill-cursors-updater';
 
-  private updateSelection(text: Text) {
-    const defaultSelection = new Selection(clientID, 0, 0);
-    const selections = crdt.text.getSelections(text, defaultSelection);
-
-    selections.reduce((_, s: Selection) => {
-      if (s.origin === clientID) {
-        editor.setSelection(selectionToRange(s));
-      } else {
-        this.cursors.setCursor(s.origin, selectionToRange(s), s.origin, colorHash.hex(s.origin));
-      }
-    }, null);
-  }
-}
-
+const colorHash = new ColorHash();
 const cursorUpdater = new QuillCursorsUpdater(
   editor.getModule('cursors'),
+  editor,
+  clientID,
+  colorHash.hex.bind(colorHash),
 );
 
 cursorUpdater.register(textSync);

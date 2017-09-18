@@ -1,7 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const js_crdt_1 = require("js-crdt");
-const text_1 = require("js-crdt/build/text");
 require("rxjs/add/operator/map");
 require("rxjs/add/operator/retryWhen");
 require("rxjs/add/operator/delay");
@@ -14,7 +13,6 @@ function uuid() {
     crypto.getRandomValues(array);
     return array.join('-');
 }
-const colorHash = new ColorHash();
 let host = window.document.location.host.replace(/:.*/, '');
 let port = window.document.location.port;
 let protocol = window.document.location.protocol.match(/s:$/) ? 'wss' : 'ws';
@@ -95,28 +93,9 @@ messages
     .subscribe(oo => {
     textSync.remoteChange(oo);
 });
-class QuillCursorsUpdater {
-    constructor(cursors) {
-        this.cursors = cursors;
-    }
-    register(m) {
-        m.onLocalChange((oo, text) => this.updateSelection(text));
-        m.onRemoteChange((oo, text) => this.updateSelection(text));
-    }
-    updateSelection(text) {
-        const defaultSelection = new text_1.Selection(clientID, 0, 0);
-        const selections = js_crdt_1.default.text.getSelections(text, defaultSelection);
-        selections.reduce((_, s) => {
-            if (s.origin === clientID) {
-                editor.setSelection(quill_adapter_1.selectionToRange(s));
-            }
-            else {
-                this.cursors.setCursor(s.origin, quill_adapter_1.selectionToRange(s), s.origin, colorHash.hex(s.origin));
-            }
-        }, null);
-    }
-}
-const cursorUpdater = new QuillCursorsUpdater(editor.getModule('cursors'));
+const quill_cursors_updater_1 = require("./quill-cursors-updater");
+const colorHash = new ColorHash();
+const cursorUpdater = new quill_cursors_updater_1.QuillCursorsUpdater(editor.getModule('cursors'), editor, clientID, colorHash.hex.bind(colorHash));
 cursorUpdater.register(textSync);
 exports.default = {
     textSync,
