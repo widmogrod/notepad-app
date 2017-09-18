@@ -44,8 +44,11 @@ function createCursorUpdater(di) {
 function createCommunicationWS(di) {
     return new communication_ws_1.CommunicationWS(di.wsURL);
 }
+function createText(di) {
+    return js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(di.clientId));
+}
 function createTextSync(di) {
-    return new text_sync_1.TextSync(js_crdt_1.default.text.createFromOrderer(js_crdt_1.default.order.createVectorClock(di.clientId)));
+    return new text_sync_1.TextSync(di.text);
 }
 function createStringToColor(di) {
     return (s) => di.colorHash.hex(s);
@@ -60,6 +63,7 @@ DI.stringToColor = createStringToColor(DI);
 DI.contentUpdater = createContentUpdater(DI);
 DI.cursorUpdater = createCursorUpdater(DI);
 DI.communicationWS = createCommunicationWS(DI);
+DI.text = createText(DI);
 DI.textSync = createTextSync(DI);
 function main(di) {
     di.contentUpdater.register(di.textSync);

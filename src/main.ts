@@ -1,5 +1,5 @@
 import crdt from 'js-crdt';
-import {Text, Operation, OrderedOperations} from 'js-crdt/build/text';
+import {Text, Insert, Operation, OrderedOperations} from 'js-crdt/build/text';
 import * as ColorHash from 'color-hash';
 
 function uuid(): string {
@@ -78,16 +78,22 @@ function createCommunicationWS(di: CreateCommunicationWSDependencies): Communica
   return new CommunicationWS(di.wsURL);
 }
 
-interface CreateTextSyncDependencies {
+interface CreateTextDependencies {
   clientId: string;
 }
 
-function createTextSync(di: CreateTextSyncDependencies): TextSync {
-  return new TextSync(
-    crdt.text.createFromOrderer(
-      crdt.order.createVectorClock(di.clientId),
-    ),
+function createText(di: CreateTextDependencies): Text {
+  return crdt.text.createFromOrderer(
+    crdt.order.createVectorClock(di.clientId),
   );
+}
+
+interface CreateTextSyncDependencies {
+  text: Text;
+}
+
+function createTextSync(di: CreateTextSyncDependencies): TextSync {
+  return new TextSync(di.text);
 }
 
 interface StringToColorDependencies {
@@ -110,6 +116,7 @@ interface DeIi {
   contentUpdater: QuillContentUpdater;
   cursorUpdater: QuillCursorsUpdater;
   communicationWS: CommunicationWS;
+  text: Text;
   textSync: TextSync;
 }
 
@@ -124,6 +131,7 @@ DI.stringToColor = createStringToColor(DI);
 DI.contentUpdater = createContentUpdater(DI);
 DI.cursorUpdater = createCursorUpdater(DI);
 DI.communicationWS = createCommunicationWS(DI);
+DI.text = createText(DI);
 DI.textSync = createTextSync(DI);
 
 function main(di: DeIi) {
