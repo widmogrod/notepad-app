@@ -2,9 +2,9 @@ import crdt from 'js-crdt';
 import {OrderedOperations} from 'js-crdt/build/text';
 
 type SerialisedOrder = Object
-type SerialisedText = {operations: Array<any>, order: SerialisedOrder}
+export type SerialisedOrderedOperations = {operations: Array<any>, order: SerialisedOrder}
 
-export function serialiseOperations(oo: OrderedOperations): SerialisedText {
+export function serialiseOperations(oo: OrderedOperations): SerialisedOrderedOperations {
     return oo.operations.reduce((result, operation) => {
       let value;
 
