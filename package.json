@@ -12,11 +12,12 @@
     "dist": "npm run browserify && npm run uglifyjs",
     "lint": "eslint src",
     "fix": "eslint src --fix",
-    "start": "node server.js"
+    "start": "tsc && node build/server.js"
   },
   "author": "widmogrod@gmail.com",
   "license": "ISC",
   "dependencies": {
+    "@types/node": "^8.0.28",
     "bufferutil": "^3.0.2",
     "color-hash": "^1.0.3",
     "express": "^4.15.4",

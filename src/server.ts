@@ -1,16 +1,18 @@
-const express = require('express');
-const WebSocket = require('ws');
+import * as express from 'express';
+import * as WebSocket from 'ws';
+import {createServer} from 'http';
+import {env} from 'process';
 
 const app = express();
-const server = require('http').createServer();
+const server = createServer();
 
-app.set('port', process.env.PORT || 8080);
+app.set('port', env.PORT || 8080);
 app.use(express.static('dist'));
 app.use(express.static('public'));
 
-const {createFromOrderer} = require('js-crdt/build/text');
-const {createVectorClock} = require('js-crdt/build/order');
-const {serialiseOperations, deserialiseOperations} = require('./build/serialiser');
+import {createFromOrderer} from 'js-crdt/build/text';
+import {createVectorClock} from 'js-crdt/build/order';
+import {serialiseOperations, deserialiseOperations} from './serialiser';
 
 let database = createFromOrderer(createVectorClock('server'));
 
@@ -18,13 +20,16 @@ const wss = new WebSocket.Server({ server });
 wss.on('connection', function connection(ws) {
   // Restore database state
   database.reduce((_, orderedOperations) => {
-    ws.send(JSON.stringify(serialiseOperations(orderedOperations)));
+    return ws.send(JSON.stringify(serialiseOperations(orderedOperations)));
   }, null);
 
   ws.on('message', function incoming(data) {
     // Update database state
-    const partial = deserialiseOperations(JSON.parse(data));
-    database = database.next().mergeOperations(partial);
+    const object = JSON.parse(data);
+    const partial = deserialiseOperations(object);
+
+    database = database.next();
+    database.mergeOperations(partial);
 
     // Broadcast to everyone else.
     wss.clients.forEach(function each(client) {
