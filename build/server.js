@@ -13,6 +13,32 @@ const text_1 = require("js-crdt/build/text");
 const order_1 = require("js-crdt/build/order");
 const serialiser_1 = require("./serialiser");
 let database = text_1.createFromOrderer(order_1.createVectorClock('server'));
+// import * as e from './protobuf/events';
+//
+// const op = new e.Insert({
+//   at: 1,
+//   value: "abc",
+// });
+//
+// const ops = new e.Operation({
+//   insert: op,
+// });
+// console.log(ops.type);
+//
+// console.log(ops.toJSON());
+// const ev = new e.Event({
+//   Type: new e.OrderedOperations({
+//     Order: new e.VectorClock({}),
+//     Operations: [
+//       new e.Operation({
+//         Type: new e.Insert({
+//           at: 1,
+//           value: "abc",
+//         }),
+//       }),
+//     ]
+//   }),
+// });
 const wss = new WebSocket.Server({ server });
 wss.on('connection', function connection(ws) {
     // Restore database state
