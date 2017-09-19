@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+message Version {
+  string name = 1;
+  uint32 version = 2;
+}
+
+message VectorClock {
+  string node = 1;
+  repeated Version vector = 2;
+}
+
+message Insert {
+  uint32 at = 1;
+  string value = 2;
+}
+
+message Delete {
+  uint32 at = 1;
+  uint32 length = 2;
+}
+
+message Selection {
+  string origin = 1;
+  uint32 at = 2;
+  uint32 length = 3;
+}
+
+message Operation {
+  oneof type {
+    Insert insert = 1;
+    Delete delete = 2;
+    Selection selection = 3;
+  }
+}
+
+message Order {
+  oneof type {
+    VectorClock vectorClock = 1;
+  }
+}
+
+message OrderedOperations {
+  Order order = 1;
+  repeated Operation operations = 2;
+}
+
+message Event {
+  oneof type {
+    OrderedOperations orderedOperations = 1;
+  }
+}
