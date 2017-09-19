@@ -7,18 +7,6 @@ const server = require('http').createServer();
 app.set('port', process.env.PORT || 8080);
 app.use(express.static('dist'));
 app.use(express.static('public'));
-// app.use(express.static('node_modules/js-crdt/dist'));
-
-const wss = new WebSocket.Server({ server });
-
-// Broadcast to all.
-wss.broadcast = function broadcast(data) {
-  wss.clients.forEach(function each(client) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(data);
-    }
-  });
-};
 
 const {createFromOrderer} = require('js-crdt/build/text');
 const {createVectorClock} = require('js-crdt/build/order');
@@ -26,6 +14,7 @@ const {serialiseOperations, deserialiseOperations} = require('./build/serialiser
 
 let database = createFromOrderer(createVectorClock('server'));
 
+const wss = new WebSocket.Server({ server });
 wss.on('connection', function connection(ws) {
   // Restore database state
   database.reduce((_, orderedOperations) => {
