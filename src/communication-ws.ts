@@ -13,7 +13,6 @@ function blobToArrayBuder(blob: Blob): Observable<Uint8Array> {
   return Observable.create((sink) => {
     const fileReader = new FileReader();
     fileReader.onload = () => {
-      console.log(new Uint8Array(fileReader.result));
       sink.next(new Uint8Array(fileReader.result))
       sink.complete();
     }
@@ -53,10 +52,7 @@ export class CommunicationWS {
 
   private publishLocalChanges(t: Sync) {
     t.onLocalChange((oo: OrderedOperations) => {
-      console.log(pb.OrderedOperations.encode(serialiseOperations(oo)).finish());
       this.publish.next(<any>pb.OrderedOperations.encode(serialiseOperations(oo)).finish());
     })
   }
 }
-
-

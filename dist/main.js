@@ -14,7 +14,6 @@ function blobToArrayBuder(blob) {
     return Rx_1.Observable.create((sink) => {
         const fileReader = new FileReader();
         fileReader.onload = () => {
-            console.log(new Uint8Array(fileReader.result));
             sink.next(new Uint8Array(fileReader.result));
             sink.complete();
         };
@@ -43,7 +42,6 @@ class CommunicationWS {
     }
     publishLocalChanges(t) {
         t.onLocalChange((oo) => {
-            console.log(pb.OrderedOperations.encode(proto_serialiser_1.serialiseOperations(oo)).finish());
             this.publish.next(pb.OrderedOperations.encode(proto_serialiser_1.serialiseOperations(oo)).finish());
         });
     }
