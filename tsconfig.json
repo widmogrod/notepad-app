@@ -5,10 +5,13 @@
     "sourceMap": false,
     "outDir": "build",
     "rootDir": "src",
+    "allowJs": true,
     "strictNullChecks": false
   },
   "compileOnSave": true,
   "exclude": [
+    "dist",
+    "build",
     "node_modules",
     "public"
   ]

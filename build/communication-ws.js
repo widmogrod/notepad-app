@@ -1,16 +1,29 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+const Rx_1 = require("rxjs/Rx");
 require("rxjs/add/operator/map");
 require("rxjs/add/operator/retryWhen");
 require("rxjs/add/operator/delay");
 const queueing_subject_1 = require("queueing-subject");
 const rxjs_websockets_1 = require("rxjs-websockets");
-const serialiser_1 = require("./serialiser");
+// import {serialiseOperations, deserialiseOperations, SerialisedOrderedOperations} from './serialiser';
+const proto_serialiser_1 = require("./proto-serialiser");
+const pb = require("./protobuf/events");
+function blobToArrayBuder(blob) {
+    return Rx_1.Observable.create((sink) => {
+        const fileReader = new FileReader();
+        fileReader.onload = () => {
+            sink.next(new Uint8Array(fileReader.result));
+            sink.complete();
+        };
+        fileReader.readAsArrayBuffer(blob);
+    });
+}
 class CommunicationWS {
     constructor(url) {
         this.url = url;
         this.publish = new queueing_subject_1.QueueingSubject();
-        this.messages = rxjs_websockets_1.default(url, this.publish).messages;
+        this.messages = rxjs_websockets_1.default(url, this.publish, 'arraybuffer').messages;
     }
     register(t) {
         this.publishLocalChanges(t);
@@ -19,12 +32,16 @@ class CommunicationWS {
     subscribeRemoteChanges(t) {
         this.messages
             .retryWhen(errors => errors.delay(10000))
-            .map(serialiser_1.deserialiseOperations)
-            .subscribe(oo => t.remoteChange(oo));
+            .flatMap(data => blobToArrayBuder(data))
+            .map(o => pb.OrderedOperations.decode(o))
+            .map(proto_serialiser_1.deserialiseOperations)
+            .subscribe(oo => {
+            t.remoteChange(oo);
+        });
     }
     publishLocalChanges(t) {
         t.onLocalChange((oo) => {
-            this.publish.next(serialiser_1.serialiseOperations(oo));
+            this.publish.next(pb.OrderedOperations.encode(proto_serialiser_1.serialiseOperations(oo)).finish());
         });
     }
 }
