@@ -43,27 +43,33 @@ function serialiseOperationsList(ops: Operation[]): pb.Operation[] {
 
 function serialiseOperation(op: Operation): pb.Operation {
   if (op instanceof Selection) {
-    return new pb.Selection({
-      origin: op.origin,
-      at: op.at,
-      length: op.length,
+    return new pb.Operation({
+      selection: new pb.Selection({
+        origin: op.origin,
+        at: op.at,
+        length: op.length,
+      }),
     });
   }
 
   if (op instanceof Insert) {
-    return new pb.Insert({
-      at: op.at,
-      value: op.value,
+    return new pb.Operation({
+      insert: new pb.Insert({
+        at: op.at,
+        value: op.value,
+      }),
     });
   }
 
-  return new pb.Delete({
-    at: op.at,
-    length: op.length,
+  return new pb.Operation({
+    'delete': new pb.Delete({
+      at: op.at,
+      length: op.length,
+    }),
   });
 }
 
-export function deserialiseOperations(oo: pb.OrderedOperations): OrderedOperations {
+export function deserialiseOperations(oo: pb.IOrderedOperations): OrderedOperations {
   return {
     order: deserialiesOrder(oo.order),
     operations: deserialiesOperationsList(oo.operations),
@@ -71,6 +77,7 @@ export function deserialiseOperations(oo: pb.OrderedOperations): OrderedOperatio
 }
 
 export function deserialiesOrder(o: pb.IOrder): Orderer<any> {
+  console.log(o)
   if (o.vectorClock) {
     return deserialiseVectorClock(o.vectorClock);
   }

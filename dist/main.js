@@ -1,17 +1,31 @@
 (function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.app = f()}})(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+const Rx_1 = require("rxjs/Rx");
 require("rxjs/add/operator/map");
 require("rxjs/add/operator/retryWhen");
 require("rxjs/add/operator/delay");
 const queueing_subject_1 = require("queueing-subject");
 const rxjs_websockets_1 = require("rxjs-websockets");
-const serialiser_1 = require("./serialiser");
+// import {serialiseOperations, deserialiseOperations, SerialisedOrderedOperations} from './serialiser';
+const proto_serialiser_1 = require("./proto-serialiser");
+const pb = require("./protobuf/events");
+function blobToArrayBuder(blob) {
+    return Rx_1.Observable.create((sink) => {
+        const fileReader = new FileReader();
+        fileReader.onload = () => {
+            console.log(new Uint8Array(fileReader.result));
+            sink.next(new Uint8Array(fileReader.result));
+            sink.complete();
+        };
+        fileReader.readAsArrayBuffer(blob);
+    });
+}
 class CommunicationWS {
     constructor(url) {
         this.url = url;
         this.publish = new queueing_subject_1.QueueingSubject();
-        this.messages = rxjs_websockets_1.default(url, this.publish).messages;
+        this.messages = rxjs_websockets_1.default(url, this.publish, 'arraybuffer').messages;
     }
     register(t) {
         this.publishLocalChanges(t);
@@ -20,18 +34,23 @@ class CommunicationWS {
     subscribeRemoteChanges(t) {
         this.messages
             .retryWhen(errors => errors.delay(10000))
-            .map(serialiser_1.deserialiseOperations)
-            .subscribe(oo => t.remoteChange(oo));
+            .flatMap(data => blobToArrayBuder(data))
+            .map(o => pb.OrderedOperations.decode(o))
+            .map(proto_serialiser_1.deserialiseOperations)
+            .subscribe(oo => {
+            t.remoteChange(oo);
+        });
     }
     publishLocalChanges(t) {
         t.onLocalChange((oo) => {
-            this.publish.next(serialiser_1.serialiseOperations(oo));
+            console.log(pb.OrderedOperations.encode(proto_serialiser_1.serialiseOperations(oo)).finish());
+            this.publish.next(pb.OrderedOperations.encode(proto_serialiser_1.serialiseOperations(oo)).finish());
         });
     }
 }
 exports.CommunicationWS = CommunicationWS;
 
-},{"./serialiser":6,"queueing-subject":35,"rxjs-websockets":38,"rxjs/add/operator/delay":50,"rxjs/add/operator/map":51,"rxjs/add/operator/retryWhen":52}],2:[function(require,module,exports){
+},{"./proto-serialiser":3,"./protobuf/events":4,"queueing-subject":54,"rxjs-websockets":57,"rxjs/Rx":66,"rxjs/add/operator/delay":117,"rxjs/add/operator/map":139,"rxjs/add/operator/retryWhen":164}],2:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const js_crdt_1 = require("js-crdt");
@@ -107,7 +126,2002 @@ function main(di) {
 }
 main(DI);
 
-},{"./communication-ws":1,"./quill-adapter":3,"./quill-content-updater":4,"./quill-cursors-updater":5,"./text-sync":7,"color-hash":11,"js-crdt":17,"quill":37,"quill-cursors":36}],3:[function(require,module,exports){
+},{"./communication-ws":1,"./quill-adapter":5,"./quill-content-updater":6,"./quill-cursors-updater":7,"./text-sync":8,"color-hash":19,"js-crdt":25,"quill":56,"quill-cursors":55}],3:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const pb = require("./protobuf/events");
+const order_1 = require("js-crdt/build/order");
+const text_1 = require("js-crdt/build/text");
+const structures_1 = require("js-crdt/build/structures");
+function serialiseOperations(oo) {
+    return new pb.OrderedOperations({
+        order: new pb.Order({
+            vectorClock: serialiseVectorClock(oo.order),
+        }),
+        operations: serialiseOperationsList(oo.operations),
+    });
+}
+exports.serialiseOperations = serialiseOperations;
+function push(fn) {
+    return (list, v) => {
+        list.push(fn(v));
+        return list;
+    };
+}
+function serialiseVectorClock(order) {
+    if (order instanceof order_1.VectorClock) {
+        return new pb.VectorClock({
+            id: serialiseVersion(order.id),
+            vector: order.vector.reduce(push(serialiseVersion), []),
+        });
+    }
+    return null;
+}
+function serialiseVersion(version) {
+    return new pb.Id({
+        node: version.node,
+        version: version.version,
+    });
+}
+function serialiseOperationsList(ops) {
+    return ops.reduce(push(serialiseOperation), []);
+}
+function serialiseOperation(op) {
+    if (op instanceof text_1.Selection) {
+        return new pb.Operation({
+            selection: new pb.Selection({
+                origin: op.origin,
+                at: op.at,
+                length: op.length,
+            }),
+        });
+    }
+    if (op instanceof text_1.Insert) {
+        return new pb.Operation({
+            insert: new pb.Insert({
+                at: op.at,
+                value: op.value,
+            }),
+        });
+    }
+    return new pb.Operation({
+        'delete': new pb.Delete({
+            at: op.at,
+            length: op.length,
+        }),
+    });
+}
+function deserialiseOperations(oo) {
+    return {
+        order: deserialiesOrder(oo.order),
+        operations: deserialiesOperationsList(oo.operations),
+    };
+}
+exports.deserialiseOperations = deserialiseOperations;
+function deserialiesOrder(o) {
+    console.log(o);
+    if (o.vectorClock) {
+        return deserialiseVectorClock(o.vectorClock);
+    }
+    return null;
+}
+exports.deserialiesOrder = deserialiesOrder;
+function deserialiseVectorClock(vc) {
+    return new order_1.VectorClock(deserialiseId(vc.id), deserialiseVector(vc.vector));
+}
+exports.deserialiseVectorClock = deserialiseVectorClock;
+function deserialiseId(id) {
+    return new order_1.Id(id.node, id.version);
+}
+exports.deserialiseId = deserialiseId;
+function deserialiseVector(v) {
+    const set = new structures_1.SortedSetArray(new structures_1.NaiveArrayList([]));
+    return v.reduce((set, id) => {
+        return set.add(deserialiseId(id)).result;
+    }, set);
+}
+exports.deserialiseVector = deserialiseVector;
+function deserialiesOperationsList(ops) {
+    return ops.reduce(push(deserialiseOperation), []);
+}
+exports.deserialiesOperationsList = deserialiesOperationsList;
+function deserialiseOperation(op) {
+    if (op.selection) {
+        return new text_1.Selection(op.selection.origin, op.selection.at, op.selection.length);
+    }
+    if (op.insert) {
+        return new text_1.Insert(op.insert.at, op.insert.value);
+    }
+    return new text_1.Delete(op.delete.at, op.delete.length);
+}
+exports.deserialiseOperation = deserialiseOperation;
+
+},{"./protobuf/events":4,"js-crdt/build/order":27,"js-crdt/build/structures":29,"js-crdt/build/text":37}],4:[function(require,module,exports){
+/*eslint-disable block-scoped-var, no-redeclare, no-control-regex, no-prototype-builtins*/
+"use strict";
+var $protobuf = require("protobufjs/minimal");
+// Common aliases
+var $Reader = $protobuf.Reader, $Writer = $protobuf.Writer, $util = $protobuf.util;
+// Exported root namespace
+var $root = $protobuf.roots["default"] || ($protobuf.roots["default"] = {});
+$root.Id = (function () {
+    /**
+     * Properties of an Id.
+     * @exports IId
+     * @interface IId
+     * @property {string} [node] Id node
+     * @property {number} [version] Id version
+     */
+    /**
+     * Constructs a new Id.
+     * @exports Id
+     * @classdesc Represents an Id.
+     * @constructor
+     * @param {IId=} [properties] Properties to set
+     */
+    function Id(properties) {
+        if (properties)
+            for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                if (properties[keys[i]] != null)
+                    this[keys[i]] = properties[keys[i]];
+    }
+    /**
+     * Id node.
+     * @member {string}node
+     * @memberof Id
+     * @instance
+     */
+    Id.prototype.node = "";
+    /**
+     * Id version.
+     * @member {number}version
+     * @memberof Id
+     * @instance
+     */
+    Id.prototype.version = 0;
+    /**
+     * Creates a new Id instance using the specified properties.
+     * @function create
+     * @memberof Id
+     * @static
+     * @param {IId=} [properties] Properties to set
+     * @returns {Id} Id instance
+     */
+    Id.create = function create(properties) {
+        return new Id(properties);
+    };
+    /**
+     * Encodes the specified Id message. Does not implicitly {@link Id.verify|verify} messages.
+     * @function encode
+     * @memberof Id
+     * @static
+     * @param {IId} message Id message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Id.encode = function encode(message, writer) {
+        if (!writer)
+            writer = $Writer.create();
+        if (message.node != null && message.hasOwnProperty("node"))
+            writer.uint32(/* id 1, wireType 2 =*/ 10).string(message.node);
+        if (message.version != null && message.hasOwnProperty("version"))
+            writer.uint32(/* id 2, wireType 0 =*/ 16).uint32(message.version);
+        return writer;
+    };
+    /**
+     * Encodes the specified Id message, length delimited. Does not implicitly {@link Id.verify|verify} messages.
+     * @function encodeDelimited
+     * @memberof Id
+     * @static
+     * @param {IId} message Id message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Id.encodeDelimited = function encodeDelimited(message, writer) {
+        return this.encode(message, writer).ldelim();
+    };
+    /**
+     * Decodes an Id message from the specified reader or buffer.
+     * @function decode
+     * @memberof Id
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @param {number} [length] Message length if known beforehand
+     * @returns {Id} Id
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Id.decode = function decode(reader, length) {
+        if (!(reader instanceof $Reader))
+            reader = $Reader.create(reader);
+        var end = length === undefined ? reader.len : reader.pos + length, message = new $root.Id();
+        while (reader.pos < end) {
+            var tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.node = reader.string();
+                    break;
+                case 2:
+                    message.version = reader.uint32();
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    };
+    /**
+     * Decodes an Id message from the specified reader or buffer, length delimited.
+     * @function decodeDelimited
+     * @memberof Id
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @returns {Id} Id
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Id.decodeDelimited = function decodeDelimited(reader) {
+        if (!(reader instanceof $Reader))
+            reader = new $Reader(reader);
+        return this.decode(reader, reader.uint32());
+    };
+    /**
+     * Verifies an Id message.
+     * @function verify
+     * @memberof Id
+     * @static
+     * @param {Object.<string,*>} message Plain object to verify
+     * @returns {string|null} `null` if valid, otherwise the reason why it is not
+     */
+    Id.verify = function verify(message) {
+        if (typeof message !== "object" || message === null)
+            return "object expected";
+        if (message.node != null && message.hasOwnProperty("node"))
+            if (!$util.isString(message.node))
+                return "node: string expected";
+        if (message.version != null && message.hasOwnProperty("version"))
+            if (!$util.isInteger(message.version))
+                return "version: integer expected";
+        return null;
+    };
+    /**
+     * Creates an Id message from a plain object. Also converts values to their respective internal types.
+     * @function fromObject
+     * @memberof Id
+     * @static
+     * @param {Object.<string,*>} object Plain object
+     * @returns {Id} Id
+     */
+    Id.fromObject = function fromObject(object) {
+        if (object instanceof $root.Id)
+            return object;
+        var message = new $root.Id();
+        if (object.node != null)
+            message.node = String(object.node);
+        if (object.version != null)
+            message.version = object.version >>> 0;
+        return message;
+    };
+    /**
+     * Creates a plain object from an Id message. Also converts values to other types if specified.
+     * @function toObject
+     * @memberof Id
+     * @static
+     * @param {Id} message Id
+     * @param {$protobuf.IConversionOptions} [options] Conversion options
+     * @returns {Object.<string,*>} Plain object
+     */
+    Id.toObject = function toObject(message, options) {
+        if (!options)
+            options = {};
+        var object = {};
+        if (options.defaults) {
+            object.node = "";
+            object.version = 0;
+        }
+        if (message.node != null && message.hasOwnProperty("node"))
+            object.node = message.node;
+        if (message.version != null && message.hasOwnProperty("version"))
+            object.version = message.version;
+        return object;
+    };
+    /**
+     * Converts this Id to JSON.
+     * @function toJSON
+     * @memberof Id
+     * @instance
+     * @returns {Object.<string,*>} JSON object
+     */
+    Id.prototype.toJSON = function toJSON() {
+        return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+    };
+    return Id;
+})();
+$root.VectorClock = (function () {
+    /**
+     * Properties of a VectorClock.
+     * @exports IVectorClock
+     * @interface IVectorClock
+     * @property {IId} [id] VectorClock id
+     * @property {Array.<IId>} [vector] VectorClock vector
+     */
+    /**
+     * Constructs a new VectorClock.
+     * @exports VectorClock
+     * @classdesc Represents a VectorClock.
+     * @constructor
+     * @param {IVectorClock=} [properties] Properties to set
+     */
+    function VectorClock(properties) {
+        this.vector = [];
+        if (properties)
+            for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                if (properties[keys[i]] != null)
+                    this[keys[i]] = properties[keys[i]];
+    }
+    /**
+     * VectorClock id.
+     * @member {(IId|null|undefined)}id
+     * @memberof VectorClock
+     * @instance
+     */
+    VectorClock.prototype.id = null;
+    /**
+     * VectorClock vector.
+     * @member {Array.<IId>}vector
+     * @memberof VectorClock
+     * @instance
+     */
+    VectorClock.prototype.vector = $util.emptyArray;
+    /**
+     * Creates a new VectorClock instance using the specified properties.
+     * @function create
+     * @memberof VectorClock
+     * @static
+     * @param {IVectorClock=} [properties] Properties to set
+     * @returns {VectorClock} VectorClock instance
+     */
+    VectorClock.create = function create(properties) {
+        return new VectorClock(properties);
+    };
+    /**
+     * Encodes the specified VectorClock message. Does not implicitly {@link VectorClock.verify|verify} messages.
+     * @function encode
+     * @memberof VectorClock
+     * @static
+     * @param {IVectorClock} message VectorClock message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    VectorClock.encode = function encode(message, writer) {
+        if (!writer)
+            writer = $Writer.create();
+        if (message.id != null && message.hasOwnProperty("id"))
+            $root.Id.encode(message.id, writer.uint32(/* id 1, wireType 2 =*/ 10).fork()).ldelim();
+        if (message.vector != null && message.vector.length)
+            for (var i = 0; i < message.vector.length; ++i)
+                $root.Id.encode(message.vector[i], writer.uint32(/* id 2, wireType 2 =*/ 18).fork()).ldelim();
+        return writer;
+    };
+    /**
+     * Encodes the specified VectorClock message, length delimited. Does not implicitly {@link VectorClock.verify|verify} messages.
+     * @function encodeDelimited
+     * @memberof VectorClock
+     * @static
+     * @param {IVectorClock} message VectorClock message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    VectorClock.encodeDelimited = function encodeDelimited(message, writer) {
+        return this.encode(message, writer).ldelim();
+    };
+    /**
+     * Decodes a VectorClock message from the specified reader or buffer.
+     * @function decode
+     * @memberof VectorClock
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @param {number} [length] Message length if known beforehand
+     * @returns {VectorClock} VectorClock
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    VectorClock.decode = function decode(reader, length) {
+        if (!(reader instanceof $Reader))
+            reader = $Reader.create(reader);
+        var end = length === undefined ? reader.len : reader.pos + length, message = new $root.VectorClock();
+        while (reader.pos < end) {
+            var tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.id = $root.Id.decode(reader, reader.uint32());
+                    break;
+                case 2:
+                    if (!(message.vector && message.vector.length))
+                        message.vector = [];
+                    message.vector.push($root.Id.decode(reader, reader.uint32()));
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    };
+    /**
+     * Decodes a VectorClock message from the specified reader or buffer, length delimited.
+     * @function decodeDelimited
+     * @memberof VectorClock
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @returns {VectorClock} VectorClock
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    VectorClock.decodeDelimited = function decodeDelimited(reader) {
+        if (!(reader instanceof $Reader))
+            reader = new $Reader(reader);
+        return this.decode(reader, reader.uint32());
+    };
+    /**
+     * Verifies a VectorClock message.
+     * @function verify
+     * @memberof VectorClock
+     * @static
+     * @param {Object.<string,*>} message Plain object to verify
+     * @returns {string|null} `null` if valid, otherwise the reason why it is not
+     */
+    VectorClock.verify = function verify(message) {
+        if (typeof message !== "object" || message === null)
+            return "object expected";
+        if (message.id != null && message.hasOwnProperty("id")) {
+            var error = $root.Id.verify(message.id);
+            if (error)
+                return "id." + error;
+        }
+        if (message.vector != null && message.hasOwnProperty("vector")) {
+            if (!Array.isArray(message.vector))
+                return "vector: array expected";
+            for (var i = 0; i < message.vector.length; ++i) {
+                error = $root.Id.verify(message.vector[i]);
+                if (error)
+                    return "vector." + error;
+            }
+        }
+        return null;
+    };
+    /**
+     * Creates a VectorClock message from a plain object. Also converts values to their respective internal types.
+     * @function fromObject
+     * @memberof VectorClock
+     * @static
+     * @param {Object.<string,*>} object Plain object
+     * @returns {VectorClock} VectorClock
+     */
+    VectorClock.fromObject = function fromObject(object) {
+        if (object instanceof $root.VectorClock)
+            return object;
+        var message = new $root.VectorClock();
+        if (object.id != null) {
+            if (typeof object.id !== "object")
+                throw TypeError(".VectorClock.id: object expected");
+            message.id = $root.Id.fromObject(object.id);
+        }
+        if (object.vector) {
+            if (!Array.isArray(object.vector))
+                throw TypeError(".VectorClock.vector: array expected");
+            message.vector = [];
+            for (var i = 0; i < object.vector.length; ++i) {
+                if (typeof object.vector[i] !== "object")
+                    throw TypeError(".VectorClock.vector: object expected");
+                message.vector[i] = $root.Id.fromObject(object.vector[i]);
+            }
+        }
+        return message;
+    };
+    /**
+     * Creates a plain object from a VectorClock message. Also converts values to other types if specified.
+     * @function toObject
+     * @memberof VectorClock
+     * @static
+     * @param {VectorClock} message VectorClock
+     * @param {$protobuf.IConversionOptions} [options] Conversion options
+     * @returns {Object.<string,*>} Plain object
+     */
+    VectorClock.toObject = function toObject(message, options) {
+        if (!options)
+            options = {};
+        var object = {};
+        if (options.arrays || options.defaults)
+            object.vector = [];
+        if (options.defaults)
+            object.id = null;
+        if (message.id != null && message.hasOwnProperty("id"))
+            object.id = $root.Id.toObject(message.id, options);
+        if (message.vector && message.vector.length) {
+            object.vector = [];
+            for (var j = 0; j < message.vector.length; ++j)
+                object.vector[j] = $root.Id.toObject(message.vector[j], options);
+        }
+        return object;
+    };
+    /**
+     * Converts this VectorClock to JSON.
+     * @function toJSON
+     * @memberof VectorClock
+     * @instance
+     * @returns {Object.<string,*>} JSON object
+     */
+    VectorClock.prototype.toJSON = function toJSON() {
+        return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+    };
+    return VectorClock;
+})();
+$root.Insert = (function () {
+    /**
+     * Properties of an Insert.
+     * @exports IInsert
+     * @interface IInsert
+     * @property {number} [at] Insert at
+     * @property {string} [value] Insert value
+     */
+    /**
+     * Constructs a new Insert.
+     * @exports Insert
+     * @classdesc Represents an Insert.
+     * @constructor
+     * @param {IInsert=} [properties] Properties to set
+     */
+    function Insert(properties) {
+        if (properties)
+            for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                if (properties[keys[i]] != null)
+                    this[keys[i]] = properties[keys[i]];
+    }
+    /**
+     * Insert at.
+     * @member {number}at
+     * @memberof Insert
+     * @instance
+     */
+    Insert.prototype.at = 0;
+    /**
+     * Insert value.
+     * @member {string}value
+     * @memberof Insert
+     * @instance
+     */
+    Insert.prototype.value = "";
+    /**
+     * Creates a new Insert instance using the specified properties.
+     * @function create
+     * @memberof Insert
+     * @static
+     * @param {IInsert=} [properties] Properties to set
+     * @returns {Insert} Insert instance
+     */
+    Insert.create = function create(properties) {
+        return new Insert(properties);
+    };
+    /**
+     * Encodes the specified Insert message. Does not implicitly {@link Insert.verify|verify} messages.
+     * @function encode
+     * @memberof Insert
+     * @static
+     * @param {IInsert} message Insert message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Insert.encode = function encode(message, writer) {
+        if (!writer)
+            writer = $Writer.create();
+        if (message.at != null && message.hasOwnProperty("at"))
+            writer.uint32(/* id 1, wireType 0 =*/ 8).uint32(message.at);
+        if (message.value != null && message.hasOwnProperty("value"))
+            writer.uint32(/* id 2, wireType 2 =*/ 18).string(message.value);
+        return writer;
+    };
+    /**
+     * Encodes the specified Insert message, length delimited. Does not implicitly {@link Insert.verify|verify} messages.
+     * @function encodeDelimited
+     * @memberof Insert
+     * @static
+     * @param {IInsert} message Insert message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Insert.encodeDelimited = function encodeDelimited(message, writer) {
+        return this.encode(message, writer).ldelim();
+    };
+    /**
+     * Decodes an Insert message from the specified reader or buffer.
+     * @function decode
+     * @memberof Insert
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @param {number} [length] Message length if known beforehand
+     * @returns {Insert} Insert
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Insert.decode = function decode(reader, length) {
+        if (!(reader instanceof $Reader))
+            reader = $Reader.create(reader);
+        var end = length === undefined ? reader.len : reader.pos + length, message = new $root.Insert();
+        while (reader.pos < end) {
+            var tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.at = reader.uint32();
+                    break;
+                case 2:
+                    message.value = reader.string();
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    };
+    /**
+     * Decodes an Insert message from the specified reader or buffer, length delimited.
+     * @function decodeDelimited
+     * @memberof Insert
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @returns {Insert} Insert
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Insert.decodeDelimited = function decodeDelimited(reader) {
+        if (!(reader instanceof $Reader))
+            reader = new $Reader(reader);
+        return this.decode(reader, reader.uint32());
+    };
+    /**
+     * Verifies an Insert message.
+     * @function verify
+     * @memberof Insert
+     * @static
+     * @param {Object.<string,*>} message Plain object to verify
+     * @returns {string|null} `null` if valid, otherwise the reason why it is not
+     */
+    Insert.verify = function verify(message) {
+        if (typeof message !== "object" || message === null)
+            return "object expected";
+        if (message.at != null && message.hasOwnProperty("at"))
+            if (!$util.isInteger(message.at))
+                return "at: integer expected";
+        if (message.value != null && message.hasOwnProperty("value"))
+            if (!$util.isString(message.value))
+                return "value: string expected";
+        return null;
+    };
+    /**
+     * Creates an Insert message from a plain object. Also converts values to their respective internal types.
+     * @function fromObject
+     * @memberof Insert
+     * @static
+     * @param {Object.<string,*>} object Plain object
+     * @returns {Insert} Insert
+     */
+    Insert.fromObject = function fromObject(object) {
+        if (object instanceof $root.Insert)
+            return object;
+        var message = new $root.Insert();
+        if (object.at != null)
+            message.at = object.at >>> 0;
+        if (object.value != null)
+            message.value = String(object.value);
+        return message;
+    };
+    /**
+     * Creates a plain object from an Insert message. Also converts values to other types if specified.
+     * @function toObject
+     * @memberof Insert
+     * @static
+     * @param {Insert} message Insert
+     * @param {$protobuf.IConversionOptions} [options] Conversion options
+     * @returns {Object.<string,*>} Plain object
+     */
+    Insert.toObject = function toObject(message, options) {
+        if (!options)
+            options = {};
+        var object = {};
+        if (options.defaults) {
+            object.at = 0;
+            object.value = "";
+        }
+        if (message.at != null && message.hasOwnProperty("at"))
+            object.at = message.at;
+        if (message.value != null && message.hasOwnProperty("value"))
+            object.value = message.value;
+        return object;
+    };
+    /**
+     * Converts this Insert to JSON.
+     * @function toJSON
+     * @memberof Insert
+     * @instance
+     * @returns {Object.<string,*>} JSON object
+     */
+    Insert.prototype.toJSON = function toJSON() {
+        return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+    };
+    return Insert;
+})();
+$root.Delete = (function () {
+    /**
+     * Properties of a Delete.
+     * @exports IDelete
+     * @interface IDelete
+     * @property {number} [at] Delete at
+     * @property {number} [length] Delete length
+     */
+    /**
+     * Constructs a new Delete.
+     * @exports Delete
+     * @classdesc Represents a Delete.
+     * @constructor
+     * @param {IDelete=} [properties] Properties to set
+     */
+    function Delete(properties) {
+        if (properties)
+            for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                if (properties[keys[i]] != null)
+                    this[keys[i]] = properties[keys[i]];
+    }
+    /**
+     * Delete at.
+     * @member {number}at
+     * @memberof Delete
+     * @instance
+     */
+    Delete.prototype.at = 0;
+    /**
+     * Delete length.
+     * @member {number}length
+     * @memberof Delete
+     * @instance
+     */
+    Delete.prototype.length = 0;
+    /**
+     * Creates a new Delete instance using the specified properties.
+     * @function create
+     * @memberof Delete
+     * @static
+     * @param {IDelete=} [properties] Properties to set
+     * @returns {Delete} Delete instance
+     */
+    Delete.create = function create(properties) {
+        return new Delete(properties);
+    };
+    /**
+     * Encodes the specified Delete message. Does not implicitly {@link Delete.verify|verify} messages.
+     * @function encode
+     * @memberof Delete
+     * @static
+     * @param {IDelete} message Delete message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Delete.encode = function encode(message, writer) {
+        if (!writer)
+            writer = $Writer.create();
+        if (message.at != null && message.hasOwnProperty("at"))
+            writer.uint32(/* id 1, wireType 0 =*/ 8).uint32(message.at);
+        if (message.length != null && message.hasOwnProperty("length"))
+            writer.uint32(/* id 2, wireType 0 =*/ 16).uint32(message.length);
+        return writer;
+    };
+    /**
+     * Encodes the specified Delete message, length delimited. Does not implicitly {@link Delete.verify|verify} messages.
+     * @function encodeDelimited
+     * @memberof Delete
+     * @static
+     * @param {IDelete} message Delete message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Delete.encodeDelimited = function encodeDelimited(message, writer) {
+        return this.encode(message, writer).ldelim();
+    };
+    /**
+     * Decodes a Delete message from the specified reader or buffer.
+     * @function decode
+     * @memberof Delete
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @param {number} [length] Message length if known beforehand
+     * @returns {Delete} Delete
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Delete.decode = function decode(reader, length) {
+        if (!(reader instanceof $Reader))
+            reader = $Reader.create(reader);
+        var end = length === undefined ? reader.len : reader.pos + length, message = new $root.Delete();
+        while (reader.pos < end) {
+            var tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.at = reader.uint32();
+                    break;
+                case 2:
+                    message.length = reader.uint32();
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    };
+    /**
+     * Decodes a Delete message from the specified reader or buffer, length delimited.
+     * @function decodeDelimited
+     * @memberof Delete
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @returns {Delete} Delete
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Delete.decodeDelimited = function decodeDelimited(reader) {
+        if (!(reader instanceof $Reader))
+            reader = new $Reader(reader);
+        return this.decode(reader, reader.uint32());
+    };
+    /**
+     * Verifies a Delete message.
+     * @function verify
+     * @memberof Delete
+     * @static
+     * @param {Object.<string,*>} message Plain object to verify
+     * @returns {string|null} `null` if valid, otherwise the reason why it is not
+     */
+    Delete.verify = function verify(message) {
+        if (typeof message !== "object" || message === null)
+            return "object expected";
+        if (message.at != null && message.hasOwnProperty("at"))
+            if (!$util.isInteger(message.at))
+                return "at: integer expected";
+        if (message.length != null && message.hasOwnProperty("length"))
+            if (!$util.isInteger(message.length))
+                return "length: integer expected";
+        return null;
+    };
+    /**
+     * Creates a Delete message from a plain object. Also converts values to their respective internal types.
+     * @function fromObject
+     * @memberof Delete
+     * @static
+     * @param {Object.<string,*>} object Plain object
+     * @returns {Delete} Delete
+     */
+    Delete.fromObject = function fromObject(object) {
+        if (object instanceof $root.Delete)
+            return object;
+        var message = new $root.Delete();
+        if (object.at != null)
+            message.at = object.at >>> 0;
+        if (object.length != null)
+            message.length = object.length >>> 0;
+        return message;
+    };
+    /**
+     * Creates a plain object from a Delete message. Also converts values to other types if specified.
+     * @function toObject
+     * @memberof Delete
+     * @static
+     * @param {Delete} message Delete
+     * @param {$protobuf.IConversionOptions} [options] Conversion options
+     * @returns {Object.<string,*>} Plain object
+     */
+    Delete.toObject = function toObject(message, options) {
+        if (!options)
+            options = {};
+        var object = {};
+        if (options.defaults) {
+            object.at = 0;
+            object.length = 0;
+        }
+        if (message.at != null && message.hasOwnProperty("at"))
+            object.at = message.at;
+        if (message.length != null && message.hasOwnProperty("length"))
+            object.length = message.length;
+        return object;
+    };
+    /**
+     * Converts this Delete to JSON.
+     * @function toJSON
+     * @memberof Delete
+     * @instance
+     * @returns {Object.<string,*>} JSON object
+     */
+    Delete.prototype.toJSON = function toJSON() {
+        return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+    };
+    return Delete;
+})();
+$root.Selection = (function () {
+    /**
+     * Properties of a Selection.
+     * @exports ISelection
+     * @interface ISelection
+     * @property {string} [origin] Selection origin
+     * @property {number} [at] Selection at
+     * @property {number} [length] Selection length
+     */
+    /**
+     * Constructs a new Selection.
+     * @exports Selection
+     * @classdesc Represents a Selection.
+     * @constructor
+     * @param {ISelection=} [properties] Properties to set
+     */
+    function Selection(properties) {
+        if (properties)
+            for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                if (properties[keys[i]] != null)
+                    this[keys[i]] = properties[keys[i]];
+    }
+    /**
+     * Selection origin.
+     * @member {string}origin
+     * @memberof Selection
+     * @instance
+     */
+    Selection.prototype.origin = "";
+    /**
+     * Selection at.
+     * @member {number}at
+     * @memberof Selection
+     * @instance
+     */
+    Selection.prototype.at = 0;
+    /**
+     * Selection length.
+     * @member {number}length
+     * @memberof Selection
+     * @instance
+     */
+    Selection.prototype.length = 0;
+    /**
+     * Creates a new Selection instance using the specified properties.
+     * @function create
+     * @memberof Selection
+     * @static
+     * @param {ISelection=} [properties] Properties to set
+     * @returns {Selection} Selection instance
+     */
+    Selection.create = function create(properties) {
+        return new Selection(properties);
+    };
+    /**
+     * Encodes the specified Selection message. Does not implicitly {@link Selection.verify|verify} messages.
+     * @function encode
+     * @memberof Selection
+     * @static
+     * @param {ISelection} message Selection message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Selection.encode = function encode(message, writer) {
+        if (!writer)
+            writer = $Writer.create();
+        if (message.origin != null && message.hasOwnProperty("origin"))
+            writer.uint32(/* id 1, wireType 2 =*/ 10).string(message.origin);
+        if (message.at != null && message.hasOwnProperty("at"))
+            writer.uint32(/* id 2, wireType 0 =*/ 16).uint32(message.at);
+        if (message.length != null && message.hasOwnProperty("length"))
+            writer.uint32(/* id 3, wireType 0 =*/ 24).uint32(message.length);
+        return writer;
+    };
+    /**
+     * Encodes the specified Selection message, length delimited. Does not implicitly {@link Selection.verify|verify} messages.
+     * @function encodeDelimited
+     * @memberof Selection
+     * @static
+     * @param {ISelection} message Selection message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Selection.encodeDelimited = function encodeDelimited(message, writer) {
+        return this.encode(message, writer).ldelim();
+    };
+    /**
+     * Decodes a Selection message from the specified reader or buffer.
+     * @function decode
+     * @memberof Selection
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @param {number} [length] Message length if known beforehand
+     * @returns {Selection} Selection
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Selection.decode = function decode(reader, length) {
+        if (!(reader instanceof $Reader))
+            reader = $Reader.create(reader);
+        var end = length === undefined ? reader.len : reader.pos + length, message = new $root.Selection();
+        while (reader.pos < end) {
+            var tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.origin = reader.string();
+                    break;
+                case 2:
+                    message.at = reader.uint32();
+                    break;
+                case 3:
+                    message.length = reader.uint32();
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    };
+    /**
+     * Decodes a Selection message from the specified reader or buffer, length delimited.
+     * @function decodeDelimited
+     * @memberof Selection
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @returns {Selection} Selection
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Selection.decodeDelimited = function decodeDelimited(reader) {
+        if (!(reader instanceof $Reader))
+            reader = new $Reader(reader);
+        return this.decode(reader, reader.uint32());
+    };
+    /**
+     * Verifies a Selection message.
+     * @function verify
+     * @memberof Selection
+     * @static
+     * @param {Object.<string,*>} message Plain object to verify
+     * @returns {string|null} `null` if valid, otherwise the reason why it is not
+     */
+    Selection.verify = function verify(message) {
+        if (typeof message !== "object" || message === null)
+            return "object expected";
+        if (message.origin != null && message.hasOwnProperty("origin"))
+            if (!$util.isString(message.origin))
+                return "origin: string expected";
+        if (message.at != null && message.hasOwnProperty("at"))
+            if (!$util.isInteger(message.at))
+                return "at: integer expected";
+        if (message.length != null && message.hasOwnProperty("length"))
+            if (!$util.isInteger(message.length))
+                return "length: integer expected";
+        return null;
+    };
+    /**
+     * Creates a Selection message from a plain object. Also converts values to their respective internal types.
+     * @function fromObject
+     * @memberof Selection
+     * @static
+     * @param {Object.<string,*>} object Plain object
+     * @returns {Selection} Selection
+     */
+    Selection.fromObject = function fromObject(object) {
+        if (object instanceof $root.Selection)
+            return object;
+        var message = new $root.Selection();
+        if (object.origin != null)
+            message.origin = String(object.origin);
+        if (object.at != null)
+            message.at = object.at >>> 0;
+        if (object.length != null)
+            message.length = object.length >>> 0;
+        return message;
+    };
+    /**
+     * Creates a plain object from a Selection message. Also converts values to other types if specified.
+     * @function toObject
+     * @memberof Selection
+     * @static
+     * @param {Selection} message Selection
+     * @param {$protobuf.IConversionOptions} [options] Conversion options
+     * @returns {Object.<string,*>} Plain object
+     */
+    Selection.toObject = function toObject(message, options) {
+        if (!options)
+            options = {};
+        var object = {};
+        if (options.defaults) {
+            object.origin = "";
+            object.at = 0;
+            object.length = 0;
+        }
+        if (message.origin != null && message.hasOwnProperty("origin"))
+            object.origin = message.origin;
+        if (message.at != null && message.hasOwnProperty("at"))
+            object.at = message.at;
+        if (message.length != null && message.hasOwnProperty("length"))
+            object.length = message.length;
+        return object;
+    };
+    /**
+     * Converts this Selection to JSON.
+     * @function toJSON
+     * @memberof Selection
+     * @instance
+     * @returns {Object.<string,*>} JSON object
+     */
+    Selection.prototype.toJSON = function toJSON() {
+        return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+    };
+    return Selection;
+})();
+$root.Operation = (function () {
+    /**
+     * Properties of an Operation.
+     * @exports IOperation
+     * @interface IOperation
+     * @property {IInsert} [insert] Operation insert
+     * @property {IDelete} ["delete"] Operation delete
+     * @property {ISelection} [selection] Operation selection
+     */
+    /**
+     * Constructs a new Operation.
+     * @exports Operation
+     * @classdesc Represents an Operation.
+     * @constructor
+     * @param {IOperation=} [properties] Properties to set
+     */
+    function Operation(properties) {
+        if (properties)
+            for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                if (properties[keys[i]] != null)
+                    this[keys[i]] = properties[keys[i]];
+    }
+    /**
+     * Operation insert.
+     * @member {(IInsert|null|undefined)}insert
+     * @memberof Operation
+     * @instance
+     */
+    Operation.prototype.insert = null;
+    /**
+     * Operation delete.
+     * @member {(IDelete|null|undefined)}delete_
+     * @memberof Operation
+     * @instance
+     */
+    Operation.prototype["delete"] = null;
+    /**
+     * Operation selection.
+     * @member {(ISelection|null|undefined)}selection
+     * @memberof Operation
+     * @instance
+     */
+    Operation.prototype.selection = null;
+    // OneOf field names bound to virtual getters and setters
+    var $oneOfFields;
+    /**
+     * Operation type.
+     * @member {string|undefined} type
+     * @memberof Operation
+     * @instance
+     */
+    Object.defineProperty(Operation.prototype, "type", {
+        get: $util.oneOfGetter($oneOfFields = ["insert", "delete", "selection"]),
+        set: $util.oneOfSetter($oneOfFields)
+    });
+    /**
+     * Creates a new Operation instance using the specified properties.
+     * @function create
+     * @memberof Operation
+     * @static
+     * @param {IOperation=} [properties] Properties to set
+     * @returns {Operation} Operation instance
+     */
+    Operation.create = function create(properties) {
+        return new Operation(properties);
+    };
+    /**
+     * Encodes the specified Operation message. Does not implicitly {@link Operation.verify|verify} messages.
+     * @function encode
+     * @memberof Operation
+     * @static
+     * @param {IOperation} message Operation message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Operation.encode = function encode(message, writer) {
+        if (!writer)
+            writer = $Writer.create();
+        if (message.insert != null && message.hasOwnProperty("insert"))
+            $root.Insert.encode(message.insert, writer.uint32(/* id 1, wireType 2 =*/ 10).fork()).ldelim();
+        if (message["delete"] != null && message.hasOwnProperty("delete"))
+            $root.Delete.encode(message["delete"], writer.uint32(/* id 2, wireType 2 =*/ 18).fork()).ldelim();
+        if (message.selection != null && message.hasOwnProperty("selection"))
+            $root.Selection.encode(message.selection, writer.uint32(/* id 3, wireType 2 =*/ 26).fork()).ldelim();
+        return writer;
+    };
+    /**
+     * Encodes the specified Operation message, length delimited. Does not implicitly {@link Operation.verify|verify} messages.
+     * @function encodeDelimited
+     * @memberof Operation
+     * @static
+     * @param {IOperation} message Operation message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Operation.encodeDelimited = function encodeDelimited(message, writer) {
+        return this.encode(message, writer).ldelim();
+    };
+    /**
+     * Decodes an Operation message from the specified reader or buffer.
+     * @function decode
+     * @memberof Operation
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @param {number} [length] Message length if known beforehand
+     * @returns {Operation} Operation
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Operation.decode = function decode(reader, length) {
+        if (!(reader instanceof $Reader))
+            reader = $Reader.create(reader);
+        var end = length === undefined ? reader.len : reader.pos + length, message = new $root.Operation();
+        while (reader.pos < end) {
+            var tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.insert = $root.Insert.decode(reader, reader.uint32());
+                    break;
+                case 2:
+                    message["delete"] = $root.Delete.decode(reader, reader.uint32());
+                    break;
+                case 3:
+                    message.selection = $root.Selection.decode(reader, reader.uint32());
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    };
+    /**
+     * Decodes an Operation message from the specified reader or buffer, length delimited.
+     * @function decodeDelimited
+     * @memberof Operation
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @returns {Operation} Operation
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Operation.decodeDelimited = function decodeDelimited(reader) {
+        if (!(reader instanceof $Reader))
+            reader = new $Reader(reader);
+        return this.decode(reader, reader.uint32());
+    };
+    /**
+     * Verifies an Operation message.
+     * @function verify
+     * @memberof Operation
+     * @static
+     * @param {Object.<string,*>} message Plain object to verify
+     * @returns {string|null} `null` if valid, otherwise the reason why it is not
+     */
+    Operation.verify = function verify(message) {
+        if (typeof message !== "object" || message === null)
+            return "object expected";
+        var properties = {};
+        if (message.insert != null && message.hasOwnProperty("insert")) {
+            properties.type = 1;
+            var error = $root.Insert.verify(message.insert);
+            if (error)
+                return "insert." + error;
+        }
+        if (message["delete"] != null && message.hasOwnProperty("delete")) {
+            if (properties.type === 1)
+                return "type: multiple values";
+            properties.type = 1;
+            error = $root.Delete.verify(message["delete"]);
+            if (error)
+                return "delete." + error;
+        }
+        if (message.selection != null && message.hasOwnProperty("selection")) {
+            if (properties.type === 1)
+                return "type: multiple values";
+            properties.type = 1;
+            error = $root.Selection.verify(message.selection);
+            if (error)
+                return "selection." + error;
+        }
+        return null;
+    };
+    /**
+     * Creates an Operation message from a plain object. Also converts values to their respective internal types.
+     * @function fromObject
+     * @memberof Operation
+     * @static
+     * @param {Object.<string,*>} object Plain object
+     * @returns {Operation} Operation
+     */
+    Operation.fromObject = function fromObject(object) {
+        if (object instanceof $root.Operation)
+            return object;
+        var message = new $root.Operation();
+        if (object.insert != null) {
+            if (typeof object.insert !== "object")
+                throw TypeError(".Operation.insert: object expected");
+            message.insert = $root.Insert.fromObject(object.insert);
+        }
+        if (object["delete"] != null) {
+            if (typeof object["delete"] !== "object")
+                throw TypeError(".Operation.delete: object expected");
+            message["delete"] = $root.Delete.fromObject(object["delete"]);
+        }
+        if (object.selection != null) {
+            if (typeof object.selection !== "object")
+                throw TypeError(".Operation.selection: object expected");
+            message.selection = $root.Selection.fromObject(object.selection);
+        }
+        return message;
+    };
+    /**
+     * Creates a plain object from an Operation message. Also converts values to other types if specified.
+     * @function toObject
+     * @memberof Operation
+     * @static
+     * @param {Operation} message Operation
+     * @param {$protobuf.IConversionOptions} [options] Conversion options
+     * @returns {Object.<string,*>} Plain object
+     */
+    Operation.toObject = function toObject(message, options) {
+        if (!options)
+            options = {};
+        var object = {};
+        if (message.insert != null && message.hasOwnProperty("insert")) {
+            object.insert = $root.Insert.toObject(message.insert, options);
+            if (options.oneofs)
+                object.type = "insert";
+        }
+        if (message["delete"] != null && message.hasOwnProperty("delete")) {
+            object["delete"] = $root.Delete.toObject(message["delete"], options);
+            if (options.oneofs)
+                object.type = "delete";
+        }
+        if (message.selection != null && message.hasOwnProperty("selection")) {
+            object.selection = $root.Selection.toObject(message.selection, options);
+            if (options.oneofs)
+                object.type = "selection";
+        }
+        return object;
+    };
+    /**
+     * Converts this Operation to JSON.
+     * @function toJSON
+     * @memberof Operation
+     * @instance
+     * @returns {Object.<string,*>} JSON object
+     */
+    Operation.prototype.toJSON = function toJSON() {
+        return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+    };
+    return Operation;
+})();
+$root.Order = (function () {
+    /**
+     * Properties of an Order.
+     * @exports IOrder
+     * @interface IOrder
+     * @property {IVectorClock} [vectorClock] Order vectorClock
+     */
+    /**
+     * Constructs a new Order.
+     * @exports Order
+     * @classdesc Represents an Order.
+     * @constructor
+     * @param {IOrder=} [properties] Properties to set
+     */
+    function Order(properties) {
+        if (properties)
+            for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                if (properties[keys[i]] != null)
+                    this[keys[i]] = properties[keys[i]];
+    }
+    /**
+     * Order vectorClock.
+     * @member {(IVectorClock|null|undefined)}vectorClock
+     * @memberof Order
+     * @instance
+     */
+    Order.prototype.vectorClock = null;
+    // OneOf field names bound to virtual getters and setters
+    var $oneOfFields;
+    /**
+     * Order type.
+     * @member {string|undefined} type
+     * @memberof Order
+     * @instance
+     */
+    Object.defineProperty(Order.prototype, "type", {
+        get: $util.oneOfGetter($oneOfFields = ["vectorClock"]),
+        set: $util.oneOfSetter($oneOfFields)
+    });
+    /**
+     * Creates a new Order instance using the specified properties.
+     * @function create
+     * @memberof Order
+     * @static
+     * @param {IOrder=} [properties] Properties to set
+     * @returns {Order} Order instance
+     */
+    Order.create = function create(properties) {
+        return new Order(properties);
+    };
+    /**
+     * Encodes the specified Order message. Does not implicitly {@link Order.verify|verify} messages.
+     * @function encode
+     * @memberof Order
+     * @static
+     * @param {IOrder} message Order message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Order.encode = function encode(message, writer) {
+        if (!writer)
+            writer = $Writer.create();
+        if (message.vectorClock != null && message.hasOwnProperty("vectorClock"))
+            $root.VectorClock.encode(message.vectorClock, writer.uint32(/* id 1, wireType 2 =*/ 10).fork()).ldelim();
+        return writer;
+    };
+    /**
+     * Encodes the specified Order message, length delimited. Does not implicitly {@link Order.verify|verify} messages.
+     * @function encodeDelimited
+     * @memberof Order
+     * @static
+     * @param {IOrder} message Order message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Order.encodeDelimited = function encodeDelimited(message, writer) {
+        return this.encode(message, writer).ldelim();
+    };
+    /**
+     * Decodes an Order message from the specified reader or buffer.
+     * @function decode
+     * @memberof Order
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @param {number} [length] Message length if known beforehand
+     * @returns {Order} Order
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Order.decode = function decode(reader, length) {
+        if (!(reader instanceof $Reader))
+            reader = $Reader.create(reader);
+        var end = length === undefined ? reader.len : reader.pos + length, message = new $root.Order();
+        while (reader.pos < end) {
+            var tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.vectorClock = $root.VectorClock.decode(reader, reader.uint32());
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    };
+    /**
+     * Decodes an Order message from the specified reader or buffer, length delimited.
+     * @function decodeDelimited
+     * @memberof Order
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @returns {Order} Order
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Order.decodeDelimited = function decodeDelimited(reader) {
+        if (!(reader instanceof $Reader))
+            reader = new $Reader(reader);
+        return this.decode(reader, reader.uint32());
+    };
+    /**
+     * Verifies an Order message.
+     * @function verify
+     * @memberof Order
+     * @static
+     * @param {Object.<string,*>} message Plain object to verify
+     * @returns {string|null} `null` if valid, otherwise the reason why it is not
+     */
+    Order.verify = function verify(message) {
+        if (typeof message !== "object" || message === null)
+            return "object expected";
+        var properties = {};
+        if (message.vectorClock != null && message.hasOwnProperty("vectorClock")) {
+            properties.type = 1;
+            var error = $root.VectorClock.verify(message.vectorClock);
+            if (error)
+                return "vectorClock." + error;
+        }
+        return null;
+    };
+    /**
+     * Creates an Order message from a plain object. Also converts values to their respective internal types.
+     * @function fromObject
+     * @memberof Order
+     * @static
+     * @param {Object.<string,*>} object Plain object
+     * @returns {Order} Order
+     */
+    Order.fromObject = function fromObject(object) {
+        if (object instanceof $root.Order)
+            return object;
+        var message = new $root.Order();
+        if (object.vectorClock != null) {
+            if (typeof object.vectorClock !== "object")
+                throw TypeError(".Order.vectorClock: object expected");
+            message.vectorClock = $root.VectorClock.fromObject(object.vectorClock);
+        }
+        return message;
+    };
+    /**
+     * Creates a plain object from an Order message. Also converts values to other types if specified.
+     * @function toObject
+     * @memberof Order
+     * @static
+     * @param {Order} message Order
+     * @param {$protobuf.IConversionOptions} [options] Conversion options
+     * @returns {Object.<string,*>} Plain object
+     */
+    Order.toObject = function toObject(message, options) {
+        if (!options)
+            options = {};
+        var object = {};
+        if (message.vectorClock != null && message.hasOwnProperty("vectorClock")) {
+            object.vectorClock = $root.VectorClock.toObject(message.vectorClock, options);
+            if (options.oneofs)
+                object.type = "vectorClock";
+        }
+        return object;
+    };
+    /**
+     * Converts this Order to JSON.
+     * @function toJSON
+     * @memberof Order
+     * @instance
+     * @returns {Object.<string,*>} JSON object
+     */
+    Order.prototype.toJSON = function toJSON() {
+        return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+    };
+    return Order;
+})();
+$root.OrderedOperations = (function () {
+    /**
+     * Properties of an OrderedOperations.
+     * @exports IOrderedOperations
+     * @interface IOrderedOperations
+     * @property {IOrder} [order] OrderedOperations order
+     * @property {Array.<IOperation>} [operations] OrderedOperations operations
+     */
+    /**
+     * Constructs a new OrderedOperations.
+     * @exports OrderedOperations
+     * @classdesc Represents an OrderedOperations.
+     * @constructor
+     * @param {IOrderedOperations=} [properties] Properties to set
+     */
+    function OrderedOperations(properties) {
+        this.operations = [];
+        if (properties)
+            for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                if (properties[keys[i]] != null)
+                    this[keys[i]] = properties[keys[i]];
+    }
+    /**
+     * OrderedOperations order.
+     * @member {(IOrder|null|undefined)}order
+     * @memberof OrderedOperations
+     * @instance
+     */
+    OrderedOperations.prototype.order = null;
+    /**
+     * OrderedOperations operations.
+     * @member {Array.<IOperation>}operations
+     * @memberof OrderedOperations
+     * @instance
+     */
+    OrderedOperations.prototype.operations = $util.emptyArray;
+    /**
+     * Creates a new OrderedOperations instance using the specified properties.
+     * @function create
+     * @memberof OrderedOperations
+     * @static
+     * @param {IOrderedOperations=} [properties] Properties to set
+     * @returns {OrderedOperations} OrderedOperations instance
+     */
+    OrderedOperations.create = function create(properties) {
+        return new OrderedOperations(properties);
+    };
+    /**
+     * Encodes the specified OrderedOperations message. Does not implicitly {@link OrderedOperations.verify|verify} messages.
+     * @function encode
+     * @memberof OrderedOperations
+     * @static
+     * @param {IOrderedOperations} message OrderedOperations message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    OrderedOperations.encode = function encode(message, writer) {
+        if (!writer)
+            writer = $Writer.create();
+        if (message.order != null && message.hasOwnProperty("order"))
+            $root.Order.encode(message.order, writer.uint32(/* id 1, wireType 2 =*/ 10).fork()).ldelim();
+        if (message.operations != null && message.operations.length)
+            for (var i = 0; i < message.operations.length; ++i)
+                $root.Operation.encode(message.operations[i], writer.uint32(/* id 2, wireType 2 =*/ 18).fork()).ldelim();
+        return writer;
+    };
+    /**
+     * Encodes the specified OrderedOperations message, length delimited. Does not implicitly {@link OrderedOperations.verify|verify} messages.
+     * @function encodeDelimited
+     * @memberof OrderedOperations
+     * @static
+     * @param {IOrderedOperations} message OrderedOperations message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    OrderedOperations.encodeDelimited = function encodeDelimited(message, writer) {
+        return this.encode(message, writer).ldelim();
+    };
+    /**
+     * Decodes an OrderedOperations message from the specified reader or buffer.
+     * @function decode
+     * @memberof OrderedOperations
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @param {number} [length] Message length if known beforehand
+     * @returns {OrderedOperations} OrderedOperations
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    OrderedOperations.decode = function decode(reader, length) {
+        if (!(reader instanceof $Reader))
+            reader = $Reader.create(reader);
+        var end = length === undefined ? reader.len : reader.pos + length, message = new $root.OrderedOperations();
+        while (reader.pos < end) {
+            var tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.order = $root.Order.decode(reader, reader.uint32());
+                    break;
+                case 2:
+                    if (!(message.operations && message.operations.length))
+                        message.operations = [];
+                    message.operations.push($root.Operation.decode(reader, reader.uint32()));
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    };
+    /**
+     * Decodes an OrderedOperations message from the specified reader or buffer, length delimited.
+     * @function decodeDelimited
+     * @memberof OrderedOperations
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @returns {OrderedOperations} OrderedOperations
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    OrderedOperations.decodeDelimited = function decodeDelimited(reader) {
+        if (!(reader instanceof $Reader))
+            reader = new $Reader(reader);
+        return this.decode(reader, reader.uint32());
+    };
+    /**
+     * Verifies an OrderedOperations message.
+     * @function verify
+     * @memberof OrderedOperations
+     * @static
+     * @param {Object.<string,*>} message Plain object to verify
+     * @returns {string|null} `null` if valid, otherwise the reason why it is not
+     */
+    OrderedOperations.verify = function verify(message) {
+        if (typeof message !== "object" || message === null)
+            return "object expected";
+        if (message.order != null && message.hasOwnProperty("order")) {
+            var error = $root.Order.verify(message.order);
+            if (error)
+                return "order." + error;
+        }
+        if (message.operations != null && message.hasOwnProperty("operations")) {
+            if (!Array.isArray(message.operations))
+                return "operations: array expected";
+            for (var i = 0; i < message.operations.length; ++i) {
+                error = $root.Operation.verify(message.operations[i]);
+                if (error)
+                    return "operations." + error;
+            }
+        }
+        return null;
+    };
+    /**
+     * Creates an OrderedOperations message from a plain object. Also converts values to their respective internal types.
+     * @function fromObject
+     * @memberof OrderedOperations
+     * @static
+     * @param {Object.<string,*>} object Plain object
+     * @returns {OrderedOperations} OrderedOperations
+     */
+    OrderedOperations.fromObject = function fromObject(object) {
+        if (object instanceof $root.OrderedOperations)
+            return object;
+        var message = new $root.OrderedOperations();
+        if (object.order != null) {
+            if (typeof object.order !== "object")
+                throw TypeError(".OrderedOperations.order: object expected");
+            message.order = $root.Order.fromObject(object.order);
+        }
+        if (object.operations) {
+            if (!Array.isArray(object.operations))
+                throw TypeError(".OrderedOperations.operations: array expected");
+            message.operations = [];
+            for (var i = 0; i < object.operations.length; ++i) {
+                if (typeof object.operations[i] !== "object")
+                    throw TypeError(".OrderedOperations.operations: object expected");
+                message.operations[i] = $root.Operation.fromObject(object.operations[i]);
+            }
+        }
+        return message;
+    };
+    /**
+     * Creates a plain object from an OrderedOperations message. Also converts values to other types if specified.
+     * @function toObject
+     * @memberof OrderedOperations
+     * @static
+     * @param {OrderedOperations} message OrderedOperations
+     * @param {$protobuf.IConversionOptions} [options] Conversion options
+     * @returns {Object.<string,*>} Plain object
+     */
+    OrderedOperations.toObject = function toObject(message, options) {
+        if (!options)
+            options = {};
+        var object = {};
+        if (options.arrays || options.defaults)
+            object.operations = [];
+        if (options.defaults)
+            object.order = null;
+        if (message.order != null && message.hasOwnProperty("order"))
+            object.order = $root.Order.toObject(message.order, options);
+        if (message.operations && message.operations.length) {
+            object.operations = [];
+            for (var j = 0; j < message.operations.length; ++j)
+                object.operations[j] = $root.Operation.toObject(message.operations[j], options);
+        }
+        return object;
+    };
+    /**
+     * Converts this OrderedOperations to JSON.
+     * @function toJSON
+     * @memberof OrderedOperations
+     * @instance
+     * @returns {Object.<string,*>} JSON object
+     */
+    OrderedOperations.prototype.toJSON = function toJSON() {
+        return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+    };
+    return OrderedOperations;
+})();
+$root.Event = (function () {
+    /**
+     * Properties of an Event.
+     * @exports IEvent
+     * @interface IEvent
+     * @property {IOrderedOperations} [orderedOperations] Event orderedOperations
+     */
+    /**
+     * Constructs a new Event.
+     * @exports Event
+     * @classdesc Represents an Event.
+     * @constructor
+     * @param {IEvent=} [properties] Properties to set
+     */
+    function Event(properties) {
+        if (properties)
+            for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                if (properties[keys[i]] != null)
+                    this[keys[i]] = properties[keys[i]];
+    }
+    /**
+     * Event orderedOperations.
+     * @member {(IOrderedOperations|null|undefined)}orderedOperations
+     * @memberof Event
+     * @instance
+     */
+    Event.prototype.orderedOperations = null;
+    // OneOf field names bound to virtual getters and setters
+    var $oneOfFields;
+    /**
+     * Event type.
+     * @member {string|undefined} type
+     * @memberof Event
+     * @instance
+     */
+    Object.defineProperty(Event.prototype, "type", {
+        get: $util.oneOfGetter($oneOfFields = ["orderedOperations"]),
+        set: $util.oneOfSetter($oneOfFields)
+    });
+    /**
+     * Creates a new Event instance using the specified properties.
+     * @function create
+     * @memberof Event
+     * @static
+     * @param {IEvent=} [properties] Properties to set
+     * @returns {Event} Event instance
+     */
+    Event.create = function create(properties) {
+        return new Event(properties);
+    };
+    /**
+     * Encodes the specified Event message. Does not implicitly {@link Event.verify|verify} messages.
+     * @function encode
+     * @memberof Event
+     * @static
+     * @param {IEvent} message Event message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Event.encode = function encode(message, writer) {
+        if (!writer)
+            writer = $Writer.create();
+        if (message.orderedOperations != null && message.hasOwnProperty("orderedOperations"))
+            $root.OrderedOperations.encode(message.orderedOperations, writer.uint32(/* id 1, wireType 2 =*/ 10).fork()).ldelim();
+        return writer;
+    };
+    /**
+     * Encodes the specified Event message, length delimited. Does not implicitly {@link Event.verify|verify} messages.
+     * @function encodeDelimited
+     * @memberof Event
+     * @static
+     * @param {IEvent} message Event message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    Event.encodeDelimited = function encodeDelimited(message, writer) {
+        return this.encode(message, writer).ldelim();
+    };
+    /**
+     * Decodes an Event message from the specified reader or buffer.
+     * @function decode
+     * @memberof Event
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @param {number} [length] Message length if known beforehand
+     * @returns {Event} Event
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Event.decode = function decode(reader, length) {
+        if (!(reader instanceof $Reader))
+            reader = $Reader.create(reader);
+        var end = length === undefined ? reader.len : reader.pos + length, message = new $root.Event();
+        while (reader.pos < end) {
+            var tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.orderedOperations = $root.OrderedOperations.decode(reader, reader.uint32());
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    };
+    /**
+     * Decodes an Event message from the specified reader or buffer, length delimited.
+     * @function decodeDelimited
+     * @memberof Event
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @returns {Event} Event
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    Event.decodeDelimited = function decodeDelimited(reader) {
+        if (!(reader instanceof $Reader))
+            reader = new $Reader(reader);
+        return this.decode(reader, reader.uint32());
+    };
+    /**
+     * Verifies an Event message.
+     * @function verify
+     * @memberof Event
+     * @static
+     * @param {Object.<string,*>} message Plain object to verify
+     * @returns {string|null} `null` if valid, otherwise the reason why it is not
+     */
+    Event.verify = function verify(message) {
+        if (typeof message !== "object" || message === null)
+            return "object expected";
+        var properties = {};
+        if (message.orderedOperations != null && message.hasOwnProperty("orderedOperations")) {
+            properties.type = 1;
+            var error = $root.OrderedOperations.verify(message.orderedOperations);
+            if (error)
+                return "orderedOperations." + error;
+        }
+        return null;
+    };
+    /**
+     * Creates an Event message from a plain object. Also converts values to their respective internal types.
+     * @function fromObject
+     * @memberof Event
+     * @static
+     * @param {Object.<string,*>} object Plain object
+     * @returns {Event} Event
+     */
+    Event.fromObject = function fromObject(object) {
+        if (object instanceof $root.Event)
+            return object;
+        var message = new $root.Event();
+        if (object.orderedOperations != null) {
+            if (typeof object.orderedOperations !== "object")
+                throw TypeError(".Event.orderedOperations: object expected");
+            message.orderedOperations = $root.OrderedOperations.fromObject(object.orderedOperations);
+        }
+        return message;
+    };
+    /**
+     * Creates a plain object from an Event message. Also converts values to other types if specified.
+     * @function toObject
+     * @memberof Event
+     * @static
+     * @param {Event} message Event
+     * @param {$protobuf.IConversionOptions} [options] Conversion options
+     * @returns {Object.<string,*>} Plain object
+     */
+    Event.toObject = function toObject(message, options) {
+        if (!options)
+            options = {};
+        var object = {};
+        if (message.orderedOperations != null && message.hasOwnProperty("orderedOperations")) {
+            object.orderedOperations = $root.OrderedOperations.toObject(message.orderedOperations, options);
+            if (options.oneofs)
+                object.type = "orderedOperations";
+        }
+        return object;
+    };
+    /**
+     * Converts this Event to JSON.
+     * @function toJSON
+     * @memberof Event
+     * @instance
+     * @returns {Object.<string,*>} JSON object
+     */
+    Event.prototype.toJSON = function toJSON() {
+        return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+    };
+    return Event;
+})();
+module.exports = $root;
+
+},{"protobufjs/minimal":43}],5:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const text_1 = require("js-crdt/build/text");
@@ -188,7 +2202,7 @@ function deltaToOperations(delta) {
 }
 exports.deltaToOperations = deltaToOperations;
 
-},{"js-crdt/build/text":29,"process":34}],4:[function(require,module,exports){
+},{"js-crdt/build/text":37,"process":42}],6:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const text_1 = require("js-crdt/build/text");
@@ -213,7 +2227,7 @@ class QuillContentUpdater {
 }
 exports.QuillContentUpdater = QuillContentUpdater;
 
-},{"js-crdt/build/text":29}],5:[function(require,module,exports){
+},{"js-crdt/build/text":37}],7:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const text_1 = require("js-crdt/build/text");
@@ -244,86 +2258,7 @@ class QuillCursorsUpdater {
 }
 exports.QuillCursorsUpdater = QuillCursorsUpdater;
 
-},{"./quill-adapter":3,"js-crdt/build/text":29}],6:[function(require,module,exports){
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const js_crdt_1 = require("js-crdt");
-function serialiseOperations(oo) {
-    return oo.operations.reduce((result, operation) => {
-        let value;
-        if (operation instanceof js_crdt_1.default.text.Insert) {
-            value = { type: 'insert', args: [operation.at, operation.value] };
-        }
-        if (operation instanceof js_crdt_1.default.text.Delete) {
-            value = { type: 'delete', args: [operation.at, operation.length] };
-        }
-        if (operation instanceof js_crdt_1.default.text.Selection) {
-            value = { type: 'selection', args: [operation.origin, operation.at, operation.length] };
-        }
-        if (value) {
-            result.operations.push(value);
-        }
-        return result;
-    }, {
-        operations: [],
-        order: serialiseOrder(oo.order),
-    });
-}
-exports.serialiseOperations = serialiseOperations;
-function serialiseOrder(order) {
-    if (order instanceof js_crdt_1.default.order.VectorClock) {
-        function serialiseId(id) {
-            return {
-                node: id.node,
-                version: id.version,
-            };
-        }
-        return {
-            t: 'v2',
-            id: serialiseId(order.id),
-            vector: order.vector.reduce((r, item) => {
-                r.push(serialiseId(item));
-                return r;
-            }, []),
-        };
-    }
-}
-function deserialiesOrder(t, id, vector) {
-    switch (t) {
-        case 'v2':
-            const set = new js_crdt_1.default.structures.SortedSetArray(new js_crdt_1.default.structures.NaiveArrayList([]));
-            return new js_crdt_1.default.order.VectorClock(new js_crdt_1.default.order.Id(id.node, id.version), vector.reduce((set, id) => {
-                return set.add(new js_crdt_1.default.order.Id(id.node, id.version)).result;
-            }, set));
-    }
-}
-function deserialiseOperations({ order, operations }) {
-    const { t, id, vector } = order;
-    return {
-        order: deserialiesOrder(t, id, vector),
-        operations: operations.reduce((operations, { type, args }) => {
-            let operation;
-            switch (type) {
-                case "insert":
-                    operation = new js_crdt_1.default.text.Insert(args[0], args[1]);
-                    break;
-                case "delete":
-                    operation = new js_crdt_1.default.text.Delete(args[0], args[1]);
-                    break;
-                case "selection":
-                    operation = new js_crdt_1.default.text.Selection(args[0], args[1], args[2]);
-                    break;
-            }
-            if (operation) {
-                operations.push(operation);
-            }
-            return operations;
-        }, []),
-    };
-}
-exports.deserialiseOperations = deserialiseOperations;
-
-},{"js-crdt":17}],7:[function(require,module,exports){
+},{"./quill-adapter":5,"js-crdt/build/text":37}],8:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const EventEmitter = require("events");
@@ -362,7 +2297,793 @@ class TextSync {
 }
 exports.TextSync = TextSync;
 
-},{"events":12}],8:[function(require,module,exports){
+},{"events":20}],9:[function(require,module,exports){
+"use strict";
+module.exports = asPromise;
+
+/**
+ * Callback as used by {@link util.asPromise}.
+ * @typedef asPromiseCallback
+ * @type {function}
+ * @param {Error|null} error Error, if any
+ * @param {...*} params Additional arguments
+ * @returns {undefined}
+ */
+
+/**
+ * Returns a promise from a node-style callback function.
+ * @memberof util
+ * @param {asPromiseCallback} fn Function to call
+ * @param {*} ctx Function context
+ * @param {...*} params Function arguments
+ * @returns {Promise<*>} Promisified function
+ */
+function asPromise(fn, ctx/*, varargs */) {
+    var params  = new Array(arguments.length - 1),
+        offset  = 0,
+        index   = 2,
+        pending = true;
+    while (index < arguments.length)
+        params[offset++] = arguments[index++];
+    return new Promise(function executor(resolve, reject) {
+        params[offset] = function callback(err/*, varargs */) {
+            if (pending) {
+                pending = false;
+                if (err)
+                    reject(err);
+                else {
+                    var params = new Array(arguments.length - 1),
+                        offset = 0;
+                    while (offset < params.length)
+                        params[offset++] = arguments[offset];
+                    resolve.apply(null, params);
+                }
+            }
+        };
+        try {
+            fn.apply(ctx || null, params);
+        } catch (err) {
+            if (pending) {
+                pending = false;
+                reject(err);
+            }
+        }
+    });
+}
+
+},{}],10:[function(require,module,exports){
+"use strict";
+
+/**
+ * A minimal base64 implementation for number arrays.
+ * @memberof util
+ * @namespace
+ */
+var base64 = exports;
+
+/**
+ * Calculates the byte length of a base64 encoded string.
+ * @param {string} string Base64 encoded string
+ * @returns {number} Byte length
+ */
+base64.length = function length(string) {
+    var p = string.length;
+    if (!p)
+        return 0;
+    var n = 0;
+    while (--p % 4 > 1 && string.charAt(p) === "=")
+        ++n;
+    return Math.ceil(string.length * 3) / 4 - n;
+};
+
+// Base64 encoding table
+var b64 = new Array(64);
+
+// Base64 decoding table
+var s64 = new Array(123);
+
+// 65..90, 97..122, 48..57, 43, 47
+for (var i = 0; i < 64;)
+    s64[b64[i] = i < 26 ? i + 65 : i < 52 ? i + 71 : i < 62 ? i - 4 : i - 59 | 43] = i++;
+
+/**
+ * Encodes a buffer to a base64 encoded string.
+ * @param {Uint8Array} buffer Source buffer
+ * @param {number} start Source start
+ * @param {number} end Source end
+ * @returns {string} Base64 encoded string
+ */
+base64.encode = function encode(buffer, start, end) {
+    var parts = null,
+        chunk = [];
+    var i = 0, // output index
+        j = 0, // goto index
+        t;     // temporary
+    while (start < end) {
+        var b = buffer[start++];
+        switch (j) {
+            case 0:
+                chunk[i++] = b64[b >> 2];
+                t = (b & 3) << 4;
+                j = 1;
+                break;
+            case 1:
+                chunk[i++] = b64[t | b >> 4];
+                t = (b & 15) << 2;
+                j = 2;
+                break;
+            case 2:
+                chunk[i++] = b64[t | b >> 6];
+                chunk[i++] = b64[b & 63];
+                j = 0;
+                break;
+        }
+        if (i > 8191) {
+            (parts || (parts = [])).push(String.fromCharCode.apply(String, chunk));
+            i = 0;
+        }
+    }
+    if (j) {
+        chunk[i++] = b64[t];
+        chunk[i++] = 61;
+        if (j === 1)
+            chunk[i++] = 61;
+    }
+    if (parts) {
+        if (i)
+            parts.push(String.fromCharCode.apply(String, chunk.slice(0, i)));
+        return parts.join("");
+    }
+    return String.fromCharCode.apply(String, chunk.slice(0, i));
+};
+
+var invalidEncoding = "invalid encoding";
+
+/**
+ * Decodes a base64 encoded string to a buffer.
+ * @param {string} string Source string
+ * @param {Uint8Array} buffer Destination buffer
+ * @param {number} offset Destination offset
+ * @returns {number} Number of bytes written
+ * @throws {Error} If encoding is invalid
+ */
+base64.decode = function decode(string, buffer, offset) {
+    var start = offset;
+    var j = 0, // goto index
+        t;     // temporary
+    for (var i = 0; i < string.length;) {
+        var c = string.charCodeAt(i++);
+        if (c === 61 && j > 1)
+            break;
+        if ((c = s64[c]) === undefined)
+            throw Error(invalidEncoding);
+        switch (j) {
+            case 0:
+                t = c;
+                j = 1;
+                break;
+            case 1:
+                buffer[offset++] = t << 2 | (c & 48) >> 4;
+                t = c;
+                j = 2;
+                break;
+            case 2:
+                buffer[offset++] = (t & 15) << 4 | (c & 60) >> 2;
+                t = c;
+                j = 3;
+                break;
+            case 3:
+                buffer[offset++] = (t & 3) << 6 | c;
+                j = 0;
+                break;
+        }
+    }
+    if (j === 1)
+        throw Error(invalidEncoding);
+    return offset - start;
+};
+
+/**
+ * Tests if the specified string appears to be base64 encoded.
+ * @param {string} string String to test
+ * @returns {boolean} `true` if probably base64 encoded, otherwise false
+ */
+base64.test = function test(string) {
+    return /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(string);
+};
+
+},{}],11:[function(require,module,exports){
+"use strict";
+module.exports = EventEmitter;
+
+/**
+ * Constructs a new event emitter instance.
+ * @classdesc A minimal event emitter.
+ * @memberof util
+ * @constructor
+ */
+function EventEmitter() {
+
+    /**
+     * Registered listeners.
+     * @type {Object.<string,*>}
+     * @private
+     */
+    this._listeners = {};
+}
+
+/**
+ * Registers an event listener.
+ * @param {string} evt Event name
+ * @param {function} fn Listener
+ * @param {*} [ctx] Listener context
+ * @returns {util.EventEmitter} `this`
+ */
+EventEmitter.prototype.on = function on(evt, fn, ctx) {
+    (this._listeners[evt] || (this._listeners[evt] = [])).push({
+        fn  : fn,
+        ctx : ctx || this
+    });
+    return this;
+};
+
+/**
+ * Removes an event listener or any matching listeners if arguments are omitted.
+ * @param {string} [evt] Event name. Removes all listeners if omitted.
+ * @param {function} [fn] Listener to remove. Removes all listeners of `evt` if omitted.
+ * @returns {util.EventEmitter} `this`
+ */
+EventEmitter.prototype.off = function off(evt, fn) {
+    if (evt === undefined)
+        this._listeners = {};
+    else {
+        if (fn === undefined)
+            this._listeners[evt] = [];
+        else {
+            var listeners = this._listeners[evt];
+            for (var i = 0; i < listeners.length;)
+                if (listeners[i].fn === fn)
+                    listeners.splice(i, 1);
+                else
+                    ++i;
+        }
+    }
+    return this;
+};
+
+/**
+ * Emits an event by calling its listeners with the specified arguments.
+ * @param {string} evt Event name
+ * @param {...*} args Arguments
+ * @returns {util.EventEmitter} `this`
+ */
+EventEmitter.prototype.emit = function emit(evt) {
+    var listeners = this._listeners[evt];
+    if (listeners) {
+        var args = [],
+            i = 1;
+        for (; i < arguments.length;)
+            args.push(arguments[i++]);
+        for (i = 0; i < listeners.length;)
+            listeners[i].fn.apply(listeners[i++].ctx, args);
+    }
+    return this;
+};
+
+},{}],12:[function(require,module,exports){
+"use strict";
+
+module.exports = factory(factory);
+
+/**
+ * Reads / writes floats / doubles from / to buffers.
+ * @name util.float
+ * @namespace
+ */
+
+/**
+ * Writes a 32 bit float to a buffer using little endian byte order.
+ * @name util.float.writeFloatLE
+ * @function
+ * @param {number} val Value to write
+ * @param {Uint8Array} buf Target buffer
+ * @param {number} pos Target buffer offset
+ * @returns {undefined}
+ */
+
+/**
+ * Writes a 32 bit float to a buffer using big endian byte order.
+ * @name util.float.writeFloatBE
+ * @function
+ * @param {number} val Value to write
+ * @param {Uint8Array} buf Target buffer
+ * @param {number} pos Target buffer offset
+ * @returns {undefined}
+ */
+
+/**
+ * Reads a 32 bit float from a buffer using little endian byte order.
+ * @name util.float.readFloatLE
+ * @function
+ * @param {Uint8Array} buf Source buffer
+ * @param {number} pos Source buffer offset
+ * @returns {number} Value read
+ */
+
+/**
+ * Reads a 32 bit float from a buffer using big endian byte order.
+ * @name util.float.readFloatBE
+ * @function
+ * @param {Uint8Array} buf Source buffer
+ * @param {number} pos Source buffer offset
+ * @returns {number} Value read
+ */
+
+/**
+ * Writes a 64 bit double to a buffer using little endian byte order.
+ * @name util.float.writeDoubleLE
+ * @function
+ * @param {number} val Value to write
+ * @param {Uint8Array} buf Target buffer
+ * @param {number} pos Target buffer offset
+ * @returns {undefined}
+ */
+
+/**
+ * Writes a 64 bit double to a buffer using big endian byte order.
+ * @name util.float.writeDoubleBE
+ * @function
+ * @param {number} val Value to write
+ * @param {Uint8Array} buf Target buffer
+ * @param {number} pos Target buffer offset
+ * @returns {undefined}
+ */
+
+/**
+ * Reads a 64 bit double from a buffer using little endian byte order.
+ * @name util.float.readDoubleLE
+ * @function
+ * @param {Uint8Array} buf Source buffer
+ * @param {number} pos Source buffer offset
+ * @returns {number} Value read
+ */
+
+/**
+ * Reads a 64 bit double from a buffer using big endian byte order.
+ * @name util.float.readDoubleBE
+ * @function
+ * @param {Uint8Array} buf Source buffer
+ * @param {number} pos Source buffer offset
+ * @returns {number} Value read
+ */
+
+// Factory function for the purpose of node-based testing in modified global environments
+function factory(exports) {
+
+    // float: typed array
+    if (typeof Float32Array !== "undefined") (function() {
+
+        var f32 = new Float32Array([ -0 ]),
+            f8b = new Uint8Array(f32.buffer),
+            le  = f8b[3] === 128;
+
+        function writeFloat_f32_cpy(val, buf, pos) {
+            f32[0] = val;
+            buf[pos    ] = f8b[0];
+            buf[pos + 1] = f8b[1];
+            buf[pos + 2] = f8b[2];
+            buf[pos + 3] = f8b[3];
+        }
+
+        function writeFloat_f32_rev(val, buf, pos) {
+            f32[0] = val;
+            buf[pos    ] = f8b[3];
+            buf[pos + 1] = f8b[2];
+            buf[pos + 2] = f8b[1];
+            buf[pos + 3] = f8b[0];
+        }
+
+        /* istanbul ignore next */
+        exports.writeFloatLE = le ? writeFloat_f32_cpy : writeFloat_f32_rev;
+        /* istanbul ignore next */
+        exports.writeFloatBE = le ? writeFloat_f32_rev : writeFloat_f32_cpy;
+
+        function readFloat_f32_cpy(buf, pos) {
+            f8b[0] = buf[pos    ];
+            f8b[1] = buf[pos + 1];
+            f8b[2] = buf[pos + 2];
+            f8b[3] = buf[pos + 3];
+            return f32[0];
+        }
+
+        function readFloat_f32_rev(buf, pos) {
+            f8b[3] = buf[pos    ];
+            f8b[2] = buf[pos + 1];
+            f8b[1] = buf[pos + 2];
+            f8b[0] = buf[pos + 3];
+            return f32[0];
+        }
+
+        /* istanbul ignore next */
+        exports.readFloatLE = le ? readFloat_f32_cpy : readFloat_f32_rev;
+        /* istanbul ignore next */
+        exports.readFloatBE = le ? readFloat_f32_rev : readFloat_f32_cpy;
+
+    // float: ieee754
+    })(); else (function() {
+
+        function writeFloat_ieee754(writeUint, val, buf, pos) {
+            var sign = val < 0 ? 1 : 0;
+            if (sign)
+                val = -val;
+            if (val === 0)
+                writeUint(1 / val > 0 ? /* positive */ 0 : /* negative 0 */ 2147483648, buf, pos);
+            else if (isNaN(val))
+                writeUint(2143289344, buf, pos);
+            else if (val > 3.4028234663852886e+38) // +-Infinity
+                writeUint((sign << 31 | 2139095040) >>> 0, buf, pos);
+            else if (val < 1.1754943508222875e-38) // denormal
+                writeUint((sign << 31 | Math.round(val / 1.401298464324817e-45)) >>> 0, buf, pos);
+            else {
+                var exponent = Math.floor(Math.log(val) / Math.LN2),
+                    mantissa = Math.round(val * Math.pow(2, -exponent) * 8388608) & 8388607;
+                writeUint((sign << 31 | exponent + 127 << 23 | mantissa) >>> 0, buf, pos);
+            }
+        }
+
+        exports.writeFloatLE = writeFloat_ieee754.bind(null, writeUintLE);
+        exports.writeFloatBE = writeFloat_ieee754.bind(null, writeUintBE);
+
+        function readFloat_ieee754(readUint, buf, pos) {
+            var uint = readUint(buf, pos),
+                sign = (uint >> 31) * 2 + 1,
+                exponent = uint >>> 23 & 255,
+                mantissa = uint & 8388607;
+            return exponent === 255
+                ? mantissa
+                ? NaN
+                : sign * Infinity
+                : exponent === 0 // denormal
+                ? sign * 1.401298464324817e-45 * mantissa
+                : sign * Math.pow(2, exponent - 150) * (mantissa + 8388608);
+        }
+
+        exports.readFloatLE = readFloat_ieee754.bind(null, readUintLE);
+        exports.readFloatBE = readFloat_ieee754.bind(null, readUintBE);
+
+    })();
+
+    // double: typed array
+    if (typeof Float64Array !== "undefined") (function() {
+
+        var f64 = new Float64Array([-0]),
+            f8b = new Uint8Array(f64.buffer),
+            le  = f8b[7] === 128;
+
+        function writeDouble_f64_cpy(val, buf, pos) {
+            f64[0] = val;
+            buf[pos    ] = f8b[0];
+            buf[pos + 1] = f8b[1];
+            buf[pos + 2] = f8b[2];
+            buf[pos + 3] = f8b[3];
+            buf[pos + 4] = f8b[4];
+            buf[pos + 5] = f8b[5];
+            buf[pos + 6] = f8b[6];
+            buf[pos + 7] = f8b[7];
+        }
+
+        function writeDouble_f64_rev(val, buf, pos) {
+            f64[0] = val;
+            buf[pos    ] = f8b[7];
+            buf[pos + 1] = f8b[6];
+            buf[pos + 2] = f8b[5];
+            buf[pos + 3] = f8b[4];
+            buf[pos + 4] = f8b[3];
+            buf[pos + 5] = f8b[2];
+            buf[pos + 6] = f8b[1];
+            buf[pos + 7] = f8b[0];
+        }
+
+        /* istanbul ignore next */
+        exports.writeDoubleLE = le ? writeDouble_f64_cpy : writeDouble_f64_rev;
+        /* istanbul ignore next */
+        exports.writeDoubleBE = le ? writeDouble_f64_rev : writeDouble_f64_cpy;
+
+        function readDouble_f64_cpy(buf, pos) {
+            f8b[0] = buf[pos    ];
+            f8b[1] = buf[pos + 1];
+            f8b[2] = buf[pos + 2];
+            f8b[3] = buf[pos + 3];
+            f8b[4] = buf[pos + 4];
+            f8b[5] = buf[pos + 5];
+            f8b[6] = buf[pos + 6];
+            f8b[7] = buf[pos + 7];
+            return f64[0];
+        }
+
+        function readDouble_f64_rev(buf, pos) {
+            f8b[7] = buf[pos    ];
+            f8b[6] = buf[pos + 1];
+            f8b[5] = buf[pos + 2];
+            f8b[4] = buf[pos + 3];
+            f8b[3] = buf[pos + 4];
+            f8b[2] = buf[pos + 5];
+            f8b[1] = buf[pos + 6];
+            f8b[0] = buf[pos + 7];
+            return f64[0];
+        }
+
+        /* istanbul ignore next */
+        exports.readDoubleLE = le ? readDouble_f64_cpy : readDouble_f64_rev;
+        /* istanbul ignore next */
+        exports.readDoubleBE = le ? readDouble_f64_rev : readDouble_f64_cpy;
+
+    // double: ieee754
+    })(); else (function() {
+
+        function writeDouble_ieee754(writeUint, off0, off1, val, buf, pos) {
+            var sign = val < 0 ? 1 : 0;
+            if (sign)
+                val = -val;
+            if (val === 0) {
+                writeUint(0, buf, pos + off0);
+                writeUint(1 / val > 0 ? /* positive */ 0 : /* negative 0 */ 2147483648, buf, pos + off1);
+            } else if (isNaN(val)) {
+                writeUint(0, buf, pos + off0);
+                writeUint(2146959360, buf, pos + off1);
+            } else if (val > 1.7976931348623157e+308) { // +-Infinity
+                writeUint(0, buf, pos + off0);
+                writeUint((sign << 31 | 2146435072) >>> 0, buf, pos + off1);
+            } else {
+                var mantissa;
+                if (val < 2.2250738585072014e-308) { // denormal
+                    mantissa = val / 5e-324;
+                    writeUint(mantissa >>> 0, buf, pos + off0);
+                    writeUint((sign << 31 | mantissa / 4294967296) >>> 0, buf, pos + off1);
+                } else {
+                    var exponent = Math.floor(Math.log(val) / Math.LN2);
+                    if (exponent === 1024)
+                        exponent = 1023;
+                    mantissa = val * Math.pow(2, -exponent);
+                    writeUint(mantissa * 4503599627370496 >>> 0, buf, pos + off0);
+                    writeUint((sign << 31 | exponent + 1023 << 20 | mantissa * 1048576 & 1048575) >>> 0, buf, pos + off1);
+                }
+            }
+        }
+
+        exports.writeDoubleLE = writeDouble_ieee754.bind(null, writeUintLE, 0, 4);
+        exports.writeDoubleBE = writeDouble_ieee754.bind(null, writeUintBE, 4, 0);
+
+        function readDouble_ieee754(readUint, off0, off1, buf, pos) {
+            var lo = readUint(buf, pos + off0),
+                hi = readUint(buf, pos + off1);
+            var sign = (hi >> 31) * 2 + 1,
+                exponent = hi >>> 20 & 2047,
+                mantissa = 4294967296 * (hi & 1048575) + lo;
+            return exponent === 2047
+                ? mantissa
+                ? NaN
+                : sign * Infinity
+                : exponent === 0 // denormal
+                ? sign * 5e-324 * mantissa
+                : sign * Math.pow(2, exponent - 1075) * (mantissa + 4503599627370496);
+        }
+
+        exports.readDoubleLE = readDouble_ieee754.bind(null, readUintLE, 0, 4);
+        exports.readDoubleBE = readDouble_ieee754.bind(null, readUintBE, 4, 0);
+
+    })();
+
+    return exports;
+}
+
+// uint helpers
+
+function writeUintLE(val, buf, pos) {
+    buf[pos    ] =  val        & 255;
+    buf[pos + 1] =  val >>> 8  & 255;
+    buf[pos + 2] =  val >>> 16 & 255;
+    buf[pos + 3] =  val >>> 24;
+}
+
+function writeUintBE(val, buf, pos) {
+    buf[pos    ] =  val >>> 24;
+    buf[pos + 1] =  val >>> 16 & 255;
+    buf[pos + 2] =  val >>> 8  & 255;
+    buf[pos + 3] =  val        & 255;
+}
+
+function readUintLE(buf, pos) {
+    return (buf[pos    ]
+          | buf[pos + 1] << 8
+          | buf[pos + 2] << 16
+          | buf[pos + 3] << 24) >>> 0;
+}
+
+function readUintBE(buf, pos) {
+    return (buf[pos    ] << 24
+          | buf[pos + 1] << 16
+          | buf[pos + 2] << 8
+          | buf[pos + 3]) >>> 0;
+}
+
+},{}],13:[function(require,module,exports){
+"use strict";
+module.exports = inquire;
+
+/**
+ * Requires a module only if available.
+ * @memberof util
+ * @param {string} moduleName Module to require
+ * @returns {?Object} Required module if available and not empty, otherwise `null`
+ */
+function inquire(moduleName) {
+    try {
+        var mod = eval("quire".replace(/^/,"re"))(moduleName); // eslint-disable-line no-eval
+        if (mod && (mod.length || Object.keys(mod).length))
+            return mod;
+    } catch (e) {} // eslint-disable-line no-empty
+    return null;
+}
+
+},{}],14:[function(require,module,exports){
+"use strict";
+module.exports = pool;
+
+/**
+ * An allocator as used by {@link util.pool}.
+ * @typedef PoolAllocator
+ * @type {function}
+ * @param {number} size Buffer size
+ * @returns {Uint8Array} Buffer
+ */
+
+/**
+ * A slicer as used by {@link util.pool}.
+ * @typedef PoolSlicer
+ * @type {function}
+ * @param {number} start Start offset
+ * @param {number} end End offset
+ * @returns {Uint8Array} Buffer slice
+ * @this {Uint8Array}
+ */
+
+/**
+ * A general purpose buffer pool.
+ * @memberof util
+ * @function
+ * @param {PoolAllocator} alloc Allocator
+ * @param {PoolSlicer} slice Slicer
+ * @param {number} [size=8192] Slab size
+ * @returns {PoolAllocator} Pooled allocator
+ */
+function pool(alloc, slice, size) {
+    var SIZE   = size || 8192;
+    var MAX    = SIZE >>> 1;
+    var slab   = null;
+    var offset = SIZE;
+    return function pool_alloc(size) {
+        if (size < 1 || size > MAX)
+            return alloc(size);
+        if (offset + size > SIZE) {
+            slab = alloc(SIZE);
+            offset = 0;
+        }
+        var buf = slice.call(slab, offset, offset += size);
+        if (offset & 7) // align to 32 bit
+            offset = (offset | 7) + 1;
+        return buf;
+    };
+}
+
+},{}],15:[function(require,module,exports){
+"use strict";
+
+/**
+ * A minimal UTF8 implementation for number arrays.
+ * @memberof util
+ * @namespace
+ */
+var utf8 = exports;
+
+/**
+ * Calculates the UTF8 byte length of a string.
+ * @param {string} string String
+ * @returns {number} Byte length
+ */
+utf8.length = function utf8_length(string) {
+    var len = 0,
+        c = 0;
+    for (var i = 0; i < string.length; ++i) {
+        c = string.charCodeAt(i);
+        if (c < 128)
+            len += 1;
+        else if (c < 2048)
+            len += 2;
+        else if ((c & 0xFC00) === 0xD800 && (string.charCodeAt(i + 1) & 0xFC00) === 0xDC00) {
+            ++i;
+            len += 4;
+        } else
+            len += 3;
+    }
+    return len;
+};
+
+/**
+ * Reads UTF8 bytes as a string.
+ * @param {Uint8Array} buffer Source buffer
+ * @param {number} start Source start
+ * @param {number} end Source end
+ * @returns {string} String read
+ */
+utf8.read = function utf8_read(buffer, start, end) {
+    var len = end - start;
+    if (len < 1)
+        return "";
+    var parts = null,
+        chunk = [],
+        i = 0, // char offset
+        t;     // temporary
+    while (start < end) {
+        t = buffer[start++];
+        if (t < 128)
+            chunk[i++] = t;
+        else if (t > 191 && t < 224)
+            chunk[i++] = (t & 31) << 6 | buffer[start++] & 63;
+        else if (t > 239 && t < 365) {
+            t = ((t & 7) << 18 | (buffer[start++] & 63) << 12 | (buffer[start++] & 63) << 6 | buffer[start++] & 63) - 0x10000;
+            chunk[i++] = 0xD800 + (t >> 10);
+            chunk[i++] = 0xDC00 + (t & 1023);
+        } else
+            chunk[i++] = (t & 15) << 12 | (buffer[start++] & 63) << 6 | buffer[start++] & 63;
+        if (i > 8191) {
+            (parts || (parts = [])).push(String.fromCharCode.apply(String, chunk));
+            i = 0;
+        }
+    }
+    if (parts) {
+        if (i)
+            parts.push(String.fromCharCode.apply(String, chunk.slice(0, i)));
+        return parts.join("");
+    }
+    return String.fromCharCode.apply(String, chunk.slice(0, i));
+};
+
+/**
+ * Writes a string as UTF8 bytes.
+ * @param {string} string Source string
+ * @param {Uint8Array} buffer Destination buffer
+ * @param {number} offset Destination offset
+ * @returns {number} Bytes written
+ */
+utf8.write = function utf8_write(string, buffer, offset) {
+    var start = offset,
+        c1, // character 1
+        c2; // character 2
+    for (var i = 0; i < string.length; ++i) {
+        c1 = string.charCodeAt(i);
+        if (c1 < 128) {
+            buffer[offset++] = c1;
+        } else if (c1 < 2048) {
+            buffer[offset++] = c1 >> 6       | 192;
+            buffer[offset++] = c1       & 63 | 128;
+        } else if ((c1 & 0xFC00) === 0xD800 && ((c2 = string.charCodeAt(i + 1)) & 0xFC00) === 0xDC00) {
+            c1 = 0x10000 + ((c1 & 0x03FF) << 10) + (c2 & 0x03FF);
+            ++i;
+            buffer[offset++] = c1 >> 18      | 240;
+            buffer[offset++] = c1 >> 12 & 63 | 128;
+            buffer[offset++] = c1 >> 6  & 63 | 128;
+            buffer[offset++] = c1       & 63 | 128;
+        } else {
+            buffer[offset++] = c1 >> 12      | 224;
+            buffer[offset++] = c1 >> 6  & 63 | 128;
+            buffer[offset++] = c1       & 63 | 128;
+        }
+    }
+    return offset - start;
+};
+
+},{}],16:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -478,7 +3199,7 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],9:[function(require,module,exports){
+},{}],17:[function(require,module,exports){
 (function (global){
 /*!
  * The buffer module from node.js, for the browser.
@@ -2271,7 +4992,7 @@ function isnan (val) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"base64-js":8,"ieee754":13,"isarray":14}],10:[function(require,module,exports){
+},{"base64-js":16,"ieee754":21,"isarray":22}],18:[function(require,module,exports){
 /**
  * BKDR Hash (modified version)
  *
@@ -2297,7 +5018,7 @@ var BKDRHash = function(str) {
 
 module.exports = BKDRHash;
 
-},{}],11:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 var BKDRHash = require('./bkdr-hash');
 
 /**
@@ -2416,7 +5137,7 @@ ColorHash.prototype.hex = function(str) {
 
 module.exports = ColorHash;
 
-},{"./bkdr-hash":10}],12:[function(require,module,exports){
+},{"./bkdr-hash":18}],20:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -2720,7 +5441,7 @@ function isUndefined(arg) {
   return arg === void 0;
 }
 
-},{}],13:[function(require,module,exports){
+},{}],21:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = nBytes * 8 - mLen - 1
@@ -2806,14 +5527,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],14:[function(require,module,exports){
+},{}],22:[function(require,module,exports){
 var toString = {}.toString;
 
 module.exports = Array.isArray || function (arr) {
   return toString.call(arr) == '[object Array]';
 };
 
-},{}],15:[function(require,module,exports){
+},{}],23:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function merge(a, b) {
@@ -2852,7 +5573,7 @@ function axioms(assert, a, b, c) {
 }
 exports.axioms = axioms;
 
-},{}],16:[function(require,module,exports){
+},{}],24:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Increment {
@@ -2872,7 +5593,7 @@ class Increment {
 }
 exports.Increment = Increment;
 
-},{}],17:[function(require,module,exports){
+},{}],25:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const functions = require("./functions");
@@ -2888,7 +5609,7 @@ exports.default = {
     text,
 };
 
-},{"./functions":15,"./increment":16,"./order":19,"./structures":21,"./text":29}],18:[function(require,module,exports){
+},{"./functions":23,"./increment":24,"./order":27,"./structures":29,"./text":37}],26:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const naive_array_list_1 = require("../structures/naive-array-list");
@@ -2900,7 +5621,7 @@ function createVectorClock(id, version, vector) {
 }
 exports.createVectorClock = createVectorClock;
 
-},{"../structures/naive-array-list":22,"../structures/sorted-set-array":26,"./vector-clock":20}],19:[function(require,module,exports){
+},{"../structures/naive-array-list":30,"../structures/sorted-set-array":34,"./vector-clock":28}],27:[function(require,module,exports){
 "use strict";
 function __export(m) {
     for (var p in m) if (!exports.hasOwnProperty(p)) exports[p] = m[p];
@@ -2909,7 +5630,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 __export(require("./vector-clock"));
 __export(require("./factory"));
 
-},{"./factory":18,"./vector-clock":20}],20:[function(require,module,exports){
+},{"./factory":26,"./vector-clock":28}],28:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Id {
@@ -3016,7 +5737,7 @@ class VectorClock {
 }
 exports.VectorClock = VectorClock;
 
-},{}],21:[function(require,module,exports){
+},{}],29:[function(require,module,exports){
 "use strict";
 function __export(m) {
     for (var p in m) if (!exports.hasOwnProperty(p)) exports[p] = m[p];
@@ -3028,7 +5749,7 @@ __export(require("./set-axioms"));
 __export(require("./ordered-map"));
 __export(require("./sorted-set-array"));
 
-},{"./naive-array-list":22,"./naive-immutable-map":23,"./ordered-map":24,"./set-axioms":25,"./sorted-set-array":26}],22:[function(require,module,exports){
+},{"./naive-array-list":30,"./naive-immutable-map":31,"./ordered-map":32,"./set-axioms":33,"./sorted-set-array":34}],30:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class NaiveArrayList {
@@ -3068,7 +5789,7 @@ class NaiveArrayList {
 }
 exports.NaiveArrayList = NaiveArrayList;
 
-},{}],23:[function(require,module,exports){
+},{}],31:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class NaiveImmutableMap {
@@ -3097,7 +5818,7 @@ class NaiveImmutableMap {
 }
 exports.NaiveImmutableMap = NaiveImmutableMap;
 
-},{}],24:[function(require,module,exports){
+},{}],32:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Indexed {
@@ -3147,7 +5868,7 @@ class OrderedMap {
 }
 exports.OrderedMap = OrderedMap;
 
-},{}],25:[function(require,module,exports){
+},{}],33:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function equal(a, b) {
@@ -3172,7 +5893,7 @@ function axioms(assert, a, b, c) {
 }
 exports.axioms = axioms;
 
-},{}],26:[function(require,module,exports){
+},{}],34:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function divide(lower, upper, elements, item, onNew, onExists) {
@@ -3255,7 +5976,7 @@ class SortedSetArray {
 }
 exports.SortedSetArray = SortedSetArray;
 
-},{}],27:[function(require,module,exports){
+},{}],35:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Delete {
@@ -3269,7 +5990,7 @@ class Delete {
 }
 exports.Delete = Delete;
 
-},{}],28:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const naive_array_list_1 = require("../structures/naive-array-list");
@@ -3282,7 +6003,7 @@ function createFromOrderer(order) {
 }
 exports.createFromOrderer = createFromOrderer;
 
-},{"../structures/naive-array-list":22,"../structures/naive-immutable-map":23,"../structures/ordered-map":24,"../structures/sorted-set-array":26,"./text":32}],29:[function(require,module,exports){
+},{"../structures/naive-array-list":30,"../structures/naive-immutable-map":31,"../structures/ordered-map":32,"../structures/sorted-set-array":34,"./text":40}],37:[function(require,module,exports){
 "use strict";
 function __export(m) {
     for (var p in m) if (!exports.hasOwnProperty(p)) exports[p] = m[p];
@@ -3295,7 +6016,7 @@ __export(require("./text"));
 __export(require("./utils"));
 __export(require("./factory"));
 
-},{"./delete":27,"./factory":28,"./insert":30,"./selection":31,"./text":32,"./utils":33}],30:[function(require,module,exports){
+},{"./delete":35,"./factory":36,"./insert":38,"./selection":39,"./text":40,"./utils":41}],38:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Insert {
@@ -3310,7 +6031,7 @@ class Insert {
 }
 exports.Insert = Insert;
 
-},{}],31:[function(require,module,exports){
+},{}],39:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Selection {
@@ -3341,7 +6062,7 @@ class Selection {
 }
 exports.Selection = Selection;
 
-},{}],32:[function(require,module,exports){
+},{}],40:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const functions_1 = require("../functions");
@@ -3398,7 +6119,7 @@ class Text {
 }
 exports.Text = Text;
 
-},{"../functions":15}],33:[function(require,module,exports){
+},{"../functions":23}],41:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const delete_1 = require("./delete");
@@ -3544,7 +6265,7 @@ function selectionUpdate(selection, op) {
 }
 exports.selectionUpdate = selectionUpdate;
 
-},{"../structures/naive-immutable-map":23,"./delete":27,"./insert":30,"./selection":31}],34:[function(require,module,exports){
+},{"../structures/naive-immutable-map":31,"./delete":35,"./insert":38,"./selection":39}],42:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -3730,7 +6451,1863 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],35:[function(require,module,exports){
+},{}],43:[function(require,module,exports){
+// minimal library entry point.
+
+"use strict";
+module.exports = require("./src/index-minimal");
+
+},{"./src/index-minimal":44}],44:[function(require,module,exports){
+"use strict";
+var protobuf = exports;
+
+/**
+ * Build type, one of `"full"`, `"light"` or `"minimal"`.
+ * @name build
+ * @type {string}
+ * @const
+ */
+protobuf.build = "minimal";
+
+// Serialization
+protobuf.Writer       = require("./writer");
+protobuf.BufferWriter = require("./writer_buffer");
+protobuf.Reader       = require("./reader");
+protobuf.BufferReader = require("./reader_buffer");
+
+// Utility
+protobuf.util         = require("./util/minimal");
+protobuf.rpc          = require("./rpc");
+protobuf.roots        = require("./roots");
+protobuf.configure    = configure;
+
+/* istanbul ignore next */
+/**
+ * Reconfigures the library according to the environment.
+ * @returns {undefined}
+ */
+function configure() {
+    protobuf.Reader._configure(protobuf.BufferReader);
+    protobuf.util._configure();
+}
+
+// Configure serialization
+protobuf.Writer._configure(protobuf.BufferWriter);
+configure();
+
+},{"./reader":45,"./reader_buffer":46,"./roots":47,"./rpc":48,"./util/minimal":51,"./writer":52,"./writer_buffer":53}],45:[function(require,module,exports){
+"use strict";
+module.exports = Reader;
+
+var util      = require("./util/minimal");
+
+var BufferReader; // cyclic
+
+var LongBits  = util.LongBits,
+    utf8      = util.utf8;
+
+/* istanbul ignore next */
+function indexOutOfRange(reader, writeLength) {
+    return RangeError("index out of range: " + reader.pos + " + " + (writeLength || 1) + " > " + reader.len);
+}
+
+/**
+ * Constructs a new reader instance using the specified buffer.
+ * @classdesc Wire format reader using `Uint8Array` if available, otherwise `Array`.
+ * @constructor
+ * @param {Uint8Array} buffer Buffer to read from
+ */
+function Reader(buffer) {
+
+    /**
+     * Read buffer.
+     * @type {Uint8Array}
+     */
+    this.buf = buffer;
+
+    /**
+     * Read buffer position.
+     * @type {number}
+     */
+    this.pos = 0;
+
+    /**
+     * Read buffer length.
+     * @type {number}
+     */
+    this.len = buffer.length;
+}
+
+var create_array = typeof Uint8Array !== "undefined"
+    ? function create_typed_array(buffer) {
+        if (buffer instanceof Uint8Array || Array.isArray(buffer))
+            return new Reader(buffer);
+        throw Error("illegal buffer");
+    }
+    /* istanbul ignore next */
+    : function create_array(buffer) {
+        if (Array.isArray(buffer))
+            return new Reader(buffer);
+        throw Error("illegal buffer");
+    };
+
+/**
+ * Creates a new reader using the specified buffer.
+ * @function
+ * @param {Uint8Array|Buffer} buffer Buffer to read from
+ * @returns {Reader|BufferReader} A {@link BufferReader} if `buffer` is a Buffer, otherwise a {@link Reader}
+ * @throws {Error} If `buffer` is not a valid buffer
+ */
+Reader.create = util.Buffer
+    ? function create_buffer_setup(buffer) {
+        return (Reader.create = function create_buffer(buffer) {
+            return util.Buffer.isBuffer(buffer)
+                ? new BufferReader(buffer)
+                /* istanbul ignore next */
+                : create_array(buffer);
+        })(buffer);
+    }
+    /* istanbul ignore next */
+    : create_array;
+
+Reader.prototype._slice = util.Array.prototype.subarray || /* istanbul ignore next */ util.Array.prototype.slice;
+
+/**
+ * Reads a varint as an unsigned 32 bit value.
+ * @function
+ * @returns {number} Value read
+ */
+Reader.prototype.uint32 = (function read_uint32_setup() {
+    var value = 4294967295; // optimizer type-hint, tends to deopt otherwise (?!)
+    return function read_uint32() {
+        value = (         this.buf[this.pos] & 127       ) >>> 0; if (this.buf[this.pos++] < 128) return value;
+        value = (value | (this.buf[this.pos] & 127) <<  7) >>> 0; if (this.buf[this.pos++] < 128) return value;
+        value = (value | (this.buf[this.pos] & 127) << 14) >>> 0; if (this.buf[this.pos++] < 128) return value;
+        value = (value | (this.buf[this.pos] & 127) << 21) >>> 0; if (this.buf[this.pos++] < 128) return value;
+        value = (value | (this.buf[this.pos] &  15) << 28) >>> 0; if (this.buf[this.pos++] < 128) return value;
+
+        /* istanbul ignore if */
+        if ((this.pos += 5) > this.len) {
+            this.pos = this.len;
+            throw indexOutOfRange(this, 10);
+        }
+        return value;
+    };
+})();
+
+/**
+ * Reads a varint as a signed 32 bit value.
+ * @returns {number} Value read
+ */
+Reader.prototype.int32 = function read_int32() {
+    return this.uint32() | 0;
+};
+
+/**
+ * Reads a zig-zag encoded varint as a signed 32 bit value.
+ * @returns {number} Value read
+ */
+Reader.prototype.sint32 = function read_sint32() {
+    var value = this.uint32();
+    return value >>> 1 ^ -(value & 1) | 0;
+};
+
+/* eslint-disable no-invalid-this */
+
+function readLongVarint() {
+    // tends to deopt with local vars for octet etc.
+    var bits = new LongBits(0, 0);
+    var i = 0;
+    if (this.len - this.pos > 4) { // fast route (lo)
+        for (; i < 4; ++i) {
+            // 1st..4th
+            bits.lo = (bits.lo | (this.buf[this.pos] & 127) << i * 7) >>> 0;
+            if (this.buf[this.pos++] < 128)
+                return bits;
+        }
+        // 5th
+        bits.lo = (bits.lo | (this.buf[this.pos] & 127) << 28) >>> 0;
+        bits.hi = (bits.hi | (this.buf[this.pos] & 127) >>  4) >>> 0;
+        if (this.buf[this.pos++] < 128)
+            return bits;
+        i = 0;
+    } else {
+        for (; i < 3; ++i) {
+            /* istanbul ignore if */
+            if (this.pos >= this.len)
+                throw indexOutOfRange(this);
+            // 1st..3th
+            bits.lo = (bits.lo | (this.buf[this.pos] & 127) << i * 7) >>> 0;
+            if (this.buf[this.pos++] < 128)
+                return bits;
+        }
+        // 4th
+        bits.lo = (bits.lo | (this.buf[this.pos++] & 127) << i * 7) >>> 0;
+        return bits;
+    }
+    if (this.len - this.pos > 4) { // fast route (hi)
+        for (; i < 5; ++i) {
+            // 6th..10th
+            bits.hi = (bits.hi | (this.buf[this.pos] & 127) << i * 7 + 3) >>> 0;
+            if (this.buf[this.pos++] < 128)
+                return bits;
+        }
+    } else {
+        for (; i < 5; ++i) {
+            /* istanbul ignore if */
+            if (this.pos >= this.len)
+                throw indexOutOfRange(this);
+            // 6th..10th
+            bits.hi = (bits.hi | (this.buf[this.pos] & 127) << i * 7 + 3) >>> 0;
+            if (this.buf[this.pos++] < 128)
+                return bits;
+        }
+    }
+    /* istanbul ignore next */
+    throw Error("invalid varint encoding");
+}
+
+/* eslint-enable no-invalid-this */
+
+/**
+ * Reads a varint as a signed 64 bit value.
+ * @name Reader#int64
+ * @function
+ * @returns {Long} Value read
+ */
+
+/**
+ * Reads a varint as an unsigned 64 bit value.
+ * @name Reader#uint64
+ * @function
+ * @returns {Long} Value read
+ */
+
+/**
+ * Reads a zig-zag encoded varint as a signed 64 bit value.
+ * @name Reader#sint64
+ * @function
+ * @returns {Long} Value read
+ */
+
+/**
+ * Reads a varint as a boolean.
+ * @returns {boolean} Value read
+ */
+Reader.prototype.bool = function read_bool() {
+    return this.uint32() !== 0;
+};
+
+function readFixed32_end(buf, end) { // note that this uses `end`, not `pos`
+    return (buf[end - 4]
+          | buf[end - 3] << 8
+          | buf[end - 2] << 16
+          | buf[end - 1] << 24) >>> 0;
+}
+
+/**
+ * Reads fixed 32 bits as an unsigned 32 bit integer.
+ * @returns {number} Value read
+ */
+Reader.prototype.fixed32 = function read_fixed32() {
+
+    /* istanbul ignore if */
+    if (this.pos + 4 > this.len)
+        throw indexOutOfRange(this, 4);
+
+    return readFixed32_end(this.buf, this.pos += 4);
+};
+
+/**
+ * Reads fixed 32 bits as a signed 32 bit integer.
+ * @returns {number} Value read
+ */
+Reader.prototype.sfixed32 = function read_sfixed32() {
+
+    /* istanbul ignore if */
+    if (this.pos + 4 > this.len)
+        throw indexOutOfRange(this, 4);
+
+    return readFixed32_end(this.buf, this.pos += 4) | 0;
+};
+
+/* eslint-disable no-invalid-this */
+
+function readFixed64(/* this: Reader */) {
+
+    /* istanbul ignore if */
+    if (this.pos + 8 > this.len)
+        throw indexOutOfRange(this, 8);
+
+    return new LongBits(readFixed32_end(this.buf, this.pos += 4), readFixed32_end(this.buf, this.pos += 4));
+}
+
+/* eslint-enable no-invalid-this */
+
+/**
+ * Reads fixed 64 bits.
+ * @name Reader#fixed64
+ * @function
+ * @returns {Long} Value read
+ */
+
+/**
+ * Reads zig-zag encoded fixed 64 bits.
+ * @name Reader#sfixed64
+ * @function
+ * @returns {Long} Value read
+ */
+
+/**
+ * Reads a float (32 bit) as a number.
+ * @function
+ * @returns {number} Value read
+ */
+Reader.prototype.float = function read_float() {
+
+    /* istanbul ignore if */
+    if (this.pos + 4 > this.len)
+        throw indexOutOfRange(this, 4);
+
+    var value = util.float.readFloatLE(this.buf, this.pos);
+    this.pos += 4;
+    return value;
+};
+
+/**
+ * Reads a double (64 bit float) as a number.
+ * @function
+ * @returns {number} Value read
+ */
+Reader.prototype.double = function read_double() {
+
+    /* istanbul ignore if */
+    if (this.pos + 8 > this.len)
+        throw indexOutOfRange(this, 4);
+
+    var value = util.float.readDoubleLE(this.buf, this.pos);
+    this.pos += 8;
+    return value;
+};
+
+/**
+ * Reads a sequence of bytes preceeded by its length as a varint.
+ * @returns {Uint8Array} Value read
+ */
+Reader.prototype.bytes = function read_bytes() {
+    var length = this.uint32(),
+        start  = this.pos,
+        end    = this.pos + length;
+
+    /* istanbul ignore if */
+    if (end > this.len)
+        throw indexOutOfRange(this, length);
+
+    this.pos += length;
+    if (Array.isArray(this.buf)) // plain array
+        return this.buf.slice(start, end);
+    return start === end // fix for IE 10/Win8 and others' subarray returning array of size 1
+        ? new this.buf.constructor(0)
+        : this._slice.call(this.buf, start, end);
+};
+
+/**
+ * Reads a string preceeded by its byte length as a varint.
+ * @returns {string} Value read
+ */
+Reader.prototype.string = function read_string() {
+    var bytes = this.bytes();
+    return utf8.read(bytes, 0, bytes.length);
+};
+
+/**
+ * Skips the specified number of bytes if specified, otherwise skips a varint.
+ * @param {number} [length] Length if known, otherwise a varint is assumed
+ * @returns {Reader} `this`
+ */
+Reader.prototype.skip = function skip(length) {
+    if (typeof length === "number") {
+        /* istanbul ignore if */
+        if (this.pos + length > this.len)
+            throw indexOutOfRange(this, length);
+        this.pos += length;
+    } else {
+        do {
+            /* istanbul ignore if */
+            if (this.pos >= this.len)
+                throw indexOutOfRange(this);
+        } while (this.buf[this.pos++] & 128);
+    }
+    return this;
+};
+
+/**
+ * Skips the next element of the specified wire type.
+ * @param {number} wireType Wire type received
+ * @returns {Reader} `this`
+ */
+Reader.prototype.skipType = function(wireType) {
+    switch (wireType) {
+        case 0:
+            this.skip();
+            break;
+        case 1:
+            this.skip(8);
+            break;
+        case 2:
+            this.skip(this.uint32());
+            break;
+        case 3:
+            do { // eslint-disable-line no-constant-condition
+                if ((wireType = this.uint32() & 7) === 4)
+                    break;
+                this.skipType(wireType);
+            } while (true);
+            break;
+        case 5:
+            this.skip(4);
+            break;
+
+        /* istanbul ignore next */
+        default:
+            throw Error("invalid wire type " + wireType + " at offset " + this.pos);
+    }
+    return this;
+};
+
+Reader._configure = function(BufferReader_) {
+    BufferReader = BufferReader_;
+
+    var fn = util.Long ? "toLong" : /* istanbul ignore next */ "toNumber";
+    util.merge(Reader.prototype, {
+
+        int64: function read_int64() {
+            return readLongVarint.call(this)[fn](false);
+        },
+
+        uint64: function read_uint64() {
+            return readLongVarint.call(this)[fn](true);
+        },
+
+        sint64: function read_sint64() {
+            return readLongVarint.call(this).zzDecode()[fn](false);
+        },
+
+        fixed64: function read_fixed64() {
+            return readFixed64.call(this)[fn](true);
+        },
+
+        sfixed64: function read_sfixed64() {
+            return readFixed64.call(this)[fn](false);
+        }
+
+    });
+};
+
+},{"./util/minimal":51}],46:[function(require,module,exports){
+"use strict";
+module.exports = BufferReader;
+
+// extends Reader
+var Reader = require("./reader");
+(BufferReader.prototype = Object.create(Reader.prototype)).constructor = BufferReader;
+
+var util = require("./util/minimal");
+
+/**
+ * Constructs a new buffer reader instance.
+ * @classdesc Wire format reader using node buffers.
+ * @extends Reader
+ * @constructor
+ * @param {Buffer} buffer Buffer to read from
+ */
+function BufferReader(buffer) {
+    Reader.call(this, buffer);
+
+    /**
+     * Read buffer.
+     * @name BufferReader#buf
+     * @type {Buffer}
+     */
+}
+
+/* istanbul ignore else */
+if (util.Buffer)
+    BufferReader.prototype._slice = util.Buffer.prototype.slice;
+
+/**
+ * @override
+ */
+BufferReader.prototype.string = function read_string_buffer() {
+    var len = this.uint32(); // modifies pos
+    return this.buf.utf8Slice(this.pos, this.pos = Math.min(this.pos + len, this.len));
+};
+
+/**
+ * Reads a sequence of bytes preceeded by its length as a varint.
+ * @name BufferReader#bytes
+ * @function
+ * @returns {Buffer} Value read
+ */
+
+},{"./reader":45,"./util/minimal":51}],47:[function(require,module,exports){
+"use strict";
+module.exports = {};
+
+/**
+ * Named roots.
+ * This is where pbjs stores generated structures (the option `-r, --root` specifies a name).
+ * Can also be used manually to make roots available accross modules.
+ * @name roots
+ * @type {Object.<string,Root>}
+ * @example
+ * // pbjs -r myroot -o compiled.js ...
+ *
+ * // in another module:
+ * require("./compiled.js");
+ *
+ * // in any subsequent module:
+ * var root = protobuf.roots["myroot"];
+ */
+
+},{}],48:[function(require,module,exports){
+"use strict";
+
+/**
+ * Streaming RPC helpers.
+ * @namespace
+ */
+var rpc = exports;
+
+/**
+ * RPC implementation passed to {@link Service#create} performing a service request on network level, i.e. by utilizing http requests or websockets.
+ * @typedef RPCImpl
+ * @type {function}
+ * @param {Method|rpc.ServiceMethod<Message<{}>,Message<{}>>} method Reflected or static method being called
+ * @param {Uint8Array} requestData Request data
+ * @param {RPCImplCallback} callback Callback function
+ * @returns {undefined}
+ * @example
+ * function rpcImpl(method, requestData, callback) {
+ *     if (protobuf.util.lcFirst(method.name) !== "myMethod") // compatible with static code
+ *         throw Error("no such method");
+ *     asynchronouslyObtainAResponse(requestData, function(err, responseData) {
+ *         callback(err, responseData);
+ *     });
+ * }
+ */
+
+/**
+ * Node-style callback as used by {@link RPCImpl}.
+ * @typedef RPCImplCallback
+ * @type {function}
+ * @param {Error|null} error Error, if any, otherwise `null`
+ * @param {Uint8Array|null} [response] Response data or `null` to signal end of stream, if there hasn't been an error
+ * @returns {undefined}
+ */
+
+rpc.Service = require("./rpc/service");
+
+},{"./rpc/service":49}],49:[function(require,module,exports){
+"use strict";
+module.exports = Service;
+
+var util = require("../util/minimal");
+
+// Extends EventEmitter
+(Service.prototype = Object.create(util.EventEmitter.prototype)).constructor = Service;
+
+/**
+ * A service method callback as used by {@link rpc.ServiceMethod|ServiceMethod}.
+ *
+ * Differs from {@link RPCImplCallback} in that it is an actual callback of a service method which may not return `response = null`.
+ * @typedef rpc.ServiceMethodCallback
+ * @template TRes extends Message<TRes>
+ * @type {function}
+ * @param {Error|null} error Error, if any
+ * @param {TRes} [response] Response message
+ * @returns {undefined}
+ */
+
+/**
+ * A service method part of a {@link rpc.Service} as created by {@link Service.create}.
+ * @typedef rpc.ServiceMethod
+ * @template TReq extends Message<TReq>
+ * @template TRes extends Message<TRes>
+ * @type {function}
+ * @param {TReq|Properties<TReq>} request Request message or plain object
+ * @param {rpc.ServiceMethodCallback<TRes>} [callback] Node-style callback called with the error, if any, and the response message
+ * @returns {Promise<Message<TRes>>} Promise if `callback` has been omitted, otherwise `undefined`
+ */
+
+/**
+ * Constructs a new RPC service instance.
+ * @classdesc An RPC service as returned by {@link Service#create}.
+ * @exports rpc.Service
+ * @extends util.EventEmitter
+ * @constructor
+ * @param {RPCImpl} rpcImpl RPC implementation
+ * @param {boolean} [requestDelimited=false] Whether requests are length-delimited
+ * @param {boolean} [responseDelimited=false] Whether responses are length-delimited
+ */
+function Service(rpcImpl, requestDelimited, responseDelimited) {
+
+    if (typeof rpcImpl !== "function")
+        throw TypeError("rpcImpl must be a function");
+
+    util.EventEmitter.call(this);
+
+    /**
+     * RPC implementation. Becomes `null` once the service is ended.
+     * @type {RPCImpl|null}
+     */
+    this.rpcImpl = rpcImpl;
+
+    /**
+     * Whether requests are length-delimited.
+     * @type {boolean}
+     */
+    this.requestDelimited = Boolean(requestDelimited);
+
+    /**
+     * Whether responses are length-delimited.
+     * @type {boolean}
+     */
+    this.responseDelimited = Boolean(responseDelimited);
+}
+
+/**
+ * Calls a service method through {@link rpc.Service#rpcImpl|rpcImpl}.
+ * @param {Method|rpc.ServiceMethod<TReq,TRes>} method Reflected or static method
+ * @param {Constructor<TReq>} requestCtor Request constructor
+ * @param {Constructor<TRes>} responseCtor Response constructor
+ * @param {TReq|Properties<TReq>} request Request message or plain object
+ * @param {rpc.ServiceMethodCallback<TRes>} callback Service callback
+ * @returns {undefined}
+ * @template TReq extends Message<TReq>
+ * @template TRes extends Message<TRes>
+ */
+Service.prototype.rpcCall = function rpcCall(method, requestCtor, responseCtor, request, callback) {
+
+    if (!request)
+        throw TypeError("request must be specified");
+
+    var self = this;
+    if (!callback)
+        return util.asPromise(rpcCall, self, method, requestCtor, responseCtor, request);
+
+    if (!self.rpcImpl) {
+        setTimeout(function() { callback(Error("already ended")); }, 0);
+        return undefined;
+    }
+
+    try {
+        return self.rpcImpl(
+            method,
+            requestCtor[self.requestDelimited ? "encodeDelimited" : "encode"](request).finish(),
+            function rpcCallback(err, response) {
+
+                if (err) {
+                    self.emit("error", err, method);
+                    return callback(err);
+                }
+
+                if (response === null) {
+                    self.end(/* endedByRPC */ true);
+                    return undefined;
+                }
+
+                if (!(response instanceof responseCtor)) {
+                    try {
+                        response = responseCtor[self.responseDelimited ? "decodeDelimited" : "decode"](response);
+                    } catch (err) {
+                        self.emit("error", err, method);
+                        return callback(err);
+                    }
+                }
+
+                self.emit("data", response, method);
+                return callback(null, response);
+            }
+        );
+    } catch (err) {
+        self.emit("error", err, method);
+        setTimeout(function() { callback(err); }, 0);
+        return undefined;
+    }
+};
+
+/**
+ * Ends this service and emits the `end` event.
+ * @param {boolean} [endedByRPC=false] Whether the service has been ended by the RPC implementation.
+ * @returns {rpc.Service} `this`
+ */
+Service.prototype.end = function end(endedByRPC) {
+    if (this.rpcImpl) {
+        if (!endedByRPC) // signal end to rpcImpl
+            this.rpcImpl(null, null, null);
+        this.rpcImpl = null;
+        this.emit("end").off();
+    }
+    return this;
+};
+
+},{"../util/minimal":51}],50:[function(require,module,exports){
+"use strict";
+module.exports = LongBits;
+
+var util = require("../util/minimal");
+
+/**
+ * Constructs new long bits.
+ * @classdesc Helper class for working with the low and high bits of a 64 bit value.
+ * @memberof util
+ * @constructor
+ * @param {number} lo Low 32 bits, unsigned
+ * @param {number} hi High 32 bits, unsigned
+ */
+function LongBits(lo, hi) {
+
+    // note that the casts below are theoretically unnecessary as of today, but older statically
+    // generated converter code might still call the ctor with signed 32bits. kept for compat.
+
+    /**
+     * Low bits.
+     * @type {number}
+     */
+    this.lo = lo >>> 0;
+
+    /**
+     * High bits.
+     * @type {number}
+     */
+    this.hi = hi >>> 0;
+}
+
+/**
+ * Zero bits.
+ * @memberof util.LongBits
+ * @type {util.LongBits}
+ */
+var zero = LongBits.zero = new LongBits(0, 0);
+
+zero.toNumber = function() { return 0; };
+zero.zzEncode = zero.zzDecode = function() { return this; };
+zero.length = function() { return 1; };
+
+/**
+ * Zero hash.
+ * @memberof util.LongBits
+ * @type {string}
+ */
+var zeroHash = LongBits.zeroHash = "\0\0\0\0\0\0\0\0";
+
+/**
+ * Constructs new long bits from the specified number.
+ * @param {number} value Value
+ * @returns {util.LongBits} Instance
+ */
+LongBits.fromNumber = function fromNumber(value) {
+    if (value === 0)
+        return zero;
+    var sign = value < 0;
+    if (sign)
+        value = -value;
+    var lo = value >>> 0,
+        hi = (value - lo) / 4294967296 >>> 0;
+    if (sign) {
+        hi = ~hi >>> 0;
+        lo = ~lo >>> 0;
+        if (++lo > 4294967295) {
+            lo = 0;
+            if (++hi > 4294967295)
+                hi = 0;
+        }
+    }
+    return new LongBits(lo, hi);
+};
+
+/**
+ * Constructs new long bits from a number, long or string.
+ * @param {Long|number|string} value Value
+ * @returns {util.LongBits} Instance
+ */
+LongBits.from = function from(value) {
+    if (typeof value === "number")
+        return LongBits.fromNumber(value);
+    if (util.isString(value)) {
+        /* istanbul ignore else */
+        if (util.Long)
+            value = util.Long.fromString(value);
+        else
+            return LongBits.fromNumber(parseInt(value, 10));
+    }
+    return value.low || value.high ? new LongBits(value.low >>> 0, value.high >>> 0) : zero;
+};
+
+/**
+ * Converts this long bits to a possibly unsafe JavaScript number.
+ * @param {boolean} [unsigned=false] Whether unsigned or not
+ * @returns {number} Possibly unsafe number
+ */
+LongBits.prototype.toNumber = function toNumber(unsigned) {
+    if (!unsigned && this.hi >>> 31) {
+        var lo = ~this.lo + 1 >>> 0,
+            hi = ~this.hi     >>> 0;
+        if (!lo)
+            hi = hi + 1 >>> 0;
+        return -(lo + hi * 4294967296);
+    }
+    return this.lo + this.hi * 4294967296;
+};
+
+/**
+ * Converts this long bits to a long.
+ * @param {boolean} [unsigned=false] Whether unsigned or not
+ * @returns {Long} Long
+ */
+LongBits.prototype.toLong = function toLong(unsigned) {
+    return util.Long
+        ? new util.Long(this.lo | 0, this.hi | 0, Boolean(unsigned))
+        /* istanbul ignore next */
+        : { low: this.lo | 0, high: this.hi | 0, unsigned: Boolean(unsigned) };
+};
+
+var charCodeAt = String.prototype.charCodeAt;
+
+/**
+ * Constructs new long bits from the specified 8 characters long hash.
+ * @param {string} hash Hash
+ * @returns {util.LongBits} Bits
+ */
+LongBits.fromHash = function fromHash(hash) {
+    if (hash === zeroHash)
+        return zero;
+    return new LongBits(
+        ( charCodeAt.call(hash, 0)
+        | charCodeAt.call(hash, 1) << 8
+        | charCodeAt.call(hash, 2) << 16
+        | charCodeAt.call(hash, 3) << 24) >>> 0
+    ,
+        ( charCodeAt.call(hash, 4)
+        | charCodeAt.call(hash, 5) << 8
+        | charCodeAt.call(hash, 6) << 16
+        | charCodeAt.call(hash, 7) << 24) >>> 0
+    );
+};
+
+/**
+ * Converts this long bits to a 8 characters long hash.
+ * @returns {string} Hash
+ */
+LongBits.prototype.toHash = function toHash() {
+    return String.fromCharCode(
+        this.lo        & 255,
+        this.lo >>> 8  & 255,
+        this.lo >>> 16 & 255,
+        this.lo >>> 24      ,
+        this.hi        & 255,
+        this.hi >>> 8  & 255,
+        this.hi >>> 16 & 255,
+        this.hi >>> 24
+    );
+};
+
+/**
+ * Zig-zag encodes this long bits.
+ * @returns {util.LongBits} `this`
+ */
+LongBits.prototype.zzEncode = function zzEncode() {
+    var mask =   this.hi >> 31;
+    this.hi  = ((this.hi << 1 | this.lo >>> 31) ^ mask) >>> 0;
+    this.lo  = ( this.lo << 1                   ^ mask) >>> 0;
+    return this;
+};
+
+/**
+ * Zig-zag decodes this long bits.
+ * @returns {util.LongBits} `this`
+ */
+LongBits.prototype.zzDecode = function zzDecode() {
+    var mask = -(this.lo & 1);
+    this.lo  = ((this.lo >>> 1 | this.hi << 31) ^ mask) >>> 0;
+    this.hi  = ( this.hi >>> 1                  ^ mask) >>> 0;
+    return this;
+};
+
+/**
+ * Calculates the length of this longbits when encoded as a varint.
+ * @returns {number} Length
+ */
+LongBits.prototype.length = function length() {
+    var part0 =  this.lo,
+        part1 = (this.lo >>> 28 | this.hi << 4) >>> 0,
+        part2 =  this.hi >>> 24;
+    return part2 === 0
+         ? part1 === 0
+           ? part0 < 16384
+             ? part0 < 128 ? 1 : 2
+             : part0 < 2097152 ? 3 : 4
+           : part1 < 16384
+             ? part1 < 128 ? 5 : 6
+             : part1 < 2097152 ? 7 : 8
+         : part2 < 128 ? 9 : 10;
+};
+
+},{"../util/minimal":51}],51:[function(require,module,exports){
+(function (global){
+"use strict";
+var util = exports;
+
+// used to return a Promise where callback is omitted
+util.asPromise = require("@protobufjs/aspromise");
+
+// converts to / from base64 encoded strings
+util.base64 = require("@protobufjs/base64");
+
+// base class of rpc.Service
+util.EventEmitter = require("@protobufjs/eventemitter");
+
+// float handling accross browsers
+util.float = require("@protobufjs/float");
+
+// requires modules optionally and hides the call from bundlers
+util.inquire = require("@protobufjs/inquire");
+
+// converts to / from utf8 encoded strings
+util.utf8 = require("@protobufjs/utf8");
+
+// provides a node-like buffer pool in the browser
+util.pool = require("@protobufjs/pool");
+
+// utility to work with the low and high bits of a 64 bit value
+util.LongBits = require("./longbits");
+
+/**
+ * An immuable empty array.
+ * @memberof util
+ * @type {Array.<*>}
+ * @const
+ */
+util.emptyArray = Object.freeze ? Object.freeze([]) : /* istanbul ignore next */ []; // used on prototypes
+
+/**
+ * An immutable empty object.
+ * @type {Object}
+ * @const
+ */
+util.emptyObject = Object.freeze ? Object.freeze({}) : /* istanbul ignore next */ {}; // used on prototypes
+
+/**
+ * Whether running within node or not.
+ * @memberof util
+ * @type {boolean}
+ * @const
+ */
+util.isNode = Boolean(global.process && global.process.versions && global.process.versions.node);
+
+/**
+ * Tests if the specified value is an integer.
+ * @function
+ * @param {*} value Value to test
+ * @returns {boolean} `true` if the value is an integer
+ */
+util.isInteger = Number.isInteger || /* istanbul ignore next */ function isInteger(value) {
+    return typeof value === "number" && isFinite(value) && Math.floor(value) === value;
+};
+
+/**
+ * Tests if the specified value is a string.
+ * @param {*} value Value to test
+ * @returns {boolean} `true` if the value is a string
+ */
+util.isString = function isString(value) {
+    return typeof value === "string" || value instanceof String;
+};
+
+/**
+ * Tests if the specified value is a non-null object.
+ * @param {*} value Value to test
+ * @returns {boolean} `true` if the value is a non-null object
+ */
+util.isObject = function isObject(value) {
+    return value && typeof value === "object";
+};
+
+/**
+ * Checks if a property on a message is considered to be present.
+ * This is an alias of {@link util.isSet}.
+ * @function
+ * @param {Object} obj Plain object or message instance
+ * @param {string} prop Property name
+ * @returns {boolean} `true` if considered to be present, otherwise `false`
+ */
+util.isset =
+
+/**
+ * Checks if a property on a message is considered to be present.
+ * @param {Object} obj Plain object or message instance
+ * @param {string} prop Property name
+ * @returns {boolean} `true` if considered to be present, otherwise `false`
+ */
+util.isSet = function isSet(obj, prop) {
+    var value = obj[prop];
+    if (value != null && obj.hasOwnProperty(prop)) // eslint-disable-line eqeqeq, no-prototype-builtins
+        return typeof value !== "object" || (Array.isArray(value) ? value.length : Object.keys(value).length) > 0;
+    return false;
+};
+
+/**
+ * Any compatible Buffer instance.
+ * This is a minimal stand-alone definition of a Buffer instance. The actual type is that exported by node's typings.
+ * @interface Buffer
+ * @extends Uint8Array
+ */
+
+/**
+ * Node's Buffer class if available.
+ * @type {Constructor<Buffer>}
+ */
+util.Buffer = (function() {
+    try {
+        var Buffer = util.inquire("buffer").Buffer;
+        // refuse to use non-node buffers if not explicitly assigned (perf reasons):
+        return Buffer.prototype.utf8Write ? Buffer : /* istanbul ignore next */ null;
+    } catch (e) {
+        /* istanbul ignore next */
+        return null;
+    }
+})();
+
+// Internal alias of or polyfull for Buffer.from.
+util._Buffer_from = null;
+
+// Internal alias of or polyfill for Buffer.allocUnsafe.
+util._Buffer_allocUnsafe = null;
+
+/**
+ * Creates a new buffer of whatever type supported by the environment.
+ * @param {number|number[]} [sizeOrArray=0] Buffer size or number array
+ * @returns {Uint8Array|Buffer} Buffer
+ */
+util.newBuffer = function newBuffer(sizeOrArray) {
+    /* istanbul ignore next */
+    return typeof sizeOrArray === "number"
+        ? util.Buffer
+            ? util._Buffer_allocUnsafe(sizeOrArray)
+            : new util.Array(sizeOrArray)
+        : util.Buffer
+            ? util._Buffer_from(sizeOrArray)
+            : typeof Uint8Array === "undefined"
+                ? sizeOrArray
+                : new Uint8Array(sizeOrArray);
+};
+
+/**
+ * Array implementation used in the browser. `Uint8Array` if supported, otherwise `Array`.
+ * @type {Constructor<Uint8Array>}
+ */
+util.Array = typeof Uint8Array !== "undefined" ? Uint8Array /* istanbul ignore next */ : Array;
+
+/**
+ * Any compatible Long instance.
+ * This is a minimal stand-alone definition of a Long instance. The actual type is that exported by long.js.
+ * @interface Long
+ * @property {number} low Low bits
+ * @property {number} high High bits
+ * @property {boolean} unsigned Whether unsigned or not
+ */
+
+/**
+ * Long.js's Long class if available.
+ * @type {Constructor<Long>}
+ */
+util.Long = /* istanbul ignore next */ global.dcodeIO && /* istanbul ignore next */ global.dcodeIO.Long || util.inquire("long");
+
+/**
+ * Regular expression used to verify 2 bit (`bool`) map keys.
+ * @type {RegExp}
+ * @const
+ */
+util.key2Re = /^true|false|0|1$/;
+
+/**
+ * Regular expression used to verify 32 bit (`int32` etc.) map keys.
+ * @type {RegExp}
+ * @const
+ */
+util.key32Re = /^-?(?:0|[1-9][0-9]*)$/;
+
+/**
+ * Regular expression used to verify 64 bit (`int64` etc.) map keys.
+ * @type {RegExp}
+ * @const
+ */
+util.key64Re = /^(?:[\\x00-\\xff]{8}|-?(?:0|[1-9][0-9]*))$/;
+
+/**
+ * Converts a number or long to an 8 characters long hash string.
+ * @param {Long|number} value Value to convert
+ * @returns {string} Hash
+ */
+util.longToHash = function longToHash(value) {
+    return value
+        ? util.LongBits.from(value).toHash()
+        : util.LongBits.zeroHash;
+};
+
+/**
+ * Converts an 8 characters long hash string to a long or number.
+ * @param {string} hash Hash
+ * @param {boolean} [unsigned=false] Whether unsigned or not
+ * @returns {Long|number} Original value
+ */
+util.longFromHash = function longFromHash(hash, unsigned) {
+    var bits = util.LongBits.fromHash(hash);
+    if (util.Long)
+        return util.Long.fromBits(bits.lo, bits.hi, unsigned);
+    return bits.toNumber(Boolean(unsigned));
+};
+
+/**
+ * Merges the properties of the source object into the destination object.
+ * @memberof util
+ * @param {Object.<string,*>} dst Destination object
+ * @param {Object.<string,*>} src Source object
+ * @param {boolean} [ifNotSet=false] Merges only if the key is not already set
+ * @returns {Object.<string,*>} Destination object
+ */
+function merge(dst, src, ifNotSet) { // used by converters
+    for (var keys = Object.keys(src), i = 0; i < keys.length; ++i)
+        if (dst[keys[i]] === undefined || !ifNotSet)
+            dst[keys[i]] = src[keys[i]];
+    return dst;
+}
+
+util.merge = merge;
+
+/**
+ * Converts the first character of a string to lower case.
+ * @param {string} str String to convert
+ * @returns {string} Converted string
+ */
+util.lcFirst = function lcFirst(str) {
+    return str.charAt(0).toLowerCase() + str.substring(1);
+};
+
+/**
+ * Creates a custom error constructor.
+ * @memberof util
+ * @param {string} name Error name
+ * @returns {Constructor<Error>} Custom error constructor
+ */
+function newError(name) {
+
+    function CustomError(message, properties) {
+
+        if (!(this instanceof CustomError))
+            return new CustomError(message, properties);
+
+        // Error.call(this, message);
+        // ^ just returns a new error instance because the ctor can be called as a function
+
+        Object.defineProperty(this, "message", { get: function() { return message; } });
+
+        /* istanbul ignore next */
+        if (Error.captureStackTrace) // node
+            Error.captureStackTrace(this, CustomError);
+        else
+            Object.defineProperty(this, "stack", { value: (new Error()).stack || "" });
+
+        if (properties)
+            merge(this, properties);
+    }
+
+    (CustomError.prototype = Object.create(Error.prototype)).constructor = CustomError;
+
+    Object.defineProperty(CustomError.prototype, "name", { get: function() { return name; } });
+
+    CustomError.prototype.toString = function toString() {
+        return this.name + ": " + this.message;
+    };
+
+    return CustomError;
+}
+
+util.newError = newError;
+
+/**
+ * Constructs a new protocol error.
+ * @classdesc Error subclass indicating a protocol specifc error.
+ * @memberof util
+ * @extends Error
+ * @template T extends Message<T>
+ * @constructor
+ * @param {string} message Error message
+ * @param {Object.<string,*>} [properties] Additional properties
+ * @example
+ * try {
+ *     MyMessage.decode(someBuffer); // throws if required fields are missing
+ * } catch (e) {
+ *     if (e instanceof ProtocolError && e.instance)
+ *         console.log("decoded so far: " + JSON.stringify(e.instance));
+ * }
+ */
+util.ProtocolError = newError("ProtocolError");
+
+/**
+ * So far decoded message instance.
+ * @name util.ProtocolError#instance
+ * @type {Message<T>}
+ */
+
+/**
+ * A OneOf getter as returned by {@link util.oneOfGetter}.
+ * @typedef OneOfGetter
+ * @type {function}
+ * @returns {string|undefined} Set field name, if any
+ */
+
+/**
+ * Builds a getter for a oneof's present field name.
+ * @param {string[]} fieldNames Field names
+ * @returns {OneOfGetter} Unbound getter
+ */
+util.oneOfGetter = function getOneOf(fieldNames) {
+    var fieldMap = {};
+    for (var i = 0; i < fieldNames.length; ++i)
+        fieldMap[fieldNames[i]] = 1;
+
+    /**
+     * @returns {string|undefined} Set field name, if any
+     * @this Object
+     * @ignore
+     */
+    return function() { // eslint-disable-line consistent-return
+        for (var keys = Object.keys(this), i = keys.length - 1; i > -1; --i)
+            if (fieldMap[keys[i]] === 1 && this[keys[i]] !== undefined && this[keys[i]] !== null)
+                return keys[i];
+    };
+};
+
+/**
+ * A OneOf setter as returned by {@link util.oneOfSetter}.
+ * @typedef OneOfSetter
+ * @type {function}
+ * @param {string|undefined} value Field name
+ * @returns {undefined}
+ */
+
+/**
+ * Builds a setter for a oneof's present field name.
+ * @param {string[]} fieldNames Field names
+ * @returns {OneOfSetter} Unbound setter
+ */
+util.oneOfSetter = function setOneOf(fieldNames) {
+
+    /**
+     * @param {string} name Field name
+     * @returns {undefined}
+     * @this Object
+     * @ignore
+     */
+    return function(name) {
+        for (var i = 0; i < fieldNames.length; ++i)
+            if (fieldNames[i] !== name)
+                delete this[fieldNames[i]];
+    };
+};
+
+/**
+ * Default conversion options used for {@link Message#toJSON} implementations.
+ *
+ * These options are close to proto3's JSON mapping with the exception that internal types like Any are handled just like messages. More precisely:
+ *
+ * - Longs become strings
+ * - Enums become string keys
+ * - Bytes become base64 encoded strings
+ * - (Sub-)Messages become plain objects
+ * - Maps become plain objects with all string keys
+ * - Repeated fields become arrays
+ * - NaN and Infinity for float and double fields become strings
+ *
+ * @type {IConversionOptions}
+ * @see https://developers.google.com/protocol-buffers/docs/proto3?hl=en#json
+ */
+util.toJSONOptions = {
+    longs: String,
+    enums: String,
+    bytes: String,
+    json: true
+};
+
+util._configure = function() {
+    var Buffer = util.Buffer;
+    /* istanbul ignore if */
+    if (!Buffer) {
+        util._Buffer_from = util._Buffer_allocUnsafe = null;
+        return;
+    }
+    // because node 4.x buffers are incompatible & immutable
+    // see: https://github.com/dcodeIO/protobuf.js/pull/665
+    util._Buffer_from = Buffer.from !== Uint8Array.from && Buffer.from ||
+        /* istanbul ignore next */
+        function Buffer_from(value, encoding) {
+            return new Buffer(value, encoding);
+        };
+    util._Buffer_allocUnsafe = Buffer.allocUnsafe ||
+        /* istanbul ignore next */
+        function Buffer_allocUnsafe(size) {
+            return new Buffer(size);
+        };
+};
+
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{"./longbits":50,"@protobufjs/aspromise":9,"@protobufjs/base64":10,"@protobufjs/eventemitter":11,"@protobufjs/float":12,"@protobufjs/inquire":13,"@protobufjs/pool":14,"@protobufjs/utf8":15}],52:[function(require,module,exports){
+"use strict";
+module.exports = Writer;
+
+var util      = require("./util/minimal");
+
+var BufferWriter; // cyclic
+
+var LongBits  = util.LongBits,
+    base64    = util.base64,
+    utf8      = util.utf8;
+
+/**
+ * Constructs a new writer operation instance.
+ * @classdesc Scheduled writer operation.
+ * @constructor
+ * @param {function(*, Uint8Array, number)} fn Function to call
+ * @param {number} len Value byte length
+ * @param {*} val Value to write
+ * @ignore
+ */
+function Op(fn, len, val) {
+
+    /**
+     * Function to call.
+     * @type {function(Uint8Array, number, *)}
+     */
+    this.fn = fn;
+
+    /**
+     * Value byte length.
+     * @type {number}
+     */
+    this.len = len;
+
+    /**
+     * Next operation.
+     * @type {Writer.Op|undefined}
+     */
+    this.next = undefined;
+
+    /**
+     * Value to write.
+     * @type {*}
+     */
+    this.val = val; // type varies
+}
+
+/* istanbul ignore next */
+function noop() {} // eslint-disable-line no-empty-function
+
+/**
+ * Constructs a new writer state instance.
+ * @classdesc Copied writer state.
+ * @memberof Writer
+ * @constructor
+ * @param {Writer} writer Writer to copy state from
+ * @ignore
+ */
+function State(writer) {
+
+    /**
+     * Current head.
+     * @type {Writer.Op}
+     */
+    this.head = writer.head;
+
+    /**
+     * Current tail.
+     * @type {Writer.Op}
+     */
+    this.tail = writer.tail;
+
+    /**
+     * Current buffer length.
+     * @type {number}
+     */
+    this.len = writer.len;
+
+    /**
+     * Next state.
+     * @type {State|null}
+     */
+    this.next = writer.states;
+}
+
+/**
+ * Constructs a new writer instance.
+ * @classdesc Wire format writer using `Uint8Array` if available, otherwise `Array`.
+ * @constructor
+ */
+function Writer() {
+
+    /**
+     * Current length.
+     * @type {number}
+     */
+    this.len = 0;
+
+    /**
+     * Operations head.
+     * @type {Object}
+     */
+    this.head = new Op(noop, 0, 0);
+
+    /**
+     * Operations tail
+     * @type {Object}
+     */
+    this.tail = this.head;
+
+    /**
+     * Linked forked states.
+     * @type {Object|null}
+     */
+    this.states = null;
+
+    // When a value is written, the writer calculates its byte length and puts it into a linked
+    // list of operations to perform when finish() is called. This both allows us to allocate
+    // buffers of the exact required size and reduces the amount of work we have to do compared
+    // to first calculating over objects and then encoding over objects. In our case, the encoding
+    // part is just a linked list walk calling operations with already prepared values.
+}
+
+/**
+ * Creates a new writer.
+ * @function
+ * @returns {BufferWriter|Writer} A {@link BufferWriter} when Buffers are supported, otherwise a {@link Writer}
+ */
+Writer.create = util.Buffer
+    ? function create_buffer_setup() {
+        return (Writer.create = function create_buffer() {
+            return new BufferWriter();
+        })();
+    }
+    /* istanbul ignore next */
+    : function create_array() {
+        return new Writer();
+    };
+
+/**
+ * Allocates a buffer of the specified size.
+ * @param {number} size Buffer size
+ * @returns {Uint8Array} Buffer
+ */
+Writer.alloc = function alloc(size) {
+    return new util.Array(size);
+};
+
+// Use Uint8Array buffer pool in the browser, just like node does with buffers
+/* istanbul ignore else */
+if (util.Array !== Array)
+    Writer.alloc = util.pool(Writer.alloc, util.Array.prototype.subarray);
+
+/**
+ * Pushes a new operation to the queue.
+ * @param {function(Uint8Array, number, *)} fn Function to call
+ * @param {number} len Value byte length
+ * @param {number} val Value to write
+ * @returns {Writer} `this`
+ * @private
+ */
+Writer.prototype._push = function push(fn, len, val) {
+    this.tail = this.tail.next = new Op(fn, len, val);
+    this.len += len;
+    return this;
+};
+
+function writeByte(val, buf, pos) {
+    buf[pos] = val & 255;
+}
+
+function writeVarint32(val, buf, pos) {
+    while (val > 127) {
+        buf[pos++] = val & 127 | 128;
+        val >>>= 7;
+    }
+    buf[pos] = val;
+}
+
+/**
+ * Constructs a new varint writer operation instance.
+ * @classdesc Scheduled varint writer operation.
+ * @extends Op
+ * @constructor
+ * @param {number} len Value byte length
+ * @param {number} val Value to write
+ * @ignore
+ */
+function VarintOp(len, val) {
+    this.len = len;
+    this.next = undefined;
+    this.val = val;
+}
+
+VarintOp.prototype = Object.create(Op.prototype);
+VarintOp.prototype.fn = writeVarint32;
+
+/**
+ * Writes an unsigned 32 bit value as a varint.
+ * @param {number} value Value to write
+ * @returns {Writer} `this`
+ */
+Writer.prototype.uint32 = function write_uint32(value) {
+    // here, the call to this.push has been inlined and a varint specific Op subclass is used.
+    // uint32 is by far the most frequently used operation and benefits significantly from this.
+    this.len += (this.tail = this.tail.next = new VarintOp(
+        (value = value >>> 0)
+                < 128       ? 1
+        : value < 16384     ? 2
+        : value < 2097152   ? 3
+        : value < 268435456 ? 4
+        :                     5,
+    value)).len;
+    return this;
+};
+
+/**
+ * Writes a signed 32 bit value as a varint.
+ * @function
+ * @param {number} value Value to write
+ * @returns {Writer} `this`
+ */
+Writer.prototype.int32 = function write_int32(value) {
+    return value < 0
+        ? this._push(writeVarint64, 10, LongBits.fromNumber(value)) // 10 bytes per spec
+        : this.uint32(value);
+};
+
+/**
+ * Writes a 32 bit value as a varint, zig-zag encoded.
+ * @param {number} value Value to write
+ * @returns {Writer} `this`
+ */
+Writer.prototype.sint32 = function write_sint32(value) {
+    return this.uint32((value << 1 ^ value >> 31) >>> 0);
+};
+
+function writeVarint64(val, buf, pos) {
+    while (val.hi) {
+        buf[pos++] = val.lo & 127 | 128;
+        val.lo = (val.lo >>> 7 | val.hi << 25) >>> 0;
+        val.hi >>>= 7;
+    }
+    while (val.lo > 127) {
+        buf[pos++] = val.lo & 127 | 128;
+        val.lo = val.lo >>> 7;
+    }
+    buf[pos++] = val.lo;
+}
+
+/**
+ * Writes an unsigned 64 bit value as a varint.
+ * @param {Long|number|string} value Value to write
+ * @returns {Writer} `this`
+ * @throws {TypeError} If `value` is a string and no long library is present.
+ */
+Writer.prototype.uint64 = function write_uint64(value) {
+    var bits = LongBits.from(value);
+    return this._push(writeVarint64, bits.length(), bits);
+};
+
+/**
+ * Writes a signed 64 bit value as a varint.
+ * @function
+ * @param {Long|number|string} value Value to write
+ * @returns {Writer} `this`
+ * @throws {TypeError} If `value` is a string and no long library is present.
+ */
+Writer.prototype.int64 = Writer.prototype.uint64;
+
+/**
+ * Writes a signed 64 bit value as a varint, zig-zag encoded.
+ * @param {Long|number|string} value Value to write
+ * @returns {Writer} `this`
+ * @throws {TypeError} If `value` is a string and no long library is present.
+ */
+Writer.prototype.sint64 = function write_sint64(value) {
+    var bits = LongBits.from(value).zzEncode();
+    return this._push(writeVarint64, bits.length(), bits);
+};
+
+/**
+ * Writes a boolish value as a varint.
+ * @param {boolean} value Value to write
+ * @returns {Writer} `this`
+ */
+Writer.prototype.bool = function write_bool(value) {
+    return this._push(writeByte, 1, value ? 1 : 0);
+};
+
+function writeFixed32(val, buf, pos) {
+    buf[pos    ] =  val         & 255;
+    buf[pos + 1] =  val >>> 8   & 255;
+    buf[pos + 2] =  val >>> 16  & 255;
+    buf[pos + 3] =  val >>> 24;
+}
+
+/**
+ * Writes an unsigned 32 bit value as fixed 32 bits.
+ * @param {number} value Value to write
+ * @returns {Writer} `this`
+ */
+Writer.prototype.fixed32 = function write_fixed32(value) {
+    return this._push(writeFixed32, 4, value >>> 0);
+};
+
+/**
+ * Writes a signed 32 bit value as fixed 32 bits.
+ * @function
+ * @param {number} value Value to write
+ * @returns {Writer} `this`
+ */
+Writer.prototype.sfixed32 = Writer.prototype.fixed32;
+
+/**
+ * Writes an unsigned 64 bit value as fixed 64 bits.
+ * @param {Long|number|string} value Value to write
+ * @returns {Writer} `this`
+ * @throws {TypeError} If `value` is a string and no long library is present.
+ */
+Writer.prototype.fixed64 = function write_fixed64(value) {
+    var bits = LongBits.from(value);
+    return this._push(writeFixed32, 4, bits.lo)._push(writeFixed32, 4, bits.hi);
+};
+
+/**
+ * Writes a signed 64 bit value as fixed 64 bits.
+ * @function
+ * @param {Long|number|string} value Value to write
+ * @returns {Writer} `this`
+ * @throws {TypeError} If `value` is a string and no long library is present.
+ */
+Writer.prototype.sfixed64 = Writer.prototype.fixed64;
+
+/**
+ * Writes a float (32 bit).
+ * @function
+ * @param {number} value Value to write
+ * @returns {Writer} `this`
+ */
+Writer.prototype.float = function write_float(value) {
+    return this._push(util.float.writeFloatLE, 4, value);
+};
+
+/**
+ * Writes a double (64 bit float).
+ * @function
+ * @param {number} value Value to write
+ * @returns {Writer} `this`
+ */
+Writer.prototype.double = function write_double(value) {
+    return this._push(util.float.writeDoubleLE, 8, value);
+};
+
+var writeBytes = util.Array.prototype.set
+    ? function writeBytes_set(val, buf, pos) {
+        buf.set(val, pos); // also works for plain array values
+    }
+    /* istanbul ignore next */
+    : function writeBytes_for(val, buf, pos) {
+        for (var i = 0; i < val.length; ++i)
+            buf[pos + i] = val[i];
+    };
+
+/**
+ * Writes a sequence of bytes.
+ * @param {Uint8Array|string} value Buffer or base64 encoded string to write
+ * @returns {Writer} `this`
+ */
+Writer.prototype.bytes = function write_bytes(value) {
+    var len = value.length >>> 0;
+    if (!len)
+        return this._push(writeByte, 1, 0);
+    if (util.isString(value)) {
+        var buf = Writer.alloc(len = base64.length(value));
+        base64.decode(value, buf, 0);
+        value = buf;
+    }
+    return this.uint32(len)._push(writeBytes, len, value);
+};
+
+/**
+ * Writes a string.
+ * @param {string} value Value to write
+ * @returns {Writer} `this`
+ */
+Writer.prototype.string = function write_string(value) {
+    var len = utf8.length(value);
+    return len
+        ? this.uint32(len)._push(utf8.write, len, value)
+        : this._push(writeByte, 1, 0);
+};
+
+/**
+ * Forks this writer's state by pushing it to a stack.
+ * Calling {@link Writer#reset|reset} or {@link Writer#ldelim|ldelim} resets the writer to the previous state.
+ * @returns {Writer} `this`
+ */
+Writer.prototype.fork = function fork() {
+    this.states = new State(this);
+    this.head = this.tail = new Op(noop, 0, 0);
+    this.len = 0;
+    return this;
+};
+
+/**
+ * Resets this instance to the last state.
+ * @returns {Writer} `this`
+ */
+Writer.prototype.reset = function reset() {
+    if (this.states) {
+        this.head   = this.states.head;
+        this.tail   = this.states.tail;
+        this.len    = this.states.len;
+        this.states = this.states.next;
+    } else {
+        this.head = this.tail = new Op(noop, 0, 0);
+        this.len  = 0;
+    }
+    return this;
+};
+
+/**
+ * Resets to the last state and appends the fork state's current write length as a varint followed by its operations.
+ * @returns {Writer} `this`
+ */
+Writer.prototype.ldelim = function ldelim() {
+    var head = this.head,
+        tail = this.tail,
+        len  = this.len;
+    this.reset().uint32(len);
+    if (len) {
+        this.tail.next = head.next; // skip noop
+        this.tail = tail;
+        this.len += len;
+    }
+    return this;
+};
+
+/**
+ * Finishes the write operation.
+ * @returns {Uint8Array} Finished buffer
+ */
+Writer.prototype.finish = function finish() {
+    var head = this.head.next, // skip noop
+        buf  = this.constructor.alloc(this.len),
+        pos  = 0;
+    while (head) {
+        head.fn(head.val, buf, pos);
+        pos += head.len;
+        head = head.next;
+    }
+    // this.head = this.tail = null;
+    return buf;
+};
+
+Writer._configure = function(BufferWriter_) {
+    BufferWriter = BufferWriter_;
+};
+
+},{"./util/minimal":51}],53:[function(require,module,exports){
+"use strict";
+module.exports = BufferWriter;
+
+// extends Writer
+var Writer = require("./writer");
+(BufferWriter.prototype = Object.create(Writer.prototype)).constructor = BufferWriter;
+
+var util = require("./util/minimal");
+
+var Buffer = util.Buffer;
+
+/**
+ * Constructs a new buffer writer instance.
+ * @classdesc Wire format writer using node buffers.
+ * @extends Writer
+ * @constructor
+ */
+function BufferWriter() {
+    Writer.call(this);
+}
+
+/**
+ * Allocates a buffer of the specified size.
+ * @param {number} size Buffer size
+ * @returns {Buffer} Buffer
+ */
+BufferWriter.alloc = function alloc_buffer(size) {
+    return (BufferWriter.alloc = util._Buffer_allocUnsafe)(size);
+};
+
+var writeBytesBuffer = Buffer && Buffer.prototype instanceof Uint8Array && Buffer.prototype.set.name === "set"
+    ? function writeBytesBuffer_set(val, buf, pos) {
+        buf.set(val, pos); // faster than copy (requires node >= 4 where Buffers extend Uint8Array and set is properly inherited)
+                           // also works for plain array values
+    }
+    /* istanbul ignore next */
+    : function writeBytesBuffer_copy(val, buf, pos) {
+        if (val.copy) // Buffer values
+            val.copy(buf, pos, 0, val.length);
+        else for (var i = 0; i < val.length;) // plain array values
+            buf[pos++] = val[i++];
+    };
+
+/**
+ * @override
+ */
+BufferWriter.prototype.bytes = function write_bytes_buffer(value) {
+    if (util.isString(value))
+        value = util._Buffer_from(value, "base64");
+    var len = value.length >>> 0;
+    this.uint32(len);
+    if (len)
+        this._push(writeBytesBuffer, len, value);
+    return this;
+};
+
+function writeStringBuffer(val, buf, pos) {
+    if (val.length < 40) // plain js is faster for short strings (probably due to redundant assertions)
+        util.utf8.write(val, buf, pos);
+    else
+        buf.utf8Write(val, pos);
+}
+
+/**
+ * @override
+ */
+BufferWriter.prototype.string = function write_string_buffer(value) {
+    var len = Buffer.byteLength(value);
+    this.uint32(len);
+    if (len)
+        this._push(writeStringBuffer, len, value);
+    return this;
+};
+
+
+/**
+ * Finishes the write operation.
+ * @name BufferWriter#finish
+ * @function
+ * @returns {Buffer} Finished buffer
+ */
+
+},{"./util/minimal":51,"./writer":52}],54:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -3764,7 +8341,7 @@ var QueueingSubject = (function (_super) {
 }(Subject_1.Subject));
 exports.QueueingSubject = QueueingSubject;
 
-},{"rxjs/Subject":46}],36:[function(require,module,exports){
+},{"rxjs/Subject":68}],55:[function(require,module,exports){
 (function webpackUniversalModuleDefinition(root, factory) {
 	if(typeof exports === 'object' && typeof module === 'object')
 		module.exports = factory(require("quill"));
@@ -5608,7 +10185,7 @@ module.exports = __webpack_require__(4);
 /***/ })
 /******/ ]);
 });
-},{"quill":37}],37:[function(require,module,exports){
+},{"quill":56}],56:[function(require,module,exports){
 (function (Buffer){
 /*!
  * Quill Editor v1.3.2
@@ -16905,17 +21482,17 @@ module.exports = __webpack_require__(63);
 /******/ ]);
 });
 }).call(this,require("buffer").Buffer)
-},{"buffer":9}],38:[function(require,module,exports){
+},{"buffer":17}],57:[function(require,module,exports){
 "use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("rxjs/Observable");
 var BehaviorSubject_1 = require("rxjs/BehaviorSubject");
-var defaultWebsocketFactory = function (url) { return new WebSocket(url); };
-function connect(url, input, websocketFactory, jsonParse) {
+var defaultWebsocketFactory = function (url, protocol) { return new WebSocket(url, protocol); };
+function connect(url, input, protocols, websocketFactory) {
     if (websocketFactory === void 0) { websocketFactory = defaultWebsocketFactory; }
-    if (jsonParse === void 0) { jsonParse = true; }
     var connectionStatus = new BehaviorSubject_1.BehaviorSubject(0);
     var messages = new Observable_1.Observable(function (observer) {
-        var socket = websocketFactory(url);
+        var socket = websocketFactory(url, protocols);
         var inputSubscription;
         var open = false;
         var closed = function () {
@@ -16928,13 +21505,11 @@ function connect(url, input, websocketFactory, jsonParse) {
             open = true;
             connectionStatus.next(connectionStatus.getValue() + 1);
             inputSubscription = input.subscribe(function (data) {
-                var sendData = jsonParse ? JSON.stringify(data) : data;
-                socket.send(sendData);
+                socket.send(data);
             });
         };
         socket.onmessage = function (message) {
-            var nextData = jsonParse ? JSON.parse(message.data) : message.data;
-            observer.next(nextData);
+            observer.next(message.data);
         };
         socket.onerror = function (error) {
             closed();
@@ -16958,10 +21533,63 @@ function connect(url, input, websocketFactory, jsonParse) {
     });
     return { messages: messages, connectionStatus: connectionStatus };
 }
-Object.defineProperty(exports, "__esModule", { value: true });
 exports.default = connect;
 
-},{"rxjs/BehaviorSubject":39,"rxjs/Observable":42}],39:[function(require,module,exports){
+},{"rxjs/BehaviorSubject":59,"rxjs/Observable":62}],58:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subject_1 = require('./Subject');
+var Subscription_1 = require('./Subscription');
+/**
+ * @class AsyncSubject<T>
+ */
+var AsyncSubject = (function (_super) {
+    __extends(AsyncSubject, _super);
+    function AsyncSubject() {
+        _super.apply(this, arguments);
+        this.value = null;
+        this.hasNext = false;
+        this.hasCompleted = false;
+    }
+    AsyncSubject.prototype._subscribe = function (subscriber) {
+        if (this.hasError) {
+            subscriber.error(this.thrownError);
+            return Subscription_1.Subscription.EMPTY;
+        }
+        else if (this.hasCompleted && this.hasNext) {
+            subscriber.next(this.value);
+            subscriber.complete();
+            return Subscription_1.Subscription.EMPTY;
+        }
+        return _super.prototype._subscribe.call(this, subscriber);
+    };
+    AsyncSubject.prototype.next = function (value) {
+        if (!this.hasCompleted) {
+            this.value = value;
+            this.hasNext = true;
+        }
+    };
+    AsyncSubject.prototype.error = function (error) {
+        if (!this.hasCompleted) {
+            _super.prototype.error.call(this, error);
+        }
+    };
+    AsyncSubject.prototype.complete = function () {
+        this.hasCompleted = true;
+        if (this.hasNext) {
+            _super.prototype.next.call(this, this.value);
+        }
+        _super.prototype.complete.call(this);
+    };
+    return AsyncSubject;
+}(Subject_1.Subject));
+exports.AsyncSubject = AsyncSubject;
+
+},{"./Subject":68,"./Subscription":71}],59:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17011,7 +21639,7 @@ var BehaviorSubject = (function (_super) {
 }(Subject_1.Subject));
 exports.BehaviorSubject = BehaviorSubject;
 
-},{"./Subject":46,"./util/ObjectUnsubscribedError":63}],40:[function(require,module,exports){
+},{"./Subject":68,"./util/ObjectUnsubscribedError":385}],60:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17048,7 +21676,7 @@ var InnerSubscriber = (function (_super) {
 }(Subscriber_1.Subscriber));
 exports.InnerSubscriber = InnerSubscriber;
 
-},{"./Subscriber":48}],41:[function(require,module,exports){
+},{"./Subscriber":70}],61:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('./Observable');
 /**
@@ -17176,7 +21804,7 @@ var Notification = (function () {
 }());
 exports.Notification = Notification;
 
-},{"./Observable":42}],42:[function(require,module,exports){
+},{"./Observable":62}],62:[function(require,module,exports){
 "use strict";
 var root_1 = require('./util/root');
 var toSubscriber_1 = require('./util/toSubscriber');
@@ -17433,7 +22061,7 @@ var Observable = (function () {
 }());
 exports.Observable = Observable;
 
-},{"./symbol/observable":61,"./util/root":72,"./util/toSubscriber":74}],43:[function(require,module,exports){
+},{"./symbol/observable":371,"./util/root":402,"./util/toSubscriber":404}],63:[function(require,module,exports){
 "use strict";
 exports.empty = {
     closed: true,
@@ -17442,7 +22070,7 @@ exports.empty = {
     complete: function () { }
 };
 
-},{}],44:[function(require,module,exports){
+},{}],64:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17473,7 +22101,340 @@ var OuterSubscriber = (function (_super) {
 }(Subscriber_1.Subscriber));
 exports.OuterSubscriber = OuterSubscriber;
 
-},{"./Subscriber":48}],45:[function(require,module,exports){
+},{"./Subscriber":70}],65:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subject_1 = require('./Subject');
+var queue_1 = require('./scheduler/queue');
+var Subscription_1 = require('./Subscription');
+var observeOn_1 = require('./operator/observeOn');
+var ObjectUnsubscribedError_1 = require('./util/ObjectUnsubscribedError');
+var SubjectSubscription_1 = require('./SubjectSubscription');
+/**
+ * @class ReplaySubject<T>
+ */
+var ReplaySubject = (function (_super) {
+    __extends(ReplaySubject, _super);
+    function ReplaySubject(bufferSize, windowTime, scheduler) {
+        if (bufferSize === void 0) { bufferSize = Number.POSITIVE_INFINITY; }
+        if (windowTime === void 0) { windowTime = Number.POSITIVE_INFINITY; }
+        _super.call(this);
+        this.scheduler = scheduler;
+        this._events = [];
+        this._bufferSize = bufferSize < 1 ? 1 : bufferSize;
+        this._windowTime = windowTime < 1 ? 1 : windowTime;
+    }
+    ReplaySubject.prototype.next = function (value) {
+        var now = this._getNow();
+        this._events.push(new ReplayEvent(now, value));
+        this._trimBufferThenGetEvents();
+        _super.prototype.next.call(this, value);
+    };
+    ReplaySubject.prototype._subscribe = function (subscriber) {
+        var _events = this._trimBufferThenGetEvents();
+        var scheduler = this.scheduler;
+        var subscription;
+        if (this.closed) {
+            throw new ObjectUnsubscribedError_1.ObjectUnsubscribedError();
+        }
+        else if (this.hasError) {
+            subscription = Subscription_1.Subscription.EMPTY;
+        }
+        else if (this.isStopped) {
+            subscription = Subscription_1.Subscription.EMPTY;
+        }
+        else {
+            this.observers.push(subscriber);
+            subscription = new SubjectSubscription_1.SubjectSubscription(this, subscriber);
+        }
+        if (scheduler) {
+            subscriber.add(subscriber = new observeOn_1.ObserveOnSubscriber(subscriber, scheduler));
+        }
+        var len = _events.length;
+        for (var i = 0; i < len && !subscriber.closed; i++) {
+            subscriber.next(_events[i].value);
+        }
+        if (this.hasError) {
+            subscriber.error(this.thrownError);
+        }
+        else if (this.isStopped) {
+            subscriber.complete();
+        }
+        return subscription;
+    };
+    ReplaySubject.prototype._getNow = function () {
+        return (this.scheduler || queue_1.queue).now();
+    };
+    ReplaySubject.prototype._trimBufferThenGetEvents = function () {
+        var now = this._getNow();
+        var _bufferSize = this._bufferSize;
+        var _windowTime = this._windowTime;
+        var _events = this._events;
+        var eventsCount = _events.length;
+        var spliceCount = 0;
+        // Trim events that fall out of the time window.
+        // Start at the front of the list. Break early once
+        // we encounter an event that falls within the window.
+        while (spliceCount < eventsCount) {
+            if ((now - _events[spliceCount].time) < _windowTime) {
+                break;
+            }
+            spliceCount++;
+        }
+        if (eventsCount > _bufferSize) {
+            spliceCount = Math.max(spliceCount, eventsCount - _bufferSize);
+        }
+        if (spliceCount > 0) {
+            _events.splice(0, spliceCount);
+        }
+        return _events;
+    };
+    return ReplaySubject;
+}(Subject_1.Subject));
+exports.ReplaySubject = ReplaySubject;
+var ReplayEvent = (function () {
+    function ReplayEvent(time, value) {
+        this.time = time;
+        this.value = value;
+    }
+    return ReplayEvent;
+}());
+
+},{"./Subject":68,"./SubjectSubscription":69,"./Subscription":71,"./operator/observeOn":305,"./scheduler/queue":369,"./util/ObjectUnsubscribedError":385}],66:[function(require,module,exports){
+"use strict";
+/* tslint:disable:no-unused-variable */
+// Subject imported before Observable to bypass circular dependency issue since
+// Subject extends Observable and Observable references Subject in it's
+// definition
+var Subject_1 = require('./Subject');
+exports.Subject = Subject_1.Subject;
+exports.AnonymousSubject = Subject_1.AnonymousSubject;
+/* tslint:enable:no-unused-variable */
+var Observable_1 = require('./Observable');
+exports.Observable = Observable_1.Observable;
+// statics
+/* tslint:disable:no-use-before-declare */
+require('./add/observable/bindCallback');
+require('./add/observable/bindNodeCallback');
+require('./add/observable/combineLatest');
+require('./add/observable/concat');
+require('./add/observable/defer');
+require('./add/observable/empty');
+require('./add/observable/forkJoin');
+require('./add/observable/from');
+require('./add/observable/fromEvent');
+require('./add/observable/fromEventPattern');
+require('./add/observable/fromPromise');
+require('./add/observable/generate');
+require('./add/observable/if');
+require('./add/observable/interval');
+require('./add/observable/merge');
+require('./add/observable/race');
+require('./add/observable/never');
+require('./add/observable/of');
+require('./add/observable/onErrorResumeNext');
+require('./add/observable/pairs');
+require('./add/observable/range');
+require('./add/observable/using');
+require('./add/observable/throw');
+require('./add/observable/timer');
+require('./add/observable/zip');
+//dom
+require('./add/observable/dom/ajax');
+require('./add/observable/dom/webSocket');
+//operators
+require('./add/operator/buffer');
+require('./add/operator/bufferCount');
+require('./add/operator/bufferTime');
+require('./add/operator/bufferToggle');
+require('./add/operator/bufferWhen');
+require('./add/operator/catch');
+require('./add/operator/combineAll');
+require('./add/operator/combineLatest');
+require('./add/operator/concat');
+require('./add/operator/concatAll');
+require('./add/operator/concatMap');
+require('./add/operator/concatMapTo');
+require('./add/operator/count');
+require('./add/operator/dematerialize');
+require('./add/operator/debounce');
+require('./add/operator/debounceTime');
+require('./add/operator/defaultIfEmpty');
+require('./add/operator/delay');
+require('./add/operator/delayWhen');
+require('./add/operator/distinct');
+require('./add/operator/distinctUntilChanged');
+require('./add/operator/distinctUntilKeyChanged');
+require('./add/operator/do');
+require('./add/operator/exhaust');
+require('./add/operator/exhaustMap');
+require('./add/operator/expand');
+require('./add/operator/elementAt');
+require('./add/operator/filter');
+require('./add/operator/finally');
+require('./add/operator/find');
+require('./add/operator/findIndex');
+require('./add/operator/first');
+require('./add/operator/groupBy');
+require('./add/operator/ignoreElements');
+require('./add/operator/isEmpty');
+require('./add/operator/audit');
+require('./add/operator/auditTime');
+require('./add/operator/last');
+require('./add/operator/let');
+require('./add/operator/every');
+require('./add/operator/map');
+require('./add/operator/mapTo');
+require('./add/operator/materialize');
+require('./add/operator/max');
+require('./add/operator/merge');
+require('./add/operator/mergeAll');
+require('./add/operator/mergeMap');
+require('./add/operator/mergeMapTo');
+require('./add/operator/mergeScan');
+require('./add/operator/min');
+require('./add/operator/multicast');
+require('./add/operator/observeOn');
+require('./add/operator/onErrorResumeNext');
+require('./add/operator/pairwise');
+require('./add/operator/partition');
+require('./add/operator/pluck');
+require('./add/operator/publish');
+require('./add/operator/publishBehavior');
+require('./add/operator/publishReplay');
+require('./add/operator/publishLast');
+require('./add/operator/race');
+require('./add/operator/reduce');
+require('./add/operator/repeat');
+require('./add/operator/repeatWhen');
+require('./add/operator/retry');
+require('./add/operator/retryWhen');
+require('./add/operator/sample');
+require('./add/operator/sampleTime');
+require('./add/operator/scan');
+require('./add/operator/sequenceEqual');
+require('./add/operator/share');
+require('./add/operator/shareReplay');
+require('./add/operator/single');
+require('./add/operator/skip');
+require('./add/operator/skipLast');
+require('./add/operator/skipUntil');
+require('./add/operator/skipWhile');
+require('./add/operator/startWith');
+require('./add/operator/subscribeOn');
+require('./add/operator/switch');
+require('./add/operator/switchMap');
+require('./add/operator/switchMapTo');
+require('./add/operator/take');
+require('./add/operator/takeLast');
+require('./add/operator/takeUntil');
+require('./add/operator/takeWhile');
+require('./add/operator/throttle');
+require('./add/operator/throttleTime');
+require('./add/operator/timeInterval');
+require('./add/operator/timeout');
+require('./add/operator/timeoutWith');
+require('./add/operator/timestamp');
+require('./add/operator/toArray');
+require('./add/operator/toPromise');
+require('./add/operator/window');
+require('./add/operator/windowCount');
+require('./add/operator/windowTime');
+require('./add/operator/windowToggle');
+require('./add/operator/windowWhen');
+require('./add/operator/withLatestFrom');
+require('./add/operator/zip');
+require('./add/operator/zipAll');
+/* tslint:disable:no-unused-variable */
+var Subscription_1 = require('./Subscription');
+exports.Subscription = Subscription_1.Subscription;
+var Subscriber_1 = require('./Subscriber');
+exports.Subscriber = Subscriber_1.Subscriber;
+var AsyncSubject_1 = require('./AsyncSubject');
+exports.AsyncSubject = AsyncSubject_1.AsyncSubject;
+var ReplaySubject_1 = require('./ReplaySubject');
+exports.ReplaySubject = ReplaySubject_1.ReplaySubject;
+var BehaviorSubject_1 = require('./BehaviorSubject');
+exports.BehaviorSubject = BehaviorSubject_1.BehaviorSubject;
+var ConnectableObservable_1 = require('./observable/ConnectableObservable');
+exports.ConnectableObservable = ConnectableObservable_1.ConnectableObservable;
+var Notification_1 = require('./Notification');
+exports.Notification = Notification_1.Notification;
+var EmptyError_1 = require('./util/EmptyError');
+exports.EmptyError = EmptyError_1.EmptyError;
+var ArgumentOutOfRangeError_1 = require('./util/ArgumentOutOfRangeError');
+exports.ArgumentOutOfRangeError = ArgumentOutOfRangeError_1.ArgumentOutOfRangeError;
+var ObjectUnsubscribedError_1 = require('./util/ObjectUnsubscribedError');
+exports.ObjectUnsubscribedError = ObjectUnsubscribedError_1.ObjectUnsubscribedError;
+var TimeoutError_1 = require('./util/TimeoutError');
+exports.TimeoutError = TimeoutError_1.TimeoutError;
+var UnsubscriptionError_1 = require('./util/UnsubscriptionError');
+exports.UnsubscriptionError = UnsubscriptionError_1.UnsubscriptionError;
+var timeInterval_1 = require('./operator/timeInterval');
+exports.TimeInterval = timeInterval_1.TimeInterval;
+var timestamp_1 = require('./operator/timestamp');
+exports.Timestamp = timestamp_1.Timestamp;
+var TestScheduler_1 = require('./testing/TestScheduler');
+exports.TestScheduler = TestScheduler_1.TestScheduler;
+var VirtualTimeScheduler_1 = require('./scheduler/VirtualTimeScheduler');
+exports.VirtualTimeScheduler = VirtualTimeScheduler_1.VirtualTimeScheduler;
+var AjaxObservable_1 = require('./observable/dom/AjaxObservable');
+exports.AjaxResponse = AjaxObservable_1.AjaxResponse;
+exports.AjaxError = AjaxObservable_1.AjaxError;
+exports.AjaxTimeoutError = AjaxObservable_1.AjaxTimeoutError;
+var asap_1 = require('./scheduler/asap');
+var async_1 = require('./scheduler/async');
+var queue_1 = require('./scheduler/queue');
+var animationFrame_1 = require('./scheduler/animationFrame');
+var rxSubscriber_1 = require('./symbol/rxSubscriber');
+var iterator_1 = require('./symbol/iterator');
+var observable_1 = require('./symbol/observable');
+/* tslint:enable:no-unused-variable */
+/**
+ * @typedef {Object} Rx.Scheduler
+ * @property {Scheduler} queue Schedules on a queue in the current event frame
+ * (trampoline scheduler). Use this for iteration operations.
+ * @property {Scheduler} asap Schedules on the micro task queue, which uses the
+ * fastest transport mechanism available, either Node.js' `process.nextTick()`
+ * or Web Worker MessageChannel or setTimeout or others. Use this for
+ * asynchronous conversions.
+ * @property {Scheduler} async Schedules work with `setInterval`. Use this for
+ * time-based operations.
+ * @property {Scheduler} animationFrame Schedules work with `requestAnimationFrame`.
+ * Use this for synchronizing with the platform's painting
+ */
+var Scheduler = {
+    asap: asap_1.asap,
+    queue: queue_1.queue,
+    animationFrame: animationFrame_1.animationFrame,
+    async: async_1.async
+};
+exports.Scheduler = Scheduler;
+/**
+ * @typedef {Object} Rx.Symbol
+ * @property {Symbol|string} rxSubscriber A symbol to use as a property name to
+ * retrieve an "Rx safe" Observer from an object. "Rx safety" can be defined as
+ * an object that has all of the traits of an Rx Subscriber, including the
+ * ability to add and remove subscriptions to the subscription chain and
+ * guarantees involving event triggering (can't "next" after unsubscription,
+ * etc).
+ * @property {Symbol|string} observable A symbol to use as a property name to
+ * retrieve an Observable as defined by the [ECMAScript "Observable" spec](https://github.com/zenparsing/es-observable).
+ * @property {Symbol|string} iterator The ES6 symbol to use as a property name
+ * to retrieve an iterator from an object.
+ */
+var Symbol = {
+    rxSubscriber: rxSubscriber_1.rxSubscriber,
+    observable: observable_1.observable,
+    iterator: iterator_1.iterator
+};
+exports.Symbol = Symbol;
+
+},{"./AsyncSubject":58,"./BehaviorSubject":59,"./Notification":61,"./Observable":62,"./ReplaySubject":65,"./Subject":68,"./Subscriber":70,"./Subscription":71,"./add/observable/bindCallback":72,"./add/observable/bindNodeCallback":73,"./add/observable/combineLatest":74,"./add/observable/concat":75,"./add/observable/defer":76,"./add/observable/dom/ajax":77,"./add/observable/dom/webSocket":78,"./add/observable/empty":79,"./add/observable/forkJoin":80,"./add/observable/from":81,"./add/observable/fromEvent":82,"./add/observable/fromEventPattern":83,"./add/observable/fromPromise":84,"./add/observable/generate":85,"./add/observable/if":86,"./add/observable/interval":87,"./add/observable/merge":88,"./add/observable/never":89,"./add/observable/of":90,"./add/observable/onErrorResumeNext":91,"./add/observable/pairs":92,"./add/observable/race":93,"./add/observable/range":94,"./add/observable/throw":95,"./add/observable/timer":96,"./add/observable/using":97,"./add/observable/zip":98,"./add/operator/audit":99,"./add/operator/auditTime":100,"./add/operator/buffer":101,"./add/operator/bufferCount":102,"./add/operator/bufferTime":103,"./add/operator/bufferToggle":104,"./add/operator/bufferWhen":105,"./add/operator/catch":106,"./add/operator/combineAll":107,"./add/operator/combineLatest":108,"./add/operator/concat":109,"./add/operator/concatAll":110,"./add/operator/concatMap":111,"./add/operator/concatMapTo":112,"./add/operator/count":113,"./add/operator/debounce":114,"./add/operator/debounceTime":115,"./add/operator/defaultIfEmpty":116,"./add/operator/delay":117,"./add/operator/delayWhen":118,"./add/operator/dematerialize":119,"./add/operator/distinct":120,"./add/operator/distinctUntilChanged":121,"./add/operator/distinctUntilKeyChanged":122,"./add/operator/do":123,"./add/operator/elementAt":124,"./add/operator/every":125,"./add/operator/exhaust":126,"./add/operator/exhaustMap":127,"./add/operator/expand":128,"./add/operator/filter":129,"./add/operator/finally":130,"./add/operator/find":131,"./add/operator/findIndex":132,"./add/operator/first":133,"./add/operator/groupBy":134,"./add/operator/ignoreElements":135,"./add/operator/isEmpty":136,"./add/operator/last":137,"./add/operator/let":138,"./add/operator/map":139,"./add/operator/mapTo":140,"./add/operator/materialize":141,"./add/operator/max":142,"./add/operator/merge":143,"./add/operator/mergeAll":144,"./add/operator/mergeMap":145,"./add/operator/mergeMapTo":146,"./add/operator/mergeScan":147,"./add/operator/min":148,"./add/operator/multicast":149,"./add/operator/observeOn":150,"./add/operator/onErrorResumeNext":151,"./add/operator/pairwise":152,"./add/operator/partition":153,"./add/operator/pluck":154,"./add/operator/publish":155,"./add/operator/publishBehavior":156,"./add/operator/publishLast":157,"./add/operator/publishReplay":158,"./add/operator/race":159,"./add/operator/reduce":160,"./add/operator/repeat":161,"./add/operator/repeatWhen":162,"./add/operator/retry":163,"./add/operator/retryWhen":164,"./add/operator/sample":165,"./add/operator/sampleTime":166,"./add/operator/scan":167,"./add/operator/sequenceEqual":168,"./add/operator/share":169,"./add/operator/shareReplay":170,"./add/operator/single":171,"./add/operator/skip":172,"./add/operator/skipLast":173,"./add/operator/skipUntil":174,"./add/operator/skipWhile":175,"./add/operator/startWith":176,"./add/operator/subscribeOn":177,"./add/operator/switch":178,"./add/operator/switchMap":179,"./add/operator/switchMapTo":180,"./add/operator/take":181,"./add/operator/takeLast":182,"./add/operator/takeUntil":183,"./add/operator/takeWhile":184,"./add/operator/throttle":185,"./add/operator/throttleTime":186,"./add/operator/timeInterval":187,"./add/operator/timeout":188,"./add/operator/timeoutWith":189,"./add/operator/timestamp":190,"./add/operator/toArray":191,"./add/operator/toPromise":192,"./add/operator/window":193,"./add/operator/windowCount":194,"./add/operator/windowTime":195,"./add/operator/windowToggle":196,"./add/operator/windowWhen":197,"./add/operator/withLatestFrom":198,"./add/operator/zip":199,"./add/operator/zipAll":200,"./observable/ConnectableObservable":205,"./observable/dom/AjaxObservable":230,"./operator/timeInterval":342,"./operator/timestamp":345,"./scheduler/VirtualTimeScheduler":365,"./scheduler/animationFrame":366,"./scheduler/asap":367,"./scheduler/async":368,"./scheduler/queue":369,"./symbol/iterator":370,"./symbol/observable":371,"./symbol/rxSubscriber":372,"./testing/TestScheduler":377,"./util/ArgumentOutOfRangeError":379,"./util/EmptyError":380,"./util/ObjectUnsubscribedError":385,"./util/TimeoutError":387,"./util/UnsubscriptionError":388}],67:[function(require,module,exports){
 "use strict";
 /**
  * An execution context and a data structure to order tasks and schedule their
@@ -17523,7 +22484,7 @@ var Scheduler = (function () {
 }());
 exports.Scheduler = Scheduler;
 
-},{}],46:[function(require,module,exports){
+},{}],68:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17692,7 +22653,7 @@ var AnonymousSubject = (function (_super) {
 }(Subject));
 exports.AnonymousSubject = AnonymousSubject;
 
-},{"./Observable":42,"./SubjectSubscription":47,"./Subscriber":48,"./Subscription":49,"./symbol/rxSubscriber":62,"./util/ObjectUnsubscribedError":63}],47:[function(require,module,exports){
+},{"./Observable":62,"./SubjectSubscription":69,"./Subscriber":70,"./Subscription":71,"./symbol/rxSubscriber":372,"./util/ObjectUnsubscribedError":385}],69:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17733,7 +22694,7 @@ var SubjectSubscription = (function (_super) {
 }(Subscription_1.Subscription));
 exports.SubjectSubscription = SubjectSubscription;
 
-},{"./Subscription":49}],48:[function(require,module,exports){
+},{"./Subscription":71}],70:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -17998,7 +22959,7 @@ var SafeSubscriber = (function (_super) {
     return SafeSubscriber;
 }(Subscriber));
 
-},{"./Observer":43,"./Subscription":49,"./symbol/rxSubscriber":62,"./util/isFunction":69}],49:[function(require,module,exports){
+},{"./Observer":63,"./Subscription":71,"./symbol/rxSubscriber":372,"./util/isFunction":395}],71:[function(require,module,exports){
 "use strict";
 var isArray_1 = require('./util/isArray');
 var isObject_1 = require('./util/isObject');
@@ -18192,25 +23153,6507 @@ function flattenUnsubscriptionErrors(errors) {
     return errors.reduce(function (errs, err) { return errs.concat((err instanceof UnsubscriptionError_1.UnsubscriptionError) ? err.errors : err); }, []);
 }
 
-},{"./util/UnsubscriptionError":64,"./util/errorObject":65,"./util/isArray":66,"./util/isFunction":69,"./util/isObject":70,"./util/tryCatch":75}],50:[function(require,module,exports){
+},{"./util/UnsubscriptionError":388,"./util/errorObject":391,"./util/isArray":392,"./util/isFunction":395,"./util/isObject":397,"./util/tryCatch":405}],72:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var bindCallback_1 = require('../../observable/bindCallback');
+Observable_1.Observable.bindCallback = bindCallback_1.bindCallback;
+
+},{"../../Observable":62,"../../observable/bindCallback":225}],73:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var bindNodeCallback_1 = require('../../observable/bindNodeCallback');
+Observable_1.Observable.bindNodeCallback = bindNodeCallback_1.bindNodeCallback;
+
+},{"../../Observable":62,"../../observable/bindNodeCallback":226}],74:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var combineLatest_1 = require('../../observable/combineLatest');
+Observable_1.Observable.combineLatest = combineLatest_1.combineLatest;
+
+},{"../../Observable":62,"../../observable/combineLatest":227}],75:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var concat_1 = require('../../observable/concat');
+Observable_1.Observable.concat = concat_1.concat;
+
+},{"../../Observable":62,"../../observable/concat":228}],76:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var defer_1 = require('../../observable/defer');
+Observable_1.Observable.defer = defer_1.defer;
+
+},{"../../Observable":62,"../../observable/defer":229}],77:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../../Observable');
+var ajax_1 = require('../../../observable/dom/ajax');
+Observable_1.Observable.ajax = ajax_1.ajax;
+
+},{"../../../Observable":62,"../../../observable/dom/ajax":232}],78:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../../Observable');
+var webSocket_1 = require('../../../observable/dom/webSocket');
+Observable_1.Observable.webSocket = webSocket_1.webSocket;
+
+},{"../../../Observable":62,"../../../observable/dom/webSocket":233}],79:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var empty_1 = require('../../observable/empty');
+Observable_1.Observable.empty = empty_1.empty;
+
+},{"../../Observable":62,"../../observable/empty":234}],80:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var forkJoin_1 = require('../../observable/forkJoin');
+Observable_1.Observable.forkJoin = forkJoin_1.forkJoin;
+
+},{"../../Observable":62,"../../observable/forkJoin":235}],81:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var from_1 = require('../../observable/from');
+Observable_1.Observable.from = from_1.from;
+
+},{"../../Observable":62,"../../observable/from":236}],82:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var fromEvent_1 = require('../../observable/fromEvent');
+Observable_1.Observable.fromEvent = fromEvent_1.fromEvent;
+
+},{"../../Observable":62,"../../observable/fromEvent":237}],83:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var fromEventPattern_1 = require('../../observable/fromEventPattern');
+Observable_1.Observable.fromEventPattern = fromEventPattern_1.fromEventPattern;
+
+},{"../../Observable":62,"../../observable/fromEventPattern":238}],84:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var fromPromise_1 = require('../../observable/fromPromise');
+Observable_1.Observable.fromPromise = fromPromise_1.fromPromise;
+
+},{"../../Observable":62,"../../observable/fromPromise":239}],85:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var generate_1 = require('../../observable/generate');
+Observable_1.Observable.generate = generate_1.generate;
+
+},{"../../Observable":62,"../../observable/generate":240}],86:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var if_1 = require('../../observable/if');
+Observable_1.Observable.if = if_1._if;
+
+},{"../../Observable":62,"../../observable/if":241}],87:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var interval_1 = require('../../observable/interval');
+Observable_1.Observable.interval = interval_1.interval;
+
+},{"../../Observable":62,"../../observable/interval":242}],88:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var merge_1 = require('../../observable/merge');
+Observable_1.Observable.merge = merge_1.merge;
+
+},{"../../Observable":62,"../../observable/merge":243}],89:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var never_1 = require('../../observable/never');
+Observable_1.Observable.never = never_1.never;
+
+},{"../../Observable":62,"../../observable/never":244}],90:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var of_1 = require('../../observable/of');
+Observable_1.Observable.of = of_1.of;
+
+},{"../../Observable":62,"../../observable/of":245}],91:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var onErrorResumeNext_1 = require('../../observable/onErrorResumeNext');
+Observable_1.Observable.onErrorResumeNext = onErrorResumeNext_1.onErrorResumeNext;
+
+},{"../../Observable":62,"../../observable/onErrorResumeNext":246}],92:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var pairs_1 = require('../../observable/pairs');
+Observable_1.Observable.pairs = pairs_1.pairs;
+
+},{"../../Observable":62,"../../observable/pairs":247}],93:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var race_1 = require('../../observable/race');
+Observable_1.Observable.race = race_1.race;
+
+},{"../../Observable":62,"../../observable/race":248}],94:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var range_1 = require('../../observable/range');
+Observable_1.Observable.range = range_1.range;
+
+},{"../../Observable":62,"../../observable/range":249}],95:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var throw_1 = require('../../observable/throw');
+Observable_1.Observable.throw = throw_1._throw;
+
+},{"../../Observable":62,"../../observable/throw":250}],96:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var timer_1 = require('../../observable/timer');
+Observable_1.Observable.timer = timer_1.timer;
+
+},{"../../Observable":62,"../../observable/timer":251}],97:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var using_1 = require('../../observable/using');
+Observable_1.Observable.using = using_1.using;
+
+},{"../../Observable":62,"../../observable/using":252}],98:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var zip_1 = require('../../observable/zip');
+Observable_1.Observable.zip = zip_1.zip;
+
+},{"../../Observable":62,"../../observable/zip":253}],99:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var audit_1 = require('../../operator/audit');
+Observable_1.Observable.prototype.audit = audit_1.audit;
+
+},{"../../Observable":62,"../../operator/audit":254}],100:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var auditTime_1 = require('../../operator/auditTime');
+Observable_1.Observable.prototype.auditTime = auditTime_1.auditTime;
+
+},{"../../Observable":62,"../../operator/auditTime":255}],101:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var buffer_1 = require('../../operator/buffer');
+Observable_1.Observable.prototype.buffer = buffer_1.buffer;
+
+},{"../../Observable":62,"../../operator/buffer":256}],102:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var bufferCount_1 = require('../../operator/bufferCount');
+Observable_1.Observable.prototype.bufferCount = bufferCount_1.bufferCount;
+
+},{"../../Observable":62,"../../operator/bufferCount":257}],103:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var bufferTime_1 = require('../../operator/bufferTime');
+Observable_1.Observable.prototype.bufferTime = bufferTime_1.bufferTime;
+
+},{"../../Observable":62,"../../operator/bufferTime":258}],104:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var bufferToggle_1 = require('../../operator/bufferToggle');
+Observable_1.Observable.prototype.bufferToggle = bufferToggle_1.bufferToggle;
+
+},{"../../Observable":62,"../../operator/bufferToggle":259}],105:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var bufferWhen_1 = require('../../operator/bufferWhen');
+Observable_1.Observable.prototype.bufferWhen = bufferWhen_1.bufferWhen;
+
+},{"../../Observable":62,"../../operator/bufferWhen":260}],106:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var catch_1 = require('../../operator/catch');
+Observable_1.Observable.prototype.catch = catch_1._catch;
+Observable_1.Observable.prototype._catch = catch_1._catch;
+
+},{"../../Observable":62,"../../operator/catch":261}],107:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var combineAll_1 = require('../../operator/combineAll');
+Observable_1.Observable.prototype.combineAll = combineAll_1.combineAll;
+
+},{"../../Observable":62,"../../operator/combineAll":262}],108:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var combineLatest_1 = require('../../operator/combineLatest');
+Observable_1.Observable.prototype.combineLatest = combineLatest_1.combineLatest;
+
+},{"../../Observable":62,"../../operator/combineLatest":263}],109:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var concat_1 = require('../../operator/concat');
+Observable_1.Observable.prototype.concat = concat_1.concat;
+
+},{"../../Observable":62,"../../operator/concat":264}],110:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var concatAll_1 = require('../../operator/concatAll');
+Observable_1.Observable.prototype.concatAll = concatAll_1.concatAll;
+
+},{"../../Observable":62,"../../operator/concatAll":265}],111:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var concatMap_1 = require('../../operator/concatMap');
+Observable_1.Observable.prototype.concatMap = concatMap_1.concatMap;
+
+},{"../../Observable":62,"../../operator/concatMap":266}],112:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var concatMapTo_1 = require('../../operator/concatMapTo');
+Observable_1.Observable.prototype.concatMapTo = concatMapTo_1.concatMapTo;
+
+},{"../../Observable":62,"../../operator/concatMapTo":267}],113:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var count_1 = require('../../operator/count');
+Observable_1.Observable.prototype.count = count_1.count;
+
+},{"../../Observable":62,"../../operator/count":268}],114:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var debounce_1 = require('../../operator/debounce');
+Observable_1.Observable.prototype.debounce = debounce_1.debounce;
+
+},{"../../Observable":62,"../../operator/debounce":269}],115:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var debounceTime_1 = require('../../operator/debounceTime');
+Observable_1.Observable.prototype.debounceTime = debounceTime_1.debounceTime;
+
+},{"../../Observable":62,"../../operator/debounceTime":270}],116:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var defaultIfEmpty_1 = require('../../operator/defaultIfEmpty');
+Observable_1.Observable.prototype.defaultIfEmpty = defaultIfEmpty_1.defaultIfEmpty;
+
+},{"../../Observable":62,"../../operator/defaultIfEmpty":271}],117:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('../../Observable');
 var delay_1 = require('../../operator/delay');
 Observable_1.Observable.prototype.delay = delay_1.delay;
 
-},{"../../Observable":42,"../../operator/delay":53}],51:[function(require,module,exports){
+},{"../../Observable":62,"../../operator/delay":272}],118:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var delayWhen_1 = require('../../operator/delayWhen');
+Observable_1.Observable.prototype.delayWhen = delayWhen_1.delayWhen;
+
+},{"../../Observable":62,"../../operator/delayWhen":273}],119:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var dematerialize_1 = require('../../operator/dematerialize');
+Observable_1.Observable.prototype.dematerialize = dematerialize_1.dematerialize;
+
+},{"../../Observable":62,"../../operator/dematerialize":274}],120:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var distinct_1 = require('../../operator/distinct');
+Observable_1.Observable.prototype.distinct = distinct_1.distinct;
+
+},{"../../Observable":62,"../../operator/distinct":275}],121:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var distinctUntilChanged_1 = require('../../operator/distinctUntilChanged');
+Observable_1.Observable.prototype.distinctUntilChanged = distinctUntilChanged_1.distinctUntilChanged;
+
+},{"../../Observable":62,"../../operator/distinctUntilChanged":276}],122:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var distinctUntilKeyChanged_1 = require('../../operator/distinctUntilKeyChanged');
+Observable_1.Observable.prototype.distinctUntilKeyChanged = distinctUntilKeyChanged_1.distinctUntilKeyChanged;
+
+},{"../../Observable":62,"../../operator/distinctUntilKeyChanged":277}],123:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var do_1 = require('../../operator/do');
+Observable_1.Observable.prototype.do = do_1._do;
+Observable_1.Observable.prototype._do = do_1._do;
+
+},{"../../Observable":62,"../../operator/do":278}],124:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var elementAt_1 = require('../../operator/elementAt');
+Observable_1.Observable.prototype.elementAt = elementAt_1.elementAt;
+
+},{"../../Observable":62,"../../operator/elementAt":279}],125:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var every_1 = require('../../operator/every');
+Observable_1.Observable.prototype.every = every_1.every;
+
+},{"../../Observable":62,"../../operator/every":280}],126:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var exhaust_1 = require('../../operator/exhaust');
+Observable_1.Observable.prototype.exhaust = exhaust_1.exhaust;
+
+},{"../../Observable":62,"../../operator/exhaust":281}],127:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var exhaustMap_1 = require('../../operator/exhaustMap');
+Observable_1.Observable.prototype.exhaustMap = exhaustMap_1.exhaustMap;
+
+},{"../../Observable":62,"../../operator/exhaustMap":282}],128:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var expand_1 = require('../../operator/expand');
+Observable_1.Observable.prototype.expand = expand_1.expand;
+
+},{"../../Observable":62,"../../operator/expand":283}],129:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var filter_1 = require('../../operator/filter');
+Observable_1.Observable.prototype.filter = filter_1.filter;
+
+},{"../../Observable":62,"../../operator/filter":284}],130:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var finally_1 = require('../../operator/finally');
+Observable_1.Observable.prototype.finally = finally_1._finally;
+Observable_1.Observable.prototype._finally = finally_1._finally;
+
+},{"../../Observable":62,"../../operator/finally":285}],131:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var find_1 = require('../../operator/find');
+Observable_1.Observable.prototype.find = find_1.find;
+
+},{"../../Observable":62,"../../operator/find":286}],132:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var findIndex_1 = require('../../operator/findIndex');
+Observable_1.Observable.prototype.findIndex = findIndex_1.findIndex;
+
+},{"../../Observable":62,"../../operator/findIndex":287}],133:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var first_1 = require('../../operator/first');
+Observable_1.Observable.prototype.first = first_1.first;
+
+},{"../../Observable":62,"../../operator/first":288}],134:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var groupBy_1 = require('../../operator/groupBy');
+Observable_1.Observable.prototype.groupBy = groupBy_1.groupBy;
+
+},{"../../Observable":62,"../../operator/groupBy":289}],135:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var ignoreElements_1 = require('../../operator/ignoreElements');
+Observable_1.Observable.prototype.ignoreElements = ignoreElements_1.ignoreElements;
+
+},{"../../Observable":62,"../../operator/ignoreElements":290}],136:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var isEmpty_1 = require('../../operator/isEmpty');
+Observable_1.Observable.prototype.isEmpty = isEmpty_1.isEmpty;
+
+},{"../../Observable":62,"../../operator/isEmpty":291}],137:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var last_1 = require('../../operator/last');
+Observable_1.Observable.prototype.last = last_1.last;
+
+},{"../../Observable":62,"../../operator/last":292}],138:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var let_1 = require('../../operator/let');
+Observable_1.Observable.prototype.let = let_1.letProto;
+Observable_1.Observable.prototype.letBind = let_1.letProto;
+
+},{"../../Observable":62,"../../operator/let":293}],139:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('../../Observable');
 var map_1 = require('../../operator/map');
 Observable_1.Observable.prototype.map = map_1.map;
 
-},{"../../Observable":42,"../../operator/map":54}],52:[function(require,module,exports){
+},{"../../Observable":62,"../../operator/map":294}],140:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var mapTo_1 = require('../../operator/mapTo');
+Observable_1.Observable.prototype.mapTo = mapTo_1.mapTo;
+
+},{"../../Observable":62,"../../operator/mapTo":295}],141:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var materialize_1 = require('../../operator/materialize');
+Observable_1.Observable.prototype.materialize = materialize_1.materialize;
+
+},{"../../Observable":62,"../../operator/materialize":296}],142:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var max_1 = require('../../operator/max');
+Observable_1.Observable.prototype.max = max_1.max;
+
+},{"../../Observable":62,"../../operator/max":297}],143:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var merge_1 = require('../../operator/merge');
+Observable_1.Observable.prototype.merge = merge_1.merge;
+
+},{"../../Observable":62,"../../operator/merge":298}],144:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var mergeAll_1 = require('../../operator/mergeAll');
+Observable_1.Observable.prototype.mergeAll = mergeAll_1.mergeAll;
+
+},{"../../Observable":62,"../../operator/mergeAll":299}],145:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var mergeMap_1 = require('../../operator/mergeMap');
+Observable_1.Observable.prototype.mergeMap = mergeMap_1.mergeMap;
+Observable_1.Observable.prototype.flatMap = mergeMap_1.mergeMap;
+
+},{"../../Observable":62,"../../operator/mergeMap":300}],146:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var mergeMapTo_1 = require('../../operator/mergeMapTo');
+Observable_1.Observable.prototype.flatMapTo = mergeMapTo_1.mergeMapTo;
+Observable_1.Observable.prototype.mergeMapTo = mergeMapTo_1.mergeMapTo;
+
+},{"../../Observable":62,"../../operator/mergeMapTo":301}],147:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var mergeScan_1 = require('../../operator/mergeScan');
+Observable_1.Observable.prototype.mergeScan = mergeScan_1.mergeScan;
+
+},{"../../Observable":62,"../../operator/mergeScan":302}],148:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var min_1 = require('../../operator/min');
+Observable_1.Observable.prototype.min = min_1.min;
+
+},{"../../Observable":62,"../../operator/min":303}],149:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var multicast_1 = require('../../operator/multicast');
+Observable_1.Observable.prototype.multicast = multicast_1.multicast;
+
+},{"../../Observable":62,"../../operator/multicast":304}],150:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var observeOn_1 = require('../../operator/observeOn');
+Observable_1.Observable.prototype.observeOn = observeOn_1.observeOn;
+
+},{"../../Observable":62,"../../operator/observeOn":305}],151:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var onErrorResumeNext_1 = require('../../operator/onErrorResumeNext');
+Observable_1.Observable.prototype.onErrorResumeNext = onErrorResumeNext_1.onErrorResumeNext;
+
+},{"../../Observable":62,"../../operator/onErrorResumeNext":306}],152:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var pairwise_1 = require('../../operator/pairwise');
+Observable_1.Observable.prototype.pairwise = pairwise_1.pairwise;
+
+},{"../../Observable":62,"../../operator/pairwise":307}],153:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var partition_1 = require('../../operator/partition');
+Observable_1.Observable.prototype.partition = partition_1.partition;
+
+},{"../../Observable":62,"../../operator/partition":308}],154:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var pluck_1 = require('../../operator/pluck');
+Observable_1.Observable.prototype.pluck = pluck_1.pluck;
+
+},{"../../Observable":62,"../../operator/pluck":309}],155:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var publish_1 = require('../../operator/publish');
+Observable_1.Observable.prototype.publish = publish_1.publish;
+
+},{"../../Observable":62,"../../operator/publish":310}],156:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var publishBehavior_1 = require('../../operator/publishBehavior');
+Observable_1.Observable.prototype.publishBehavior = publishBehavior_1.publishBehavior;
+
+},{"../../Observable":62,"../../operator/publishBehavior":311}],157:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var publishLast_1 = require('../../operator/publishLast');
+Observable_1.Observable.prototype.publishLast = publishLast_1.publishLast;
+
+},{"../../Observable":62,"../../operator/publishLast":312}],158:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var publishReplay_1 = require('../../operator/publishReplay');
+Observable_1.Observable.prototype.publishReplay = publishReplay_1.publishReplay;
+
+},{"../../Observable":62,"../../operator/publishReplay":313}],159:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var race_1 = require('../../operator/race');
+Observable_1.Observable.prototype.race = race_1.race;
+
+},{"../../Observable":62,"../../operator/race":314}],160:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var reduce_1 = require('../../operator/reduce');
+Observable_1.Observable.prototype.reduce = reduce_1.reduce;
+
+},{"../../Observable":62,"../../operator/reduce":315}],161:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var repeat_1 = require('../../operator/repeat');
+Observable_1.Observable.prototype.repeat = repeat_1.repeat;
+
+},{"../../Observable":62,"../../operator/repeat":316}],162:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var repeatWhen_1 = require('../../operator/repeatWhen');
+Observable_1.Observable.prototype.repeatWhen = repeatWhen_1.repeatWhen;
+
+},{"../../Observable":62,"../../operator/repeatWhen":317}],163:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var retry_1 = require('../../operator/retry');
+Observable_1.Observable.prototype.retry = retry_1.retry;
+
+},{"../../Observable":62,"../../operator/retry":318}],164:[function(require,module,exports){
 "use strict";
 var Observable_1 = require('../../Observable');
 var retryWhen_1 = require('../../operator/retryWhen');
 Observable_1.Observable.prototype.retryWhen = retryWhen_1.retryWhen;
 
-},{"../../Observable":42,"../../operator/retryWhen":55}],53:[function(require,module,exports){
+},{"../../Observable":62,"../../operator/retryWhen":319}],165:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var sample_1 = require('../../operator/sample');
+Observable_1.Observable.prototype.sample = sample_1.sample;
+
+},{"../../Observable":62,"../../operator/sample":320}],166:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var sampleTime_1 = require('../../operator/sampleTime');
+Observable_1.Observable.prototype.sampleTime = sampleTime_1.sampleTime;
+
+},{"../../Observable":62,"../../operator/sampleTime":321}],167:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var scan_1 = require('../../operator/scan');
+Observable_1.Observable.prototype.scan = scan_1.scan;
+
+},{"../../Observable":62,"../../operator/scan":322}],168:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var sequenceEqual_1 = require('../../operator/sequenceEqual');
+Observable_1.Observable.prototype.sequenceEqual = sequenceEqual_1.sequenceEqual;
+
+},{"../../Observable":62,"../../operator/sequenceEqual":323}],169:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var share_1 = require('../../operator/share');
+Observable_1.Observable.prototype.share = share_1.share;
+
+},{"../../Observable":62,"../../operator/share":324}],170:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var shareReplay_1 = require('../../operator/shareReplay');
+Observable_1.Observable.prototype.shareReplay = shareReplay_1.shareReplay;
+
+},{"../../Observable":62,"../../operator/shareReplay":325}],171:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var single_1 = require('../../operator/single');
+Observable_1.Observable.prototype.single = single_1.single;
+
+},{"../../Observable":62,"../../operator/single":326}],172:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var skip_1 = require('../../operator/skip');
+Observable_1.Observable.prototype.skip = skip_1.skip;
+
+},{"../../Observable":62,"../../operator/skip":327}],173:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var skipLast_1 = require('../../operator/skipLast');
+Observable_1.Observable.prototype.skipLast = skipLast_1.skipLast;
+
+},{"../../Observable":62,"../../operator/skipLast":328}],174:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var skipUntil_1 = require('../../operator/skipUntil');
+Observable_1.Observable.prototype.skipUntil = skipUntil_1.skipUntil;
+
+},{"../../Observable":62,"../../operator/skipUntil":329}],175:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var skipWhile_1 = require('../../operator/skipWhile');
+Observable_1.Observable.prototype.skipWhile = skipWhile_1.skipWhile;
+
+},{"../../Observable":62,"../../operator/skipWhile":330}],176:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var startWith_1 = require('../../operator/startWith');
+Observable_1.Observable.prototype.startWith = startWith_1.startWith;
+
+},{"../../Observable":62,"../../operator/startWith":331}],177:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var subscribeOn_1 = require('../../operator/subscribeOn');
+Observable_1.Observable.prototype.subscribeOn = subscribeOn_1.subscribeOn;
+
+},{"../../Observable":62,"../../operator/subscribeOn":332}],178:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var switch_1 = require('../../operator/switch');
+Observable_1.Observable.prototype.switch = switch_1._switch;
+Observable_1.Observable.prototype._switch = switch_1._switch;
+
+},{"../../Observable":62,"../../operator/switch":333}],179:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var switchMap_1 = require('../../operator/switchMap');
+Observable_1.Observable.prototype.switchMap = switchMap_1.switchMap;
+
+},{"../../Observable":62,"../../operator/switchMap":334}],180:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var switchMapTo_1 = require('../../operator/switchMapTo');
+Observable_1.Observable.prototype.switchMapTo = switchMapTo_1.switchMapTo;
+
+},{"../../Observable":62,"../../operator/switchMapTo":335}],181:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var take_1 = require('../../operator/take');
+Observable_1.Observable.prototype.take = take_1.take;
+
+},{"../../Observable":62,"../../operator/take":336}],182:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var takeLast_1 = require('../../operator/takeLast');
+Observable_1.Observable.prototype.takeLast = takeLast_1.takeLast;
+
+},{"../../Observable":62,"../../operator/takeLast":337}],183:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var takeUntil_1 = require('../../operator/takeUntil');
+Observable_1.Observable.prototype.takeUntil = takeUntil_1.takeUntil;
+
+},{"../../Observable":62,"../../operator/takeUntil":338}],184:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var takeWhile_1 = require('../../operator/takeWhile');
+Observable_1.Observable.prototype.takeWhile = takeWhile_1.takeWhile;
+
+},{"../../Observable":62,"../../operator/takeWhile":339}],185:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var throttle_1 = require('../../operator/throttle');
+Observable_1.Observable.prototype.throttle = throttle_1.throttle;
+
+},{"../../Observable":62,"../../operator/throttle":340}],186:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var throttleTime_1 = require('../../operator/throttleTime');
+Observable_1.Observable.prototype.throttleTime = throttleTime_1.throttleTime;
+
+},{"../../Observable":62,"../../operator/throttleTime":341}],187:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var timeInterval_1 = require('../../operator/timeInterval');
+Observable_1.Observable.prototype.timeInterval = timeInterval_1.timeInterval;
+
+},{"../../Observable":62,"../../operator/timeInterval":342}],188:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var timeout_1 = require('../../operator/timeout');
+Observable_1.Observable.prototype.timeout = timeout_1.timeout;
+
+},{"../../Observable":62,"../../operator/timeout":343}],189:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var timeoutWith_1 = require('../../operator/timeoutWith');
+Observable_1.Observable.prototype.timeoutWith = timeoutWith_1.timeoutWith;
+
+},{"../../Observable":62,"../../operator/timeoutWith":344}],190:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var timestamp_1 = require('../../operator/timestamp');
+Observable_1.Observable.prototype.timestamp = timestamp_1.timestamp;
+
+},{"../../Observable":62,"../../operator/timestamp":345}],191:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var toArray_1 = require('../../operator/toArray');
+Observable_1.Observable.prototype.toArray = toArray_1.toArray;
+
+},{"../../Observable":62,"../../operator/toArray":346}],192:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var toPromise_1 = require('../../operator/toPromise');
+Observable_1.Observable.prototype.toPromise = toPromise_1.toPromise;
+
+},{"../../Observable":62,"../../operator/toPromise":347}],193:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var window_1 = require('../../operator/window');
+Observable_1.Observable.prototype.window = window_1.window;
+
+},{"../../Observable":62,"../../operator/window":348}],194:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var windowCount_1 = require('../../operator/windowCount');
+Observable_1.Observable.prototype.windowCount = windowCount_1.windowCount;
+
+},{"../../Observable":62,"../../operator/windowCount":349}],195:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var windowTime_1 = require('../../operator/windowTime');
+Observable_1.Observable.prototype.windowTime = windowTime_1.windowTime;
+
+},{"../../Observable":62,"../../operator/windowTime":350}],196:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var windowToggle_1 = require('../../operator/windowToggle');
+Observable_1.Observable.prototype.windowToggle = windowToggle_1.windowToggle;
+
+},{"../../Observable":62,"../../operator/windowToggle":351}],197:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var windowWhen_1 = require('../../operator/windowWhen');
+Observable_1.Observable.prototype.windowWhen = windowWhen_1.windowWhen;
+
+},{"../../Observable":62,"../../operator/windowWhen":352}],198:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var withLatestFrom_1 = require('../../operator/withLatestFrom');
+Observable_1.Observable.prototype.withLatestFrom = withLatestFrom_1.withLatestFrom;
+
+},{"../../Observable":62,"../../operator/withLatestFrom":353}],199:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var zip_1 = require('../../operator/zip');
+Observable_1.Observable.prototype.zip = zip_1.zipProto;
+
+},{"../../Observable":62,"../../operator/zip":354}],200:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../../Observable');
+var zipAll_1 = require('../../operator/zipAll');
+Observable_1.Observable.prototype.zipAll = zipAll_1.zipAll;
+
+},{"../../Observable":62,"../../operator/zipAll":355}],201:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var ScalarObservable_1 = require('./ScalarObservable');
+var EmptyObservable_1 = require('./EmptyObservable');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var ArrayLikeObservable = (function (_super) {
+    __extends(ArrayLikeObservable, _super);
+    function ArrayLikeObservable(arrayLike, scheduler) {
+        _super.call(this);
+        this.arrayLike = arrayLike;
+        this.scheduler = scheduler;
+        if (!scheduler && arrayLike.length === 1) {
+            this._isScalar = true;
+            this.value = arrayLike[0];
+        }
+    }
+    ArrayLikeObservable.create = function (arrayLike, scheduler) {
+        var length = arrayLike.length;
+        if (length === 0) {
+            return new EmptyObservable_1.EmptyObservable();
+        }
+        else if (length === 1) {
+            return new ScalarObservable_1.ScalarObservable(arrayLike[0], scheduler);
+        }
+        else {
+            return new ArrayLikeObservable(arrayLike, scheduler);
+        }
+    };
+    ArrayLikeObservable.dispatch = function (state) {
+        var arrayLike = state.arrayLike, index = state.index, length = state.length, subscriber = state.subscriber;
+        if (subscriber.closed) {
+            return;
+        }
+        if (index >= length) {
+            subscriber.complete();
+            return;
+        }
+        subscriber.next(arrayLike[index]);
+        state.index = index + 1;
+        this.schedule(state);
+    };
+    ArrayLikeObservable.prototype._subscribe = function (subscriber) {
+        var index = 0;
+        var _a = this, arrayLike = _a.arrayLike, scheduler = _a.scheduler;
+        var length = arrayLike.length;
+        if (scheduler) {
+            return scheduler.schedule(ArrayLikeObservable.dispatch, 0, {
+                arrayLike: arrayLike, index: index, length: length, subscriber: subscriber
+            });
+        }
+        else {
+            for (var i = 0; i < length && !subscriber.closed; i++) {
+                subscriber.next(arrayLike[i]);
+            }
+            subscriber.complete();
+        }
+    };
+    return ArrayLikeObservable;
+}(Observable_1.Observable));
+exports.ArrayLikeObservable = ArrayLikeObservable;
+
+},{"../Observable":62,"./EmptyObservable":207,"./ScalarObservable":221}],202:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var ScalarObservable_1 = require('./ScalarObservable');
+var EmptyObservable_1 = require('./EmptyObservable');
+var isScheduler_1 = require('../util/isScheduler');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var ArrayObservable = (function (_super) {
+    __extends(ArrayObservable, _super);
+    function ArrayObservable(array, scheduler) {
+        _super.call(this);
+        this.array = array;
+        this.scheduler = scheduler;
+        if (!scheduler && array.length === 1) {
+            this._isScalar = true;
+            this.value = array[0];
+        }
+    }
+    ArrayObservable.create = function (array, scheduler) {
+        return new ArrayObservable(array, scheduler);
+    };
+    /**
+     * Creates an Observable that emits some values you specify as arguments,
+     * immediately one after the other, and then emits a complete notification.
+     *
+     * <span class="informal">Emits the arguments you provide, then completes.
+     * </span>
+     *
+     * <img src="./img/of.png" width="100%">
+     *
+     * This static operator is useful for creating a simple Observable that only
+     * emits the arguments given, and the complete notification thereafter. It can
+     * be used for composing with other Observables, such as with {@link concat}.
+     * By default, it uses a `null` IScheduler, which means the `next`
+     * notifications are sent synchronously, although with a different IScheduler
+     * it is possible to determine when those notifications will be delivered.
+     *
+     * @example <caption>Emit 10, 20, 30, then 'a', 'b', 'c', then start ticking every second.</caption>
+     * var numbers = Rx.Observable.of(10, 20, 30);
+     * var letters = Rx.Observable.of('a', 'b', 'c');
+     * var interval = Rx.Observable.interval(1000);
+     * var result = numbers.concat(letters).concat(interval);
+     * result.subscribe(x => console.log(x));
+     *
+     * @see {@link create}
+     * @see {@link empty}
+     * @see {@link never}
+     * @see {@link throw}
+     *
+     * @param {...T} values Arguments that represent `next` values to be emitted.
+     * @param {Scheduler} [scheduler] A {@link IScheduler} to use for scheduling
+     * the emissions of the `next` notifications.
+     * @return {Observable<T>} An Observable that emits each given input value.
+     * @static true
+     * @name of
+     * @owner Observable
+     */
+    ArrayObservable.of = function () {
+        var array = [];
+        for (var _i = 0; _i < arguments.length; _i++) {
+            array[_i - 0] = arguments[_i];
+        }
+        var scheduler = array[array.length - 1];
+        if (isScheduler_1.isScheduler(scheduler)) {
+            array.pop();
+        }
+        else {
+            scheduler = null;
+        }
+        var len = array.length;
+        if (len > 1) {
+            return new ArrayObservable(array, scheduler);
+        }
+        else if (len === 1) {
+            return new ScalarObservable_1.ScalarObservable(array[0], scheduler);
+        }
+        else {
+            return new EmptyObservable_1.EmptyObservable(scheduler);
+        }
+    };
+    ArrayObservable.dispatch = function (state) {
+        var array = state.array, index = state.index, count = state.count, subscriber = state.subscriber;
+        if (index >= count) {
+            subscriber.complete();
+            return;
+        }
+        subscriber.next(array[index]);
+        if (subscriber.closed) {
+            return;
+        }
+        state.index = index + 1;
+        this.schedule(state);
+    };
+    ArrayObservable.prototype._subscribe = function (subscriber) {
+        var index = 0;
+        var array = this.array;
+        var count = array.length;
+        var scheduler = this.scheduler;
+        if (scheduler) {
+            return scheduler.schedule(ArrayObservable.dispatch, 0, {
+                array: array, index: index, count: count, subscriber: subscriber
+            });
+        }
+        else {
+            for (var i = 0; i < count && !subscriber.closed; i++) {
+                subscriber.next(array[i]);
+            }
+            subscriber.complete();
+        }
+    };
+    return ArrayObservable;
+}(Observable_1.Observable));
+exports.ArrayObservable = ArrayObservable;
+
+},{"../Observable":62,"../util/isScheduler":399,"./EmptyObservable":207,"./ScalarObservable":221}],203:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var tryCatch_1 = require('../util/tryCatch');
+var errorObject_1 = require('../util/errorObject');
+var AsyncSubject_1 = require('../AsyncSubject');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var BoundCallbackObservable = (function (_super) {
+    __extends(BoundCallbackObservable, _super);
+    function BoundCallbackObservable(callbackFunc, selector, args, context, scheduler) {
+        _super.call(this);
+        this.callbackFunc = callbackFunc;
+        this.selector = selector;
+        this.args = args;
+        this.context = context;
+        this.scheduler = scheduler;
+    }
+    /* tslint:enable:max-line-length */
+    /**
+     * Converts a callback API to a function that returns an Observable.
+     *
+     * <span class="informal">Give it a function `f` of type `f(x, callback)` and
+     * it will return a function `g` that when called as `g(x)` will output an
+     * Observable.</span>
+     *
+     * `bindCallback` is not an operator because its input and output are not
+     * Observables. The input is a function `func` with some parameters, but the
+     * last parameter must be a callback function that `func` calls when it is
+     * done.
+     *
+     * The output of `bindCallback` is a function that takes the same parameters
+     * as `func`, except the last one (the callback). When the output function
+     * is called with arguments, it will return an Observable. If `func` function
+     * calls its callback with one argument, the Observable will emit that value.
+     * If on the other hand callback is called with multiple values, resulting
+     * Observable will emit an array with these arguments.
+     *
+     * It is very important to remember, that input function `func` is not called
+     * when output function is, but rather when Observable returned by output
+     * function is subscribed. This means if `func` makes AJAX request, that request
+     * will be made every time someone subscribes to resulting Observable, but not before.
+     *
+     * Optionally, selector function can be passed to `bindObservable`. That function
+     * takes the same arguments as callback, and returns value
+     * that will be emitted by Observable instead of callback parameters themselves.
+     * Even though by default multiple arguments passed to callback appear in the stream as array,
+     * selector function will be called with arguments directly, just as callback would.
+     * This means you can imagine default selector (when one is not provided explicitly)
+     * as function that aggregates all its arguments into array, or simply returns first argument,
+     * if there is only one.
+     *
+     * Last optional parameter - {@link Scheduler} - can be used to control when call
+     * to `func` happens after someone subscribes to Observable, as well as when results
+     * passed to callback will be emitted. By default subscription to Observable calls `func`
+     * synchronously, but using `Scheduler.async` as last parameter will defer call to input function,
+     * just like wrapping that call in `setTimeout` with time `0` would. So if you use async Scheduler
+     * and call `subscribe` on output Observable, all function calls that are currently executing,
+     * will end before `func` is invoked.
+     *
+     * When it comes to emitting results passed to callback, by default they are emitted
+     * immediately after `func` invokes callback. In particular, if callback is called synchronously,
+     * then subscription to resulting Observable will call `next` function synchronously as well.
+     * If you want to defer that call, using `Scheduler.async` will, again, do the job.
+     * This means that by using `Scheduler.async` you can, in a sense, ensure that `func`
+     * always calls its callback asynchronously, thus avoiding terrifying Zalgo.
+     *
+     * Note that Observable created by output function will always emit only one value
+     * and then complete right after. Even if `func` calls callback multiple times, values from
+     * second and following calls will never appear in the stream. If you need to
+     * listen for multiple calls, you probably want to use {@link fromEvent} or
+     * {@link fromEventPattern} instead.
+     *
+     * If `func` depends on some context (`this` property), that context will be set
+     * to the same context that output function has at call time. In particular, if `func`
+     * is called as method of some object, in order to preserve proper behaviour,
+     * it is recommended to set context of output function to that object as well,
+     * provided `func` is not already bound.
+     *
+     * If input function calls its callback in "node style" (i.e. first argument to callback is
+     * optional error parameter signaling whether call failed or not), {@link bindNodeCallback}
+     * provides convenient error handling and probably is a better choice.
+     * `bindCallback` will treat such functions without any difference and error parameter
+     * (whether passed or not) will always be interpreted as regular callback argument.
+     *
+     *
+     * @example <caption>Convert jQuery's getJSON to an Observable API</caption>
+     * // Suppose we have jQuery.getJSON('/my/url', callback)
+     * var getJSONAsObservable = Rx.Observable.bindCallback(jQuery.getJSON);
+     * var result = getJSONAsObservable('/my/url');
+     * result.subscribe(x => console.log(x), e => console.error(e));
+     *
+     *
+     * @example <caption>Receive array of arguments passed to callback</caption>
+     * someFunction((a, b, c) => {
+     *   console.log(a); // 5
+     *   console.log(b); // 'some string'
+     *   console.log(c); // {someProperty: 'someValue'}
+     * });
+     *
+     * const boundSomeFunction = Rx.Observable.bindCallback(someFunction);
+     * boundSomeFunction().subscribe(values => {
+     *   console.log(values) // [5, 'some string', {someProperty: 'someValue'}]
+     * });
+     *
+     *
+     * @example <caption>Use bindCallback with selector function</caption>
+     * someFunction((a, b, c) => {
+     *   console.log(a); // 'a'
+     *   console.log(b); // 'b'
+     *   console.log(c); // 'c'
+     * });
+     *
+     * const boundSomeFunction = Rx.Observable.bindCallback(someFunction, (a, b, c) => a + b + c);
+     * boundSomeFunction().subscribe(value => {
+     *   console.log(value) // 'abc'
+     * });
+     *
+     *
+     * @example <caption>Compare behaviour with and without async Scheduler</caption>
+     * function iCallMyCallbackSynchronously(cb) {
+     *   cb();
+     * }
+     *
+     * const boundSyncFn = Rx.Observable.bindCallback(iCallMyCallbackSynchronously);
+     * const boundAsyncFn = Rx.Observable.bindCallback(iCallMyCallbackSynchronously, null, Rx.Scheduler.async);
+     *
+     * boundSyncFn().subscribe(() => console.log('I was sync!'));
+     * boundAsyncFn().subscribe(() => console.log('I was async!'));
+     * console.log('This happened...');
+     *
+     * // Logs:
+     * // I was sync!
+     * // This happened...
+     * // I was async!
+     *
+     *
+     * @example <caption>Use bindCallback on object method</caption>
+     * const boundMethod = Rx.Observable.bindCallback(someObject.methodWithCallback);
+     * boundMethod.call(someObject) // make sure methodWithCallback has access to someObject
+     * .subscribe(subscriber);
+     *
+     *
+     * @see {@link bindNodeCallback}
+     * @see {@link from}
+     * @see {@link fromPromise}
+     *
+     * @param {function} func Function with a callback as the last parameter.
+     * @param {function} [selector] A function which takes the arguments from the
+     * callback and maps those to a value to emit on the output Observable.
+     * @param {Scheduler} [scheduler] The scheduler on which to schedule the
+     * callbacks.
+     * @return {function(...params: *): Observable} A function which returns the
+     * Observable that delivers the same values the callback would deliver.
+     * @static true
+     * @name bindCallback
+     * @owner Observable
+     */
+    BoundCallbackObservable.create = function (func, selector, scheduler) {
+        if (selector === void 0) { selector = undefined; }
+        return function () {
+            var args = [];
+            for (var _i = 0; _i < arguments.length; _i++) {
+                args[_i - 0] = arguments[_i];
+            }
+            return new BoundCallbackObservable(func, selector, args, this, scheduler);
+        };
+    };
+    BoundCallbackObservable.prototype._subscribe = function (subscriber) {
+        var callbackFunc = this.callbackFunc;
+        var args = this.args;
+        var scheduler = this.scheduler;
+        var subject = this.subject;
+        if (!scheduler) {
+            if (!subject) {
+                subject = this.subject = new AsyncSubject_1.AsyncSubject();
+                var handler = function handlerFn() {
+                    var innerArgs = [];
+                    for (var _i = 0; _i < arguments.length; _i++) {
+                        innerArgs[_i - 0] = arguments[_i];
+                    }
+                    var source = handlerFn.source;
+                    var selector = source.selector, subject = source.subject;
+                    if (selector) {
+                        var result_1 = tryCatch_1.tryCatch(selector).apply(this, innerArgs);
+                        if (result_1 === errorObject_1.errorObject) {
+                            subject.error(errorObject_1.errorObject.e);
+                        }
+                        else {
+                            subject.next(result_1);
+                            subject.complete();
+                        }
+                    }
+                    else {
+                        subject.next(innerArgs.length <= 1 ? innerArgs[0] : innerArgs);
+                        subject.complete();
+                    }
+                };
+                // use named function instance to avoid closure.
+                handler.source = this;
+                var result = tryCatch_1.tryCatch(callbackFunc).apply(this.context, args.concat(handler));
+                if (result === errorObject_1.errorObject) {
+                    subject.error(errorObject_1.errorObject.e);
+                }
+            }
+            return subject.subscribe(subscriber);
+        }
+        else {
+            return scheduler.schedule(BoundCallbackObservable.dispatch, 0, { source: this, subscriber: subscriber, context: this.context });
+        }
+    };
+    BoundCallbackObservable.dispatch = function (state) {
+        var self = this;
+        var source = state.source, subscriber = state.subscriber, context = state.context;
+        var callbackFunc = source.callbackFunc, args = source.args, scheduler = source.scheduler;
+        var subject = source.subject;
+        if (!subject) {
+            subject = source.subject = new AsyncSubject_1.AsyncSubject();
+            var handler = function handlerFn() {
+                var innerArgs = [];
+                for (var _i = 0; _i < arguments.length; _i++) {
+                    innerArgs[_i - 0] = arguments[_i];
+                }
+                var source = handlerFn.source;
+                var selector = source.selector, subject = source.subject;
+                if (selector) {
+                    var result_2 = tryCatch_1.tryCatch(selector).apply(this, innerArgs);
+                    if (result_2 === errorObject_1.errorObject) {
+                        self.add(scheduler.schedule(dispatchError, 0, { err: errorObject_1.errorObject.e, subject: subject }));
+                    }
+                    else {
+                        self.add(scheduler.schedule(dispatchNext, 0, { value: result_2, subject: subject }));
+                    }
+                }
+                else {
+                    var value = innerArgs.length <= 1 ? innerArgs[0] : innerArgs;
+                    self.add(scheduler.schedule(dispatchNext, 0, { value: value, subject: subject }));
+                }
+            };
+            // use named function to pass values in without closure
+            handler.source = source;
+            var result = tryCatch_1.tryCatch(callbackFunc).apply(context, args.concat(handler));
+            if (result === errorObject_1.errorObject) {
+                subject.error(errorObject_1.errorObject.e);
+            }
+        }
+        self.add(subject.subscribe(subscriber));
+    };
+    return BoundCallbackObservable;
+}(Observable_1.Observable));
+exports.BoundCallbackObservable = BoundCallbackObservable;
+function dispatchNext(arg) {
+    var value = arg.value, subject = arg.subject;
+    subject.next(value);
+    subject.complete();
+}
+function dispatchError(arg) {
+    var err = arg.err, subject = arg.subject;
+    subject.error(err);
+}
+
+},{"../AsyncSubject":58,"../Observable":62,"../util/errorObject":391,"../util/tryCatch":405}],204:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var tryCatch_1 = require('../util/tryCatch');
+var errorObject_1 = require('../util/errorObject');
+var AsyncSubject_1 = require('../AsyncSubject');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var BoundNodeCallbackObservable = (function (_super) {
+    __extends(BoundNodeCallbackObservable, _super);
+    function BoundNodeCallbackObservable(callbackFunc, selector, args, context, scheduler) {
+        _super.call(this);
+        this.callbackFunc = callbackFunc;
+        this.selector = selector;
+        this.args = args;
+        this.context = context;
+        this.scheduler = scheduler;
+    }
+    /* tslint:enable:max-line-length */
+    /**
+     * Converts a Node.js-style callback API to a function that returns an
+     * Observable.
+     *
+     * <span class="informal">It's just like {@link bindCallback}, but the
+     * callback is expected to be of type `callback(error, result)`.</span>
+     *
+     * `bindNodeCallback` is not an operator because its input and output are not
+     * Observables. The input is a function `func` with some parameters, but the
+     * last parameter must be a callback function that `func` calls when it is
+     * done. The callback function is expected to follow Node.js conventions,
+     * where the first argument to the callback is an error object, signaling
+     * whether call was successful. If that object is passed to callback, it means
+     * something went wrong.
+     *
+     * The output of `bindNodeCallback` is a function that takes the same
+     * parameters as `func`, except the last one (the callback). When the output
+     * function is called with arguments, it will return an Observable.
+     * If `func` calls its callback with error parameter present, Observable will
+     * error with that value as well. If error parameter is not passed, Observable will emit
+     * second parameter. If there are more parameters (third and so on),
+     * Observable will emit an array with all arguments, except first error argument.
+     *
+     * Optionally `bindNodeCallback` accepts selector function, which allows you to
+     * make resulting Observable emit value computed by selector, instead of regular
+     * callback arguments. It works similarly to {@link bindCallback} selector, but
+     * Node.js-style error argument will never be passed to that function.
+     *
+     * Note that `func` will not be called at the same time output function is,
+     * but rather whenever resulting Observable is subscribed. By default call to
+     * `func` will happen synchronously after subscription, but that can be changed
+     * with proper {@link Scheduler} provided as optional third parameter. Scheduler
+     * can also control when values from callback will be emitted by Observable.
+     * To find out more, check out documentation for {@link bindCallback}, where
+     * Scheduler works exactly the same.
+     *
+     * As in {@link bindCallback}, context (`this` property) of input function will be set to context
+     * of returned function, when it is called.
+     *
+     * After Observable emits value, it will complete immediately. This means
+     * even if `func` calls callback again, values from second and consecutive
+     * calls will never appear on the stream. If you need to handle functions
+     * that call callbacks multiple times, check out {@link fromEvent} or
+     * {@link fromEventPattern} instead.
+     *
+     * Note that `bindNodeCallback` can be used in non-Node.js environments as well.
+     * "Node.js-style" callbacks are just a convention, so if you write for
+     * browsers or any other environment and API you use implements that callback style,
+     * `bindNodeCallback` can be safely used on that API functions as well.
+     *
+     * Remember that Error object passed to callback does not have to be an instance
+     * of JavaScript built-in `Error` object. In fact, it does not even have to an object.
+     * Error parameter of callback function is interpreted as "present", when value
+     * of that parameter is truthy. It could be, for example, non-zero number, non-empty
+     * string or boolean `true`. In all of these cases resulting Observable would error
+     * with that value. This means usually regular style callbacks will fail very often when
+     * `bindNodeCallback` is used. If your Observable errors much more often then you
+     * would expect, check if callback really is called in Node.js-style and, if not,
+     * switch to {@link bindCallback} instead.
+     *
+     * Note that even if error parameter is technically present in callback, but its value
+     * is falsy, it still won't appear in array emitted by Observable or in selector function.
+     *
+     *
+     * @example <caption>Read a file from the filesystem and get the data as an Observable</caption>
+     * import * as fs from 'fs';
+     * var readFileAsObservable = Rx.Observable.bindNodeCallback(fs.readFile);
+     * var result = readFileAsObservable('./roadNames.txt', 'utf8');
+     * result.subscribe(x => console.log(x), e => console.error(e));
+     *
+     *
+     * @example <caption>Use on function calling callback with multiple arguments</caption>
+     * someFunction((err, a, b) => {
+     *   console.log(err); // null
+     *   console.log(a); // 5
+     *   console.log(b); // "some string"
+     * });
+     * var boundSomeFunction = Rx.Observable.bindNodeCallback(someFunction);
+     * boundSomeFunction()
+     * .subscribe(value => {
+     *   console.log(value); // [5, "some string"]
+     * });
+     *
+     *
+     * @example <caption>Use with selector function</caption>
+     * someFunction((err, a, b) => {
+     *   console.log(err); // undefined
+     *   console.log(a); // "abc"
+     *   console.log(b); // "DEF"
+     * });
+     * var boundSomeFunction = Rx.Observable.bindNodeCallback(someFunction, (a, b) => a + b);
+     * boundSomeFunction()
+     * .subscribe(value => {
+     *   console.log(value); // "abcDEF"
+     * });
+     *
+     *
+     * @example <caption>Use on function calling callback in regular style</caption>
+     * someFunction(a => {
+     *   console.log(a); // 5
+     * });
+     * var boundSomeFunction = Rx.Observable.bindNodeCallback(someFunction);
+     * boundSomeFunction()
+     * .subscribe(
+     *   value => {}             // never gets called
+     *   err => console.log(err) // 5
+     *);
+     *
+     *
+     * @see {@link bindCallback}
+     * @see {@link from}
+     * @see {@link fromPromise}
+     *
+     * @param {function} func Function with a Node.js-style callback as the last parameter.
+     * @param {function} [selector] A function which takes the arguments from the
+     * callback and maps those to a value to emit on the output Observable.
+     * @param {Scheduler} [scheduler] The scheduler on which to schedule the
+     * callbacks.
+     * @return {function(...params: *): Observable} A function which returns the
+     * Observable that delivers the same values the Node.js callback would
+     * deliver.
+     * @static true
+     * @name bindNodeCallback
+     * @owner Observable
+     */
+    BoundNodeCallbackObservable.create = function (func, selector, scheduler) {
+        if (selector === void 0) { selector = undefined; }
+        return function () {
+            var args = [];
+            for (var _i = 0; _i < arguments.length; _i++) {
+                args[_i - 0] = arguments[_i];
+            }
+            return new BoundNodeCallbackObservable(func, selector, args, this, scheduler);
+        };
+    };
+    BoundNodeCallbackObservable.prototype._subscribe = function (subscriber) {
+        var callbackFunc = this.callbackFunc;
+        var args = this.args;
+        var scheduler = this.scheduler;
+        var subject = this.subject;
+        if (!scheduler) {
+            if (!subject) {
+                subject = this.subject = new AsyncSubject_1.AsyncSubject();
+                var handler = function handlerFn() {
+                    var innerArgs = [];
+                    for (var _i = 0; _i < arguments.length; _i++) {
+                        innerArgs[_i - 0] = arguments[_i];
+                    }
+                    var source = handlerFn.source;
+                    var selector = source.selector, subject = source.subject;
+                    var err = innerArgs.shift();
+                    if (err) {
+                        subject.error(err);
+                    }
+                    else if (selector) {
+                        var result_1 = tryCatch_1.tryCatch(selector).apply(this, innerArgs);
+                        if (result_1 === errorObject_1.errorObject) {
+                            subject.error(errorObject_1.errorObject.e);
+                        }
+                        else {
+                            subject.next(result_1);
+                            subject.complete();
+                        }
+                    }
+                    else {
+                        subject.next(innerArgs.length <= 1 ? innerArgs[0] : innerArgs);
+                        subject.complete();
+                    }
+                };
+                // use named function instance to avoid closure.
+                handler.source = this;
+                var result = tryCatch_1.tryCatch(callbackFunc).apply(this.context, args.concat(handler));
+                if (result === errorObject_1.errorObject) {
+                    subject.error(errorObject_1.errorObject.e);
+                }
+            }
+            return subject.subscribe(subscriber);
+        }
+        else {
+            return scheduler.schedule(dispatch, 0, { source: this, subscriber: subscriber, context: this.context });
+        }
+    };
+    return BoundNodeCallbackObservable;
+}(Observable_1.Observable));
+exports.BoundNodeCallbackObservable = BoundNodeCallbackObservable;
+function dispatch(state) {
+    var self = this;
+    var source = state.source, subscriber = state.subscriber, context = state.context;
+    // XXX: cast to `any` to access to the private field in `source`.
+    var _a = source, callbackFunc = _a.callbackFunc, args = _a.args, scheduler = _a.scheduler;
+    var subject = source.subject;
+    if (!subject) {
+        subject = source.subject = new AsyncSubject_1.AsyncSubject();
+        var handler = function handlerFn() {
+            var innerArgs = [];
+            for (var _i = 0; _i < arguments.length; _i++) {
+                innerArgs[_i - 0] = arguments[_i];
+            }
+            var source = handlerFn.source;
+            var selector = source.selector, subject = source.subject;
+            var err = innerArgs.shift();
+            if (err) {
+                self.add(scheduler.schedule(dispatchError, 0, { err: err, subject: subject }));
+            }
+            else if (selector) {
+                var result_2 = tryCatch_1.tryCatch(selector).apply(this, innerArgs);
+                if (result_2 === errorObject_1.errorObject) {
+                    self.add(scheduler.schedule(dispatchError, 0, { err: errorObject_1.errorObject.e, subject: subject }));
+                }
+                else {
+                    self.add(scheduler.schedule(dispatchNext, 0, { value: result_2, subject: subject }));
+                }
+            }
+            else {
+                var value = innerArgs.length <= 1 ? innerArgs[0] : innerArgs;
+                self.add(scheduler.schedule(dispatchNext, 0, { value: value, subject: subject }));
+            }
+        };
+        // use named function to pass values in without closure
+        handler.source = source;
+        var result = tryCatch_1.tryCatch(callbackFunc).apply(context, args.concat(handler));
+        if (result === errorObject_1.errorObject) {
+            self.add(scheduler.schedule(dispatchError, 0, { err: errorObject_1.errorObject.e, subject: subject }));
+        }
+    }
+    self.add(subject.subscribe(subscriber));
+}
+function dispatchNext(arg) {
+    var value = arg.value, subject = arg.subject;
+    subject.next(value);
+    subject.complete();
+}
+function dispatchError(arg) {
+    var err = arg.err, subject = arg.subject;
+    subject.error(err);
+}
+
+},{"../AsyncSubject":58,"../Observable":62,"../util/errorObject":391,"../util/tryCatch":405}],205:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subject_1 = require('../Subject');
+var Observable_1 = require('../Observable');
+var Subscriber_1 = require('../Subscriber');
+var Subscription_1 = require('../Subscription');
+/**
+ * @class ConnectableObservable<T>
+ */
+var ConnectableObservable = (function (_super) {
+    __extends(ConnectableObservable, _super);
+    function ConnectableObservable(source, subjectFactory) {
+        _super.call(this);
+        this.source = source;
+        this.subjectFactory = subjectFactory;
+        this._refCount = 0;
+        this._isComplete = false;
+    }
+    ConnectableObservable.prototype._subscribe = function (subscriber) {
+        return this.getSubject().subscribe(subscriber);
+    };
+    ConnectableObservable.prototype.getSubject = function () {
+        var subject = this._subject;
+        if (!subject || subject.isStopped) {
+            this._subject = this.subjectFactory();
+        }
+        return this._subject;
+    };
+    ConnectableObservable.prototype.connect = function () {
+        var connection = this._connection;
+        if (!connection) {
+            this._isComplete = false;
+            connection = this._connection = new Subscription_1.Subscription();
+            connection.add(this.source
+                .subscribe(new ConnectableSubscriber(this.getSubject(), this)));
+            if (connection.closed) {
+                this._connection = null;
+                connection = Subscription_1.Subscription.EMPTY;
+            }
+            else {
+                this._connection = connection;
+            }
+        }
+        return connection;
+    };
+    ConnectableObservable.prototype.refCount = function () {
+        return this.lift(new RefCountOperator(this));
+    };
+    return ConnectableObservable;
+}(Observable_1.Observable));
+exports.ConnectableObservable = ConnectableObservable;
+var connectableProto = ConnectableObservable.prototype;
+exports.connectableObservableDescriptor = {
+    operator: { value: null },
+    _refCount: { value: 0, writable: true },
+    _subject: { value: null, writable: true },
+    _connection: { value: null, writable: true },
+    _subscribe: { value: connectableProto._subscribe },
+    _isComplete: { value: connectableProto._isComplete, writable: true },
+    getSubject: { value: connectableProto.getSubject },
+    connect: { value: connectableProto.connect },
+    refCount: { value: connectableProto.refCount }
+};
+var ConnectableSubscriber = (function (_super) {
+    __extends(ConnectableSubscriber, _super);
+    function ConnectableSubscriber(destination, connectable) {
+        _super.call(this, destination);
+        this.connectable = connectable;
+    }
+    ConnectableSubscriber.prototype._error = function (err) {
+        this._unsubscribe();
+        _super.prototype._error.call(this, err);
+    };
+    ConnectableSubscriber.prototype._complete = function () {
+        this.connectable._isComplete = true;
+        this._unsubscribe();
+        _super.prototype._complete.call(this);
+    };
+    ConnectableSubscriber.prototype._unsubscribe = function () {
+        var connectable = this.connectable;
+        if (connectable) {
+            this.connectable = null;
+            var connection = connectable._connection;
+            connectable._refCount = 0;
+            connectable._subject = null;
+            connectable._connection = null;
+            if (connection) {
+                connection.unsubscribe();
+            }
+        }
+    };
+    return ConnectableSubscriber;
+}(Subject_1.SubjectSubscriber));
+var RefCountOperator = (function () {
+    function RefCountOperator(connectable) {
+        this.connectable = connectable;
+    }
+    RefCountOperator.prototype.call = function (subscriber, source) {
+        var connectable = this.connectable;
+        connectable._refCount++;
+        var refCounter = new RefCountSubscriber(subscriber, connectable);
+        var subscription = source.subscribe(refCounter);
+        if (!refCounter.closed) {
+            refCounter.connection = connectable.connect();
+        }
+        return subscription;
+    };
+    return RefCountOperator;
+}());
+var RefCountSubscriber = (function (_super) {
+    __extends(RefCountSubscriber, _super);
+    function RefCountSubscriber(destination, connectable) {
+        _super.call(this, destination);
+        this.connectable = connectable;
+    }
+    RefCountSubscriber.prototype._unsubscribe = function () {
+        var connectable = this.connectable;
+        if (!connectable) {
+            this.connection = null;
+            return;
+        }
+        this.connectable = null;
+        var refCount = connectable._refCount;
+        if (refCount <= 0) {
+            this.connection = null;
+            return;
+        }
+        connectable._refCount = refCount - 1;
+        if (refCount > 1) {
+            this.connection = null;
+            return;
+        }
+        ///
+        // Compare the local RefCountSubscriber's connection Subscription to the
+        // connection Subscription on the shared ConnectableObservable. In cases
+        // where the ConnectableObservable source synchronously emits values, and
+        // the RefCountSubscriber's downstream Observers synchronously unsubscribe,
+        // execution continues to here before the RefCountOperator has a chance to
+        // supply the RefCountSubscriber with the shared connection Subscription.
+        // For example:
+        // ```
+        // Observable.range(0, 10)
+        //   .publish()
+        //   .refCount()
+        //   .take(5)
+        //   .subscribe();
+        // ```
+        // In order to account for this case, RefCountSubscriber should only dispose
+        // the ConnectableObservable's shared connection Subscription if the
+        // connection Subscription exists, *and* either:
+        //   a. RefCountSubscriber doesn't have a reference to the shared connection
+        //      Subscription yet, or,
+        //   b. RefCountSubscriber's connection Subscription reference is identical
+        //      to the shared connection Subscription
+        ///
+        var connection = this.connection;
+        var sharedConnection = connectable._connection;
+        this.connection = null;
+        if (sharedConnection && (!connection || sharedConnection === connection)) {
+            sharedConnection.unsubscribe();
+        }
+    };
+    return RefCountSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Observable":62,"../Subject":68,"../Subscriber":70,"../Subscription":71}],206:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var DeferObservable = (function (_super) {
+    __extends(DeferObservable, _super);
+    function DeferObservable(observableFactory) {
+        _super.call(this);
+        this.observableFactory = observableFactory;
+    }
+    /**
+     * Creates an Observable that, on subscribe, calls an Observable factory to
+     * make an Observable for each new Observer.
+     *
+     * <span class="informal">Creates the Observable lazily, that is, only when it
+     * is subscribed.
+     * </span>
+     *
+     * <img src="./img/defer.png" width="100%">
+     *
+     * `defer` allows you to create the Observable only when the Observer
+     * subscribes, and create a fresh Observable for each Observer. It waits until
+     * an Observer subscribes to it, and then it generates an Observable,
+     * typically with an Observable factory function. It does this afresh for each
+     * subscriber, so although each subscriber may think it is subscribing to the
+     * same Observable, in fact each subscriber gets its own individual
+     * Observable.
+     *
+     * @example <caption>Subscribe to either an Observable of clicks or an Observable of interval, at random</caption>
+     * var clicksOrInterval = Rx.Observable.defer(function () {
+     *   if (Math.random() > 0.5) {
+     *     return Rx.Observable.fromEvent(document, 'click');
+     *   } else {
+     *     return Rx.Observable.interval(1000);
+     *   }
+     * });
+     * clicksOrInterval.subscribe(x => console.log(x));
+     *
+     * // Results in the following behavior:
+     * // If the result of Math.random() is greater than 0.5 it will listen
+     * // for clicks anywhere on the "document"; when document is clicked it
+     * // will log a MouseEvent object to the console. If the result is less
+     * // than 0.5 it will emit ascending numbers, one every second(1000ms).
+     *
+     * @see {@link create}
+     *
+     * @param {function(): SubscribableOrPromise} observableFactory The Observable
+     * factory function to invoke for each Observer that subscribes to the output
+     * Observable. May also return a Promise, which will be converted on the fly
+     * to an Observable.
+     * @return {Observable} An Observable whose Observers' subscriptions trigger
+     * an invocation of the given Observable factory function.
+     * @static true
+     * @name defer
+     * @owner Observable
+     */
+    DeferObservable.create = function (observableFactory) {
+        return new DeferObservable(observableFactory);
+    };
+    DeferObservable.prototype._subscribe = function (subscriber) {
+        return new DeferSubscriber(subscriber, this.observableFactory);
+    };
+    return DeferObservable;
+}(Observable_1.Observable));
+exports.DeferObservable = DeferObservable;
+var DeferSubscriber = (function (_super) {
+    __extends(DeferSubscriber, _super);
+    function DeferSubscriber(destination, factory) {
+        _super.call(this, destination);
+        this.factory = factory;
+        this.tryDefer();
+    }
+    DeferSubscriber.prototype.tryDefer = function () {
+        try {
+            this._callFactory();
+        }
+        catch (err) {
+            this._error(err);
+        }
+    };
+    DeferSubscriber.prototype._callFactory = function () {
+        var result = this.factory();
+        if (result) {
+            this.add(subscribeToResult_1.subscribeToResult(this, result));
+        }
+    };
+    return DeferSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../Observable":62,"../OuterSubscriber":64,"../util/subscribeToResult":403}],207:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var EmptyObservable = (function (_super) {
+    __extends(EmptyObservable, _super);
+    function EmptyObservable(scheduler) {
+        _super.call(this);
+        this.scheduler = scheduler;
+    }
+    /**
+     * Creates an Observable that emits no items to the Observer and immediately
+     * emits a complete notification.
+     *
+     * <span class="informal">Just emits 'complete', and nothing else.
+     * </span>
+     *
+     * <img src="./img/empty.png" width="100%">
+     *
+     * This static operator is useful for creating a simple Observable that only
+     * emits the complete notification. It can be used for composing with other
+     * Observables, such as in a {@link mergeMap}.
+     *
+     * @example <caption>Emit the number 7, then complete.</caption>
+     * var result = Rx.Observable.empty().startWith(7);
+     * result.subscribe(x => console.log(x));
+     *
+     * @example <caption>Map and flatten only odd numbers to the sequence 'a', 'b', 'c'</caption>
+     * var interval = Rx.Observable.interval(1000);
+     * var result = interval.mergeMap(x =>
+     *   x % 2 === 1 ? Rx.Observable.of('a', 'b', 'c') : Rx.Observable.empty()
+     * );
+     * result.subscribe(x => console.log(x));
+     *
+     * // Results in the following to the console:
+     * // x is equal to the count on the interval eg(0,1,2,3,...)
+     * // x will occur every 1000ms
+     * // if x % 2 is equal to 1 print abc
+     * // if x % 2 is not equal to 1 nothing will be output
+     *
+     * @see {@link create}
+     * @see {@link never}
+     * @see {@link of}
+     * @see {@link throw}
+     *
+     * @param {Scheduler} [scheduler] A {@link IScheduler} to use for scheduling
+     * the emission of the complete notification.
+     * @return {Observable} An "empty" Observable: emits only the complete
+     * notification.
+     * @static true
+     * @name empty
+     * @owner Observable
+     */
+    EmptyObservable.create = function (scheduler) {
+        return new EmptyObservable(scheduler);
+    };
+    EmptyObservable.dispatch = function (arg) {
+        var subscriber = arg.subscriber;
+        subscriber.complete();
+    };
+    EmptyObservable.prototype._subscribe = function (subscriber) {
+        var scheduler = this.scheduler;
+        if (scheduler) {
+            return scheduler.schedule(EmptyObservable.dispatch, 0, { subscriber: subscriber });
+        }
+        else {
+            subscriber.complete();
+        }
+    };
+    return EmptyObservable;
+}(Observable_1.Observable));
+exports.EmptyObservable = EmptyObservable;
+
+},{"../Observable":62}],208:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var ErrorObservable = (function (_super) {
+    __extends(ErrorObservable, _super);
+    function ErrorObservable(error, scheduler) {
+        _super.call(this);
+        this.error = error;
+        this.scheduler = scheduler;
+    }
+    /**
+     * Creates an Observable that emits no items to the Observer and immediately
+     * emits an error notification.
+     *
+     * <span class="informal">Just emits 'error', and nothing else.
+     * </span>
+     *
+     * <img src="./img/throw.png" width="100%">
+     *
+     * This static operator is useful for creating a simple Observable that only
+     * emits the error notification. It can be used for composing with other
+     * Observables, such as in a {@link mergeMap}.
+     *
+     * @example <caption>Emit the number 7, then emit an error.</caption>
+     * var result = Rx.Observable.throw(new Error('oops!')).startWith(7);
+     * result.subscribe(x => console.log(x), e => console.error(e));
+     *
+     * @example <caption>Map and flatten numbers to the sequence 'a', 'b', 'c', but throw an error for 13</caption>
+     * var interval = Rx.Observable.interval(1000);
+     * var result = interval.mergeMap(x =>
+     *   x === 13 ?
+     *     Rx.Observable.throw('Thirteens are bad') :
+     *     Rx.Observable.of('a', 'b', 'c')
+     * );
+     * result.subscribe(x => console.log(x), e => console.error(e));
+     *
+     * @see {@link create}
+     * @see {@link empty}
+     * @see {@link never}
+     * @see {@link of}
+     *
+     * @param {any} error The particular Error to pass to the error notification.
+     * @param {Scheduler} [scheduler] A {@link IScheduler} to use for scheduling
+     * the emission of the error notification.
+     * @return {Observable} An error Observable: emits only the error notification
+     * using the given error argument.
+     * @static true
+     * @name throw
+     * @owner Observable
+     */
+    ErrorObservable.create = function (error, scheduler) {
+        return new ErrorObservable(error, scheduler);
+    };
+    ErrorObservable.dispatch = function (arg) {
+        var error = arg.error, subscriber = arg.subscriber;
+        subscriber.error(error);
+    };
+    ErrorObservable.prototype._subscribe = function (subscriber) {
+        var error = this.error;
+        var scheduler = this.scheduler;
+        subscriber.syncErrorThrowable = true;
+        if (scheduler) {
+            return scheduler.schedule(ErrorObservable.dispatch, 0, {
+                error: error, subscriber: subscriber
+            });
+        }
+        else {
+            subscriber.error(error);
+        }
+    };
+    return ErrorObservable;
+}(Observable_1.Observable));
+exports.ErrorObservable = ErrorObservable;
+
+},{"../Observable":62}],209:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var EmptyObservable_1 = require('./EmptyObservable');
+var isArray_1 = require('../util/isArray');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var ForkJoinObservable = (function (_super) {
+    __extends(ForkJoinObservable, _super);
+    function ForkJoinObservable(sources, resultSelector) {
+        _super.call(this);
+        this.sources = sources;
+        this.resultSelector = resultSelector;
+    }
+    /* tslint:enable:max-line-length */
+    /**
+     * @param sources
+     * @return {any}
+     * @static true
+     * @name forkJoin
+     * @owner Observable
+     */
+    ForkJoinObservable.create = function () {
+        var sources = [];
+        for (var _i = 0; _i < arguments.length; _i++) {
+            sources[_i - 0] = arguments[_i];
+        }
+        if (sources === null || arguments.length === 0) {
+            return new EmptyObservable_1.EmptyObservable();
+        }
+        var resultSelector = null;
+        if (typeof sources[sources.length - 1] === 'function') {
+            resultSelector = sources.pop();
+        }
+        // if the first and only other argument besides the resultSelector is an array
+        // assume it's been called with `forkJoin([obs1, obs2, obs3], resultSelector)`
+        if (sources.length === 1 && isArray_1.isArray(sources[0])) {
+            sources = sources[0];
+        }
+        if (sources.length === 0) {
+            return new EmptyObservable_1.EmptyObservable();
+        }
+        return new ForkJoinObservable(sources, resultSelector);
+    };
+    ForkJoinObservable.prototype._subscribe = function (subscriber) {
+        return new ForkJoinSubscriber(subscriber, this.sources, this.resultSelector);
+    };
+    return ForkJoinObservable;
+}(Observable_1.Observable));
+exports.ForkJoinObservable = ForkJoinObservable;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var ForkJoinSubscriber = (function (_super) {
+    __extends(ForkJoinSubscriber, _super);
+    function ForkJoinSubscriber(destination, sources, resultSelector) {
+        _super.call(this, destination);
+        this.sources = sources;
+        this.resultSelector = resultSelector;
+        this.completed = 0;
+        this.haveValues = 0;
+        var len = sources.length;
+        this.total = len;
+        this.values = new Array(len);
+        for (var i = 0; i < len; i++) {
+            var source = sources[i];
+            var innerSubscription = subscribeToResult_1.subscribeToResult(this, source, null, i);
+            if (innerSubscription) {
+                innerSubscription.outerIndex = i;
+                this.add(innerSubscription);
+            }
+        }
+    }
+    ForkJoinSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.values[outerIndex] = innerValue;
+        if (!innerSub._hasValue) {
+            innerSub._hasValue = true;
+            this.haveValues++;
+        }
+    };
+    ForkJoinSubscriber.prototype.notifyComplete = function (innerSub) {
+        var destination = this.destination;
+        var _a = this, haveValues = _a.haveValues, resultSelector = _a.resultSelector, values = _a.values;
+        var len = values.length;
+        if (!innerSub._hasValue) {
+            destination.complete();
+            return;
+        }
+        this.completed++;
+        if (this.completed !== len) {
+            return;
+        }
+        if (haveValues === len) {
+            var value = resultSelector ? resultSelector.apply(this, values) : values;
+            destination.next(value);
+        }
+        destination.complete();
+    };
+    return ForkJoinSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../Observable":62,"../OuterSubscriber":64,"../util/isArray":392,"../util/subscribeToResult":403,"./EmptyObservable":207}],210:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var tryCatch_1 = require('../util/tryCatch');
+var isFunction_1 = require('../util/isFunction');
+var errorObject_1 = require('../util/errorObject');
+var Subscription_1 = require('../Subscription');
+var toString = Object.prototype.toString;
+function isNodeStyleEventEmitter(sourceObj) {
+    return !!sourceObj && typeof sourceObj.addListener === 'function' && typeof sourceObj.removeListener === 'function';
+}
+function isJQueryStyleEventEmitter(sourceObj) {
+    return !!sourceObj && typeof sourceObj.on === 'function' && typeof sourceObj.off === 'function';
+}
+function isNodeList(sourceObj) {
+    return !!sourceObj && toString.call(sourceObj) === '[object NodeList]';
+}
+function isHTMLCollection(sourceObj) {
+    return !!sourceObj && toString.call(sourceObj) === '[object HTMLCollection]';
+}
+function isEventTarget(sourceObj) {
+    return !!sourceObj && typeof sourceObj.addEventListener === 'function' && typeof sourceObj.removeEventListener === 'function';
+}
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var FromEventObservable = (function (_super) {
+    __extends(FromEventObservable, _super);
+    function FromEventObservable(sourceObj, eventName, selector, options) {
+        _super.call(this);
+        this.sourceObj = sourceObj;
+        this.eventName = eventName;
+        this.selector = selector;
+        this.options = options;
+    }
+    /* tslint:enable:max-line-length */
+    /**
+     * Creates an Observable that emits events of a specific type coming from the
+     * given event target.
+     *
+     * <span class="informal">Creates an Observable from DOM events, or Node
+     * EventEmitter events or others.</span>
+     *
+     * <img src="./img/fromEvent.png" width="100%">
+     *
+     * Creates an Observable by attaching an event listener to an "event target",
+     * which may be an object with `addEventListener` and `removeEventListener`,
+     * a Node.js EventEmitter, a jQuery style EventEmitter, a NodeList from the
+     * DOM, or an HTMLCollection from the DOM. The event handler is attached when
+     * the output Observable is subscribed, and removed when the Subscription is
+     * unsubscribed.
+     *
+     * @example <caption>Emits clicks happening on the DOM document</caption>
+     * var clicks = Rx.Observable.fromEvent(document, 'click');
+     * clicks.subscribe(x => console.log(x));
+     *
+     * // Results in:
+     * // MouseEvent object logged to console everytime a click
+     * // occurs on the document.
+     *
+     * @see {@link from}
+     * @see {@link fromEventPattern}
+     *
+     * @param {EventTargetLike} target The DOMElement, event target, Node.js
+     * EventEmitter, NodeList or HTMLCollection to attach the event handler to.
+     * @param {string} eventName The event name of interest, being emitted by the
+     * `target`.
+     * @param {EventListenerOptions} [options] Options to pass through to addEventListener
+     * @param {SelectorMethodSignature<T>} [selector] An optional function to
+     * post-process results. It takes the arguments from the event handler and
+     * should return a single value.
+     * @return {Observable<T>}
+     * @static true
+     * @name fromEvent
+     * @owner Observable
+     */
+    FromEventObservable.create = function (target, eventName, options, selector) {
+        if (isFunction_1.isFunction(options)) {
+            selector = options;
+            options = undefined;
+        }
+        return new FromEventObservable(target, eventName, selector, options);
+    };
+    FromEventObservable.setupSubscription = function (sourceObj, eventName, handler, subscriber, options) {
+        var unsubscribe;
+        if (isNodeList(sourceObj) || isHTMLCollection(sourceObj)) {
+            for (var i = 0, len = sourceObj.length; i < len; i++) {
+                FromEventObservable.setupSubscription(sourceObj[i], eventName, handler, subscriber, options);
+            }
+        }
+        else if (isEventTarget(sourceObj)) {
+            var source_1 = sourceObj;
+            sourceObj.addEventListener(eventName, handler, options);
+            unsubscribe = function () { return source_1.removeEventListener(eventName, handler); };
+        }
+        else if (isJQueryStyleEventEmitter(sourceObj)) {
+            var source_2 = sourceObj;
+            sourceObj.on(eventName, handler);
+            unsubscribe = function () { return source_2.off(eventName, handler); };
+        }
+        else if (isNodeStyleEventEmitter(sourceObj)) {
+            var source_3 = sourceObj;
+            sourceObj.addListener(eventName, handler);
+            unsubscribe = function () { return source_3.removeListener(eventName, handler); };
+        }
+        else {
+            throw new TypeError('Invalid event target');
+        }
+        subscriber.add(new Subscription_1.Subscription(unsubscribe));
+    };
+    FromEventObservable.prototype._subscribe = function (subscriber) {
+        var sourceObj = this.sourceObj;
+        var eventName = this.eventName;
+        var options = this.options;
+        var selector = this.selector;
+        var handler = selector ? function () {
+            var args = [];
+            for (var _i = 0; _i < arguments.length; _i++) {
+                args[_i - 0] = arguments[_i];
+            }
+            var result = tryCatch_1.tryCatch(selector).apply(void 0, args);
+            if (result === errorObject_1.errorObject) {
+                subscriber.error(errorObject_1.errorObject.e);
+            }
+            else {
+                subscriber.next(result);
+            }
+        } : function (e) { return subscriber.next(e); };
+        FromEventObservable.setupSubscription(sourceObj, eventName, handler, subscriber, options);
+    };
+    return FromEventObservable;
+}(Observable_1.Observable));
+exports.FromEventObservable = FromEventObservable;
+
+},{"../Observable":62,"../Subscription":71,"../util/errorObject":391,"../util/isFunction":395,"../util/tryCatch":405}],211:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var isFunction_1 = require('../util/isFunction');
+var Observable_1 = require('../Observable');
+var Subscription_1 = require('../Subscription');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var FromEventPatternObservable = (function (_super) {
+    __extends(FromEventPatternObservable, _super);
+    function FromEventPatternObservable(addHandler, removeHandler, selector) {
+        _super.call(this);
+        this.addHandler = addHandler;
+        this.removeHandler = removeHandler;
+        this.selector = selector;
+    }
+    /**
+     * Creates an Observable from an API based on addHandler/removeHandler
+     * functions.
+     *
+     * <span class="informal">Converts any addHandler/removeHandler API to an
+     * Observable.</span>
+     *
+     * <img src="./img/fromEventPattern.png" width="100%">
+     *
+     * Creates an Observable by using the `addHandler` and `removeHandler`
+     * functions to add and remove the handlers, with an optional selector
+     * function to project the event arguments to a result. The `addHandler` is
+     * called when the output Observable is subscribed, and `removeHandler` is
+     * called when the Subscription is unsubscribed.
+     *
+     * @example <caption>Emits clicks happening on the DOM document</caption>
+     * function addClickHandler(handler) {
+     *   document.addEventListener('click', handler);
+     * }
+     *
+     * function removeClickHandler(handler) {
+     *   document.removeEventListener('click', handler);
+     * }
+     *
+     * var clicks = Rx.Observable.fromEventPattern(
+     *   addClickHandler,
+     *   removeClickHandler
+     * );
+     * clicks.subscribe(x => console.log(x));
+     *
+     * @see {@link from}
+     * @see {@link fromEvent}
+     *
+     * @param {function(handler: Function): any} addHandler A function that takes
+     * a `handler` function as argument and attaches it somehow to the actual
+     * source of events.
+     * @param {function(handler: Function, signal?: any): void} [removeHandler] An optional function that
+     * takes a `handler` function as argument and removes it in case it was
+     * previously attached using `addHandler`. if addHandler returns signal to teardown when remove,
+     * removeHandler function will forward it.
+     * @param {function(...args: any): T} [selector] An optional function to
+     * post-process results. It takes the arguments from the event handler and
+     * should return a single value.
+     * @return {Observable<T>}
+     * @static true
+     * @name fromEventPattern
+     * @owner Observable
+     */
+    FromEventPatternObservable.create = function (addHandler, removeHandler, selector) {
+        return new FromEventPatternObservable(addHandler, removeHandler, selector);
+    };
+    FromEventPatternObservable.prototype._subscribe = function (subscriber) {
+        var _this = this;
+        var removeHandler = this.removeHandler;
+        var handler = !!this.selector ? function () {
+            var args = [];
+            for (var _i = 0; _i < arguments.length; _i++) {
+                args[_i - 0] = arguments[_i];
+            }
+            _this._callSelector(subscriber, args);
+        } : function (e) { subscriber.next(e); };
+        var retValue = this._callAddHandler(handler, subscriber);
+        if (!isFunction_1.isFunction(removeHandler)) {
+            return;
+        }
+        subscriber.add(new Subscription_1.Subscription(function () {
+            //TODO: determine whether or not to forward to error handler
+            removeHandler(handler, retValue);
+        }));
+    };
+    FromEventPatternObservable.prototype._callSelector = function (subscriber, args) {
+        try {
+            var result = this.selector.apply(this, args);
+            subscriber.next(result);
+        }
+        catch (e) {
+            subscriber.error(e);
+        }
+    };
+    FromEventPatternObservable.prototype._callAddHandler = function (handler, errorSubscriber) {
+        try {
+            return this.addHandler(handler) || null;
+        }
+        catch (e) {
+            errorSubscriber.error(e);
+        }
+    };
+    return FromEventPatternObservable;
+}(Observable_1.Observable));
+exports.FromEventPatternObservable = FromEventPatternObservable;
+
+},{"../Observable":62,"../Subscription":71,"../util/isFunction":395}],212:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var isArray_1 = require('../util/isArray');
+var isArrayLike_1 = require('../util/isArrayLike');
+var isPromise_1 = require('../util/isPromise');
+var PromiseObservable_1 = require('./PromiseObservable');
+var IteratorObservable_1 = require('./IteratorObservable');
+var ArrayObservable_1 = require('./ArrayObservable');
+var ArrayLikeObservable_1 = require('./ArrayLikeObservable');
+var iterator_1 = require('../symbol/iterator');
+var Observable_1 = require('../Observable');
+var observeOn_1 = require('../operator/observeOn');
+var observable_1 = require('../symbol/observable');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var FromObservable = (function (_super) {
+    __extends(FromObservable, _super);
+    function FromObservable(ish, scheduler) {
+        _super.call(this, null);
+        this.ish = ish;
+        this.scheduler = scheduler;
+    }
+    /**
+     * Creates an Observable from an Array, an array-like object, a Promise, an
+     * iterable object, or an Observable-like object.
+     *
+     * <span class="informal">Converts almost anything to an Observable.</span>
+     *
+     * <img src="./img/from.png" width="100%">
+     *
+     * Convert various other objects and data types into Observables. `from`
+     * converts a Promise or an array-like or an
+     * [iterable](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#iterable)
+     * object into an Observable that emits the items in that promise or array or
+     * iterable. A String, in this context, is treated as an array of characters.
+     * Observable-like objects (contains a function named with the ES2015 Symbol
+     * for Observable) can also be converted through this operator.
+     *
+     * @example <caption>Converts an array to an Observable</caption>
+     * var array = [10, 20, 30];
+     * var result = Rx.Observable.from(array);
+     * result.subscribe(x => console.log(x));
+     *
+     * // Results in the following:
+     * // 10 20 30
+     *
+     * @example <caption>Convert an infinite iterable (from a generator) to an Observable</caption>
+     * function* generateDoubles(seed) {
+     *   var i = seed;
+     *   while (true) {
+     *     yield i;
+     *     i = 2 * i; // double it
+     *   }
+     * }
+     *
+     * var iterator = generateDoubles(3);
+     * var result = Rx.Observable.from(iterator).take(10);
+     * result.subscribe(x => console.log(x));
+     *
+     * // Results in the following:
+     * // 3 6 12 24 48 96 192 384 768 1536
+     *
+     * @see {@link create}
+     * @see {@link fromEvent}
+     * @see {@link fromEventPattern}
+     * @see {@link fromPromise}
+     *
+     * @param {ObservableInput<T>} ish A subscribable object, a Promise, an
+     * Observable-like, an Array, an iterable or an array-like object to be
+     * converted.
+     * @param {Scheduler} [scheduler] The scheduler on which to schedule the
+     * emissions of values.
+     * @return {Observable<T>} The Observable whose values are originally from the
+     * input object that was converted.
+     * @static true
+     * @name from
+     * @owner Observable
+     */
+    FromObservable.create = function (ish, scheduler) {
+        if (ish != null) {
+            if (typeof ish[observable_1.observable] === 'function') {
+                if (ish instanceof Observable_1.Observable && !scheduler) {
+                    return ish;
+                }
+                return new FromObservable(ish, scheduler);
+            }
+            else if (isArray_1.isArray(ish)) {
+                return new ArrayObservable_1.ArrayObservable(ish, scheduler);
+            }
+            else if (isPromise_1.isPromise(ish)) {
+                return new PromiseObservable_1.PromiseObservable(ish, scheduler);
+            }
+            else if (typeof ish[iterator_1.iterator] === 'function' || typeof ish === 'string') {
+                return new IteratorObservable_1.IteratorObservable(ish, scheduler);
+            }
+            else if (isArrayLike_1.isArrayLike(ish)) {
+                return new ArrayLikeObservable_1.ArrayLikeObservable(ish, scheduler);
+            }
+        }
+        throw new TypeError((ish !== null && typeof ish || ish) + ' is not observable');
+    };
+    FromObservable.prototype._subscribe = function (subscriber) {
+        var ish = this.ish;
+        var scheduler = this.scheduler;
+        if (scheduler == null) {
+            return ish[observable_1.observable]().subscribe(subscriber);
+        }
+        else {
+            return ish[observable_1.observable]().subscribe(new observeOn_1.ObserveOnSubscriber(subscriber, scheduler, 0));
+        }
+    };
+    return FromObservable;
+}(Observable_1.Observable));
+exports.FromObservable = FromObservable;
+
+},{"../Observable":62,"../operator/observeOn":305,"../symbol/iterator":370,"../symbol/observable":371,"../util/isArray":392,"../util/isArrayLike":393,"../util/isPromise":398,"./ArrayLikeObservable":201,"./ArrayObservable":202,"./IteratorObservable":216,"./PromiseObservable":219}],213:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var isScheduler_1 = require('../util/isScheduler');
+var selfSelector = function (value) { return value; };
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var GenerateObservable = (function (_super) {
+    __extends(GenerateObservable, _super);
+    function GenerateObservable(initialState, condition, iterate, resultSelector, scheduler) {
+        _super.call(this);
+        this.initialState = initialState;
+        this.condition = condition;
+        this.iterate = iterate;
+        this.resultSelector = resultSelector;
+        this.scheduler = scheduler;
+    }
+    GenerateObservable.create = function (initialStateOrOptions, condition, iterate, resultSelectorOrObservable, scheduler) {
+        if (arguments.length == 1) {
+            return new GenerateObservable(initialStateOrOptions.initialState, initialStateOrOptions.condition, initialStateOrOptions.iterate, initialStateOrOptions.resultSelector || selfSelector, initialStateOrOptions.scheduler);
+        }
+        if (resultSelectorOrObservable === undefined || isScheduler_1.isScheduler(resultSelectorOrObservable)) {
+            return new GenerateObservable(initialStateOrOptions, condition, iterate, selfSelector, resultSelectorOrObservable);
+        }
+        return new GenerateObservable(initialStateOrOptions, condition, iterate, resultSelectorOrObservable, scheduler);
+    };
+    GenerateObservable.prototype._subscribe = function (subscriber) {
+        var state = this.initialState;
+        if (this.scheduler) {
+            return this.scheduler.schedule(GenerateObservable.dispatch, 0, {
+                subscriber: subscriber,
+                iterate: this.iterate,
+                condition: this.condition,
+                resultSelector: this.resultSelector,
+                state: state });
+        }
+        var _a = this, condition = _a.condition, resultSelector = _a.resultSelector, iterate = _a.iterate;
+        do {
+            if (condition) {
+                var conditionResult = void 0;
+                try {
+                    conditionResult = condition(state);
+                }
+                catch (err) {
+                    subscriber.error(err);
+                    return;
+                }
+                if (!conditionResult) {
+                    subscriber.complete();
+                    break;
+                }
+            }
+            var value = void 0;
+            try {
+                value = resultSelector(state);
+            }
+            catch (err) {
+                subscriber.error(err);
+                return;
+            }
+            subscriber.next(value);
+            if (subscriber.closed) {
+                break;
+            }
+            try {
+                state = iterate(state);
+            }
+            catch (err) {
+                subscriber.error(err);
+                return;
+            }
+        } while (true);
+    };
+    GenerateObservable.dispatch = function (state) {
+        var subscriber = state.subscriber, condition = state.condition;
+        if (subscriber.closed) {
+            return;
+        }
+        if (state.needIterate) {
+            try {
+                state.state = state.iterate(state.state);
+            }
+            catch (err) {
+                subscriber.error(err);
+                return;
+            }
+        }
+        else {
+            state.needIterate = true;
+        }
+        if (condition) {
+            var conditionResult = void 0;
+            try {
+                conditionResult = condition(state.state);
+            }
+            catch (err) {
+                subscriber.error(err);
+                return;
+            }
+            if (!conditionResult) {
+                subscriber.complete();
+                return;
+            }
+            if (subscriber.closed) {
+                return;
+            }
+        }
+        var value;
+        try {
+            value = state.resultSelector(state.state);
+        }
+        catch (err) {
+            subscriber.error(err);
+            return;
+        }
+        if (subscriber.closed) {
+            return;
+        }
+        subscriber.next(value);
+        if (subscriber.closed) {
+            return;
+        }
+        return this.schedule(state);
+    };
+    return GenerateObservable;
+}(Observable_1.Observable));
+exports.GenerateObservable = GenerateObservable;
+
+},{"../Observable":62,"../util/isScheduler":399}],214:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var IfObservable = (function (_super) {
+    __extends(IfObservable, _super);
+    function IfObservable(condition, thenSource, elseSource) {
+        _super.call(this);
+        this.condition = condition;
+        this.thenSource = thenSource;
+        this.elseSource = elseSource;
+    }
+    IfObservable.create = function (condition, thenSource, elseSource) {
+        return new IfObservable(condition, thenSource, elseSource);
+    };
+    IfObservable.prototype._subscribe = function (subscriber) {
+        var _a = this, condition = _a.condition, thenSource = _a.thenSource, elseSource = _a.elseSource;
+        return new IfSubscriber(subscriber, condition, thenSource, elseSource);
+    };
+    return IfObservable;
+}(Observable_1.Observable));
+exports.IfObservable = IfObservable;
+var IfSubscriber = (function (_super) {
+    __extends(IfSubscriber, _super);
+    function IfSubscriber(destination, condition, thenSource, elseSource) {
+        _super.call(this, destination);
+        this.condition = condition;
+        this.thenSource = thenSource;
+        this.elseSource = elseSource;
+        this.tryIf();
+    }
+    IfSubscriber.prototype.tryIf = function () {
+        var _a = this, condition = _a.condition, thenSource = _a.thenSource, elseSource = _a.elseSource;
+        var result;
+        try {
+            result = condition();
+            var source = result ? thenSource : elseSource;
+            if (source) {
+                this.add(subscribeToResult_1.subscribeToResult(this, source));
+            }
+            else {
+                this._complete();
+            }
+        }
+        catch (err) {
+            this._error(err);
+        }
+    };
+    return IfSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../Observable":62,"../OuterSubscriber":64,"../util/subscribeToResult":403}],215:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var isNumeric_1 = require('../util/isNumeric');
+var Observable_1 = require('../Observable');
+var async_1 = require('../scheduler/async');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var IntervalObservable = (function (_super) {
+    __extends(IntervalObservable, _super);
+    function IntervalObservable(period, scheduler) {
+        if (period === void 0) { period = 0; }
+        if (scheduler === void 0) { scheduler = async_1.async; }
+        _super.call(this);
+        this.period = period;
+        this.scheduler = scheduler;
+        if (!isNumeric_1.isNumeric(period) || period < 0) {
+            this.period = 0;
+        }
+        if (!scheduler || typeof scheduler.schedule !== 'function') {
+            this.scheduler = async_1.async;
+        }
+    }
+    /**
+     * Creates an Observable that emits sequential numbers every specified
+     * interval of time, on a specified IScheduler.
+     *
+     * <span class="informal">Emits incremental numbers periodically in time.
+     * </span>
+     *
+     * <img src="./img/interval.png" width="100%">
+     *
+     * `interval` returns an Observable that emits an infinite sequence of
+     * ascending integers, with a constant interval of time of your choosing
+     * between those emissions. The first emission is not sent immediately, but
+     * only after the first period has passed. By default, this operator uses the
+     * `async` IScheduler to provide a notion of time, but you may pass any
+     * IScheduler to it.
+     *
+     * @example <caption>Emits ascending numbers, one every second (1000ms)</caption>
+     * var numbers = Rx.Observable.interval(1000);
+     * numbers.subscribe(x => console.log(x));
+     *
+     * @see {@link timer}
+     * @see {@link delay}
+     *
+     * @param {number} [period=0] The interval size in milliseconds (by default)
+     * or the time unit determined by the scheduler's clock.
+     * @param {Scheduler} [scheduler=async] The IScheduler to use for scheduling
+     * the emission of values, and providing a notion of "time".
+     * @return {Observable} An Observable that emits a sequential number each time
+     * interval.
+     * @static true
+     * @name interval
+     * @owner Observable
+     */
+    IntervalObservable.create = function (period, scheduler) {
+        if (period === void 0) { period = 0; }
+        if (scheduler === void 0) { scheduler = async_1.async; }
+        return new IntervalObservable(period, scheduler);
+    };
+    IntervalObservable.dispatch = function (state) {
+        var index = state.index, subscriber = state.subscriber, period = state.period;
+        subscriber.next(index);
+        if (subscriber.closed) {
+            return;
+        }
+        state.index += 1;
+        this.schedule(state, period);
+    };
+    IntervalObservable.prototype._subscribe = function (subscriber) {
+        var index = 0;
+        var period = this.period;
+        var scheduler = this.scheduler;
+        subscriber.add(scheduler.schedule(IntervalObservable.dispatch, period, {
+            index: index, subscriber: subscriber, period: period
+        }));
+    };
+    return IntervalObservable;
+}(Observable_1.Observable));
+exports.IntervalObservable = IntervalObservable;
+
+},{"../Observable":62,"../scheduler/async":368,"../util/isNumeric":396}],216:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var root_1 = require('../util/root');
+var Observable_1 = require('../Observable');
+var iterator_1 = require('../symbol/iterator');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var IteratorObservable = (function (_super) {
+    __extends(IteratorObservable, _super);
+    function IteratorObservable(iterator, scheduler) {
+        _super.call(this);
+        this.scheduler = scheduler;
+        if (iterator == null) {
+            throw new Error('iterator cannot be null.');
+        }
+        this.iterator = getIterator(iterator);
+    }
+    IteratorObservable.create = function (iterator, scheduler) {
+        return new IteratorObservable(iterator, scheduler);
+    };
+    IteratorObservable.dispatch = function (state) {
+        var index = state.index, hasError = state.hasError, iterator = state.iterator, subscriber = state.subscriber;
+        if (hasError) {
+            subscriber.error(state.error);
+            return;
+        }
+        var result = iterator.next();
+        if (result.done) {
+            subscriber.complete();
+            return;
+        }
+        subscriber.next(result.value);
+        state.index = index + 1;
+        if (subscriber.closed) {
+            if (typeof iterator.return === 'function') {
+                iterator.return();
+            }
+            return;
+        }
+        this.schedule(state);
+    };
+    IteratorObservable.prototype._subscribe = function (subscriber) {
+        var index = 0;
+        var _a = this, iterator = _a.iterator, scheduler = _a.scheduler;
+        if (scheduler) {
+            return scheduler.schedule(IteratorObservable.dispatch, 0, {
+                index: index, iterator: iterator, subscriber: subscriber
+            });
+        }
+        else {
+            do {
+                var result = iterator.next();
+                if (result.done) {
+                    subscriber.complete();
+                    break;
+                }
+                else {
+                    subscriber.next(result.value);
+                }
+                if (subscriber.closed) {
+                    if (typeof iterator.return === 'function') {
+                        iterator.return();
+                    }
+                    break;
+                }
+            } while (true);
+        }
+    };
+    return IteratorObservable;
+}(Observable_1.Observable));
+exports.IteratorObservable = IteratorObservable;
+var StringIterator = (function () {
+    function StringIterator(str, idx, len) {
+        if (idx === void 0) { idx = 0; }
+        if (len === void 0) { len = str.length; }
+        this.str = str;
+        this.idx = idx;
+        this.len = len;
+    }
+    StringIterator.prototype[iterator_1.iterator] = function () { return (this); };
+    StringIterator.prototype.next = function () {
+        return this.idx < this.len ? {
+            done: false,
+            value: this.str.charAt(this.idx++)
+        } : {
+            done: true,
+            value: undefined
+        };
+    };
+    return StringIterator;
+}());
+var ArrayIterator = (function () {
+    function ArrayIterator(arr, idx, len) {
+        if (idx === void 0) { idx = 0; }
+        if (len === void 0) { len = toLength(arr); }
+        this.arr = arr;
+        this.idx = idx;
+        this.len = len;
+    }
+    ArrayIterator.prototype[iterator_1.iterator] = function () { return this; };
+    ArrayIterator.prototype.next = function () {
+        return this.idx < this.len ? {
+            done: false,
+            value: this.arr[this.idx++]
+        } : {
+            done: true,
+            value: undefined
+        };
+    };
+    return ArrayIterator;
+}());
+function getIterator(obj) {
+    var i = obj[iterator_1.iterator];
+    if (!i && typeof obj === 'string') {
+        return new StringIterator(obj);
+    }
+    if (!i && obj.length !== undefined) {
+        return new ArrayIterator(obj);
+    }
+    if (!i) {
+        throw new TypeError('object is not iterable');
+    }
+    return obj[iterator_1.iterator]();
+}
+var maxSafeInteger = Math.pow(2, 53) - 1;
+function toLength(o) {
+    var len = +o.length;
+    if (isNaN(len)) {
+        return 0;
+    }
+    if (len === 0 || !numberIsFinite(len)) {
+        return len;
+    }
+    len = sign(len) * Math.floor(Math.abs(len));
+    if (len <= 0) {
+        return 0;
+    }
+    if (len > maxSafeInteger) {
+        return maxSafeInteger;
+    }
+    return len;
+}
+function numberIsFinite(value) {
+    return typeof value === 'number' && root_1.root.isFinite(value);
+}
+function sign(value) {
+    var valueAsNumber = +value;
+    if (valueAsNumber === 0) {
+        return valueAsNumber;
+    }
+    if (isNaN(valueAsNumber)) {
+        return valueAsNumber;
+    }
+    return valueAsNumber < 0 ? -1 : 1;
+}
+
+},{"../Observable":62,"../symbol/iterator":370,"../util/root":402}],217:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var noop_1 = require('../util/noop');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var NeverObservable = (function (_super) {
+    __extends(NeverObservable, _super);
+    function NeverObservable() {
+        _super.call(this);
+    }
+    /**
+     * Creates an Observable that emits no items to the Observer.
+     *
+     * <span class="informal">An Observable that never emits anything.</span>
+     *
+     * <img src="./img/never.png" width="100%">
+     *
+     * This static operator is useful for creating a simple Observable that emits
+     * neither values nor errors nor the completion notification. It can be used
+     * for testing purposes or for composing with other Observables. Please note
+     * that by never emitting a complete notification, this Observable keeps the
+     * subscription from being disposed automatically. Subscriptions need to be
+     * manually disposed.
+     *
+     * @example <caption>Emit the number 7, then never emit anything else (not even complete).</caption>
+     * function info() {
+     *   console.log('Will not be called');
+     * }
+     * var result = Rx.Observable.never().startWith(7);
+     * result.subscribe(x => console.log(x), info, info);
+     *
+     * @see {@link create}
+     * @see {@link empty}
+     * @see {@link of}
+     * @see {@link throw}
+     *
+     * @return {Observable} A "never" Observable: never emits anything.
+     * @static true
+     * @name never
+     * @owner Observable
+     */
+    NeverObservable.create = function () {
+        return new NeverObservable();
+    };
+    NeverObservable.prototype._subscribe = function (subscriber) {
+        noop_1.noop();
+    };
+    return NeverObservable;
+}(Observable_1.Observable));
+exports.NeverObservable = NeverObservable;
+
+},{"../Observable":62,"../util/noop":400}],218:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+function dispatch(state) {
+    var obj = state.obj, keys = state.keys, length = state.length, index = state.index, subscriber = state.subscriber;
+    if (index === length) {
+        subscriber.complete();
+        return;
+    }
+    var key = keys[index];
+    subscriber.next([key, obj[key]]);
+    state.index = index + 1;
+    this.schedule(state);
+}
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var PairsObservable = (function (_super) {
+    __extends(PairsObservable, _super);
+    function PairsObservable(obj, scheduler) {
+        _super.call(this);
+        this.obj = obj;
+        this.scheduler = scheduler;
+        this.keys = Object.keys(obj);
+    }
+    /**
+     * Convert an object into an observable sequence of [key, value] pairs
+     * using an optional IScheduler to enumerate the object.
+     *
+     * @example <caption>Converts a javascript object to an Observable</caption>
+     * var obj = {
+     *   foo: 42,
+     *   bar: 56,
+     *   baz: 78
+     * };
+     *
+     * var source = Rx.Observable.pairs(obj);
+     *
+     * var subscription = source.subscribe(
+     *   function (x) {
+     *     console.log('Next: %s', x);
+     *   },
+     *   function (err) {
+     *     console.log('Error: %s', err);
+     *   },
+     *   function () {
+     *     console.log('Completed');
+     *   });
+     *
+     * @param {Object} obj The object to inspect and turn into an
+     * Observable sequence.
+     * @param {Scheduler} [scheduler] An optional IScheduler to run the
+     * enumeration of the input sequence on.
+     * @returns {(Observable<Array<string | T>>)} An observable sequence of
+     * [key, value] pairs from the object.
+     */
+    PairsObservable.create = function (obj, scheduler) {
+        return new PairsObservable(obj, scheduler);
+    };
+    PairsObservable.prototype._subscribe = function (subscriber) {
+        var _a = this, keys = _a.keys, scheduler = _a.scheduler;
+        var length = keys.length;
+        if (scheduler) {
+            return scheduler.schedule(dispatch, 0, {
+                obj: this.obj, keys: keys, length: length, index: 0, subscriber: subscriber
+            });
+        }
+        else {
+            for (var idx = 0; idx < length; idx++) {
+                var key = keys[idx];
+                subscriber.next([key, this.obj[key]]);
+            }
+            subscriber.complete();
+        }
+    };
+    return PairsObservable;
+}(Observable_1.Observable));
+exports.PairsObservable = PairsObservable;
+
+},{"../Observable":62}],219:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var root_1 = require('../util/root');
+var Observable_1 = require('../Observable');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var PromiseObservable = (function (_super) {
+    __extends(PromiseObservable, _super);
+    function PromiseObservable(promise, scheduler) {
+        _super.call(this);
+        this.promise = promise;
+        this.scheduler = scheduler;
+    }
+    /**
+     * Converts a Promise to an Observable.
+     *
+     * <span class="informal">Returns an Observable that just emits the Promise's
+     * resolved value, then completes.</span>
+     *
+     * Converts an ES2015 Promise or a Promises/A+ spec compliant Promise to an
+     * Observable. If the Promise resolves with a value, the output Observable
+     * emits that resolved value as a `next`, and then completes. If the Promise
+     * is rejected, then the output Observable emits the corresponding Error.
+     *
+     * @example <caption>Convert the Promise returned by Fetch to an Observable</caption>
+     * var result = Rx.Observable.fromPromise(fetch('http://myserver.com/'));
+     * result.subscribe(x => console.log(x), e => console.error(e));
+     *
+     * @see {@link bindCallback}
+     * @see {@link from}
+     *
+     * @param {PromiseLike<T>} promise The promise to be converted.
+     * @param {Scheduler} [scheduler] An optional IScheduler to use for scheduling
+     * the delivery of the resolved value (or the rejection).
+     * @return {Observable<T>} An Observable which wraps the Promise.
+     * @static true
+     * @name fromPromise
+     * @owner Observable
+     */
+    PromiseObservable.create = function (promise, scheduler) {
+        return new PromiseObservable(promise, scheduler);
+    };
+    PromiseObservable.prototype._subscribe = function (subscriber) {
+        var _this = this;
+        var promise = this.promise;
+        var scheduler = this.scheduler;
+        if (scheduler == null) {
+            if (this._isScalar) {
+                if (!subscriber.closed) {
+                    subscriber.next(this.value);
+                    subscriber.complete();
+                }
+            }
+            else {
+                promise.then(function (value) {
+                    _this.value = value;
+                    _this._isScalar = true;
+                    if (!subscriber.closed) {
+                        subscriber.next(value);
+                        subscriber.complete();
+                    }
+                }, function (err) {
+                    if (!subscriber.closed) {
+                        subscriber.error(err);
+                    }
+                })
+                    .then(null, function (err) {
+                    // escape the promise trap, throw unhandled errors
+                    root_1.root.setTimeout(function () { throw err; });
+                });
+            }
+        }
+        else {
+            if (this._isScalar) {
+                if (!subscriber.closed) {
+                    return scheduler.schedule(dispatchNext, 0, { value: this.value, subscriber: subscriber });
+                }
+            }
+            else {
+                promise.then(function (value) {
+                    _this.value = value;
+                    _this._isScalar = true;
+                    if (!subscriber.closed) {
+                        subscriber.add(scheduler.schedule(dispatchNext, 0, { value: value, subscriber: subscriber }));
+                    }
+                }, function (err) {
+                    if (!subscriber.closed) {
+                        subscriber.add(scheduler.schedule(dispatchError, 0, { err: err, subscriber: subscriber }));
+                    }
+                })
+                    .then(null, function (err) {
+                    // escape the promise trap, throw unhandled errors
+                    root_1.root.setTimeout(function () { throw err; });
+                });
+            }
+        }
+    };
+    return PromiseObservable;
+}(Observable_1.Observable));
+exports.PromiseObservable = PromiseObservable;
+function dispatchNext(arg) {
+    var value = arg.value, subscriber = arg.subscriber;
+    if (!subscriber.closed) {
+        subscriber.next(value);
+        subscriber.complete();
+    }
+}
+function dispatchError(arg) {
+    var err = arg.err, subscriber = arg.subscriber;
+    if (!subscriber.closed) {
+        subscriber.error(err);
+    }
+}
+
+},{"../Observable":62,"../util/root":402}],220:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var RangeObservable = (function (_super) {
+    __extends(RangeObservable, _super);
+    function RangeObservable(start, count, scheduler) {
+        _super.call(this);
+        this.start = start;
+        this._count = count;
+        this.scheduler = scheduler;
+    }
+    /**
+     * Creates an Observable that emits a sequence of numbers within a specified
+     * range.
+     *
+     * <span class="informal">Emits a sequence of numbers in a range.</span>
+     *
+     * <img src="./img/range.png" width="100%">
+     *
+     * `range` operator emits a range of sequential integers, in order, where you
+     * select the `start` of the range and its `length`. By default, uses no
+     * IScheduler and just delivers the notifications synchronously, but may use
+     * an optional IScheduler to regulate those deliveries.
+     *
+     * @example <caption>Emits the numbers 1 to 10</caption>
+     * var numbers = Rx.Observable.range(1, 10);
+     * numbers.subscribe(x => console.log(x));
+     *
+     * @see {@link timer}
+     * @see {@link interval}
+     *
+     * @param {number} [start=0] The value of the first integer in the sequence.
+     * @param {number} [count=0] The number of sequential integers to generate.
+     * @param {Scheduler} [scheduler] A {@link IScheduler} to use for scheduling
+     * the emissions of the notifications.
+     * @return {Observable} An Observable of numbers that emits a finite range of
+     * sequential integers.
+     * @static true
+     * @name range
+     * @owner Observable
+     */
+    RangeObservable.create = function (start, count, scheduler) {
+        if (start === void 0) { start = 0; }
+        if (count === void 0) { count = 0; }
+        return new RangeObservable(start, count, scheduler);
+    };
+    RangeObservable.dispatch = function (state) {
+        var start = state.start, index = state.index, count = state.count, subscriber = state.subscriber;
+        if (index >= count) {
+            subscriber.complete();
+            return;
+        }
+        subscriber.next(start);
+        if (subscriber.closed) {
+            return;
+        }
+        state.index = index + 1;
+        state.start = start + 1;
+        this.schedule(state);
+    };
+    RangeObservable.prototype._subscribe = function (subscriber) {
+        var index = 0;
+        var start = this.start;
+        var count = this._count;
+        var scheduler = this.scheduler;
+        if (scheduler) {
+            return scheduler.schedule(RangeObservable.dispatch, 0, {
+                index: index, count: count, start: start, subscriber: subscriber
+            });
+        }
+        else {
+            do {
+                if (index++ >= count) {
+                    subscriber.complete();
+                    break;
+                }
+                subscriber.next(start++);
+                if (subscriber.closed) {
+                    break;
+                }
+            } while (true);
+        }
+    };
+    return RangeObservable;
+}(Observable_1.Observable));
+exports.RangeObservable = RangeObservable;
+
+},{"../Observable":62}],221:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var ScalarObservable = (function (_super) {
+    __extends(ScalarObservable, _super);
+    function ScalarObservable(value, scheduler) {
+        _super.call(this);
+        this.value = value;
+        this.scheduler = scheduler;
+        this._isScalar = true;
+        if (scheduler) {
+            this._isScalar = false;
+        }
+    }
+    ScalarObservable.create = function (value, scheduler) {
+        return new ScalarObservable(value, scheduler);
+    };
+    ScalarObservable.dispatch = function (state) {
+        var done = state.done, value = state.value, subscriber = state.subscriber;
+        if (done) {
+            subscriber.complete();
+            return;
+        }
+        subscriber.next(value);
+        if (subscriber.closed) {
+            return;
+        }
+        state.done = true;
+        this.schedule(state);
+    };
+    ScalarObservable.prototype._subscribe = function (subscriber) {
+        var value = this.value;
+        var scheduler = this.scheduler;
+        if (scheduler) {
+            return scheduler.schedule(ScalarObservable.dispatch, 0, {
+                done: false, value: value, subscriber: subscriber
+            });
+        }
+        else {
+            subscriber.next(value);
+            if (!subscriber.closed) {
+                subscriber.complete();
+            }
+        }
+    };
+    return ScalarObservable;
+}(Observable_1.Observable));
+exports.ScalarObservable = ScalarObservable;
+
+},{"../Observable":62}],222:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var asap_1 = require('../scheduler/asap');
+var isNumeric_1 = require('../util/isNumeric');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var SubscribeOnObservable = (function (_super) {
+    __extends(SubscribeOnObservable, _super);
+    function SubscribeOnObservable(source, delayTime, scheduler) {
+        if (delayTime === void 0) { delayTime = 0; }
+        if (scheduler === void 0) { scheduler = asap_1.asap; }
+        _super.call(this);
+        this.source = source;
+        this.delayTime = delayTime;
+        this.scheduler = scheduler;
+        if (!isNumeric_1.isNumeric(delayTime) || delayTime < 0) {
+            this.delayTime = 0;
+        }
+        if (!scheduler || typeof scheduler.schedule !== 'function') {
+            this.scheduler = asap_1.asap;
+        }
+    }
+    SubscribeOnObservable.create = function (source, delay, scheduler) {
+        if (delay === void 0) { delay = 0; }
+        if (scheduler === void 0) { scheduler = asap_1.asap; }
+        return new SubscribeOnObservable(source, delay, scheduler);
+    };
+    SubscribeOnObservable.dispatch = function (arg) {
+        var source = arg.source, subscriber = arg.subscriber;
+        return this.add(source.subscribe(subscriber));
+    };
+    SubscribeOnObservable.prototype._subscribe = function (subscriber) {
+        var delay = this.delayTime;
+        var source = this.source;
+        var scheduler = this.scheduler;
+        return scheduler.schedule(SubscribeOnObservable.dispatch, delay, {
+            source: source, subscriber: subscriber
+        });
+    };
+    return SubscribeOnObservable;
+}(Observable_1.Observable));
+exports.SubscribeOnObservable = SubscribeOnObservable;
+
+},{"../Observable":62,"../scheduler/asap":367,"../util/isNumeric":396}],223:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var isNumeric_1 = require('../util/isNumeric');
+var Observable_1 = require('../Observable');
+var async_1 = require('../scheduler/async');
+var isScheduler_1 = require('../util/isScheduler');
+var isDate_1 = require('../util/isDate');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var TimerObservable = (function (_super) {
+    __extends(TimerObservable, _super);
+    function TimerObservable(dueTime, period, scheduler) {
+        if (dueTime === void 0) { dueTime = 0; }
+        _super.call(this);
+        this.period = -1;
+        this.dueTime = 0;
+        if (isNumeric_1.isNumeric(period)) {
+            this.period = Number(period) < 1 && 1 || Number(period);
+        }
+        else if (isScheduler_1.isScheduler(period)) {
+            scheduler = period;
+        }
+        if (!isScheduler_1.isScheduler(scheduler)) {
+            scheduler = async_1.async;
+        }
+        this.scheduler = scheduler;
+        this.dueTime = isDate_1.isDate(dueTime) ?
+            (+dueTime - this.scheduler.now()) :
+            dueTime;
+    }
+    /**
+     * Creates an Observable that starts emitting after an `initialDelay` and
+     * emits ever increasing numbers after each `period` of time thereafter.
+     *
+     * <span class="informal">Its like {@link interval}, but you can specify when
+     * should the emissions start.</span>
+     *
+     * <img src="./img/timer.png" width="100%">
+     *
+     * `timer` returns an Observable that emits an infinite sequence of ascending
+     * integers, with a constant interval of time, `period` of your choosing
+     * between those emissions. The first emission happens after the specified
+     * `initialDelay`. The initial delay may be a {@link Date}. By default, this
+     * operator uses the `async` IScheduler to provide a notion of time, but you
+     * may pass any IScheduler to it. If `period` is not specified, the output
+     * Observable emits only one value, `0`. Otherwise, it emits an infinite
+     * sequence.
+     *
+     * @example <caption>Emits ascending numbers, one every second (1000ms), starting after 3 seconds</caption>
+     * var numbers = Rx.Observable.timer(3000, 1000);
+     * numbers.subscribe(x => console.log(x));
+     *
+     * @example <caption>Emits one number after five seconds</caption>
+     * var numbers = Rx.Observable.timer(5000);
+     * numbers.subscribe(x => console.log(x));
+     *
+     * @see {@link interval}
+     * @see {@link delay}
+     *
+     * @param {number|Date} initialDelay The initial delay time to wait before
+     * emitting the first value of `0`.
+     * @param {number} [period] The period of time between emissions of the
+     * subsequent numbers.
+     * @param {Scheduler} [scheduler=async] The IScheduler to use for scheduling
+     * the emission of values, and providing a notion of "time".
+     * @return {Observable} An Observable that emits a `0` after the
+     * `initialDelay` and ever increasing numbers after each `period` of time
+     * thereafter.
+     * @static true
+     * @name timer
+     * @owner Observable
+     */
+    TimerObservable.create = function (initialDelay, period, scheduler) {
+        if (initialDelay === void 0) { initialDelay = 0; }
+        return new TimerObservable(initialDelay, period, scheduler);
+    };
+    TimerObservable.dispatch = function (state) {
+        var index = state.index, period = state.period, subscriber = state.subscriber;
+        var action = this;
+        subscriber.next(index);
+        if (subscriber.closed) {
+            return;
+        }
+        else if (period === -1) {
+            return subscriber.complete();
+        }
+        state.index = index + 1;
+        action.schedule(state, period);
+    };
+    TimerObservable.prototype._subscribe = function (subscriber) {
+        var index = 0;
+        var _a = this, period = _a.period, dueTime = _a.dueTime, scheduler = _a.scheduler;
+        return scheduler.schedule(TimerObservable.dispatch, dueTime, {
+            index: index, period: period, subscriber: subscriber
+        });
+    };
+    return TimerObservable;
+}(Observable_1.Observable));
+exports.TimerObservable = TimerObservable;
+
+},{"../Observable":62,"../scheduler/async":368,"../util/isDate":394,"../util/isNumeric":396,"../util/isScheduler":399}],224:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var UsingObservable = (function (_super) {
+    __extends(UsingObservable, _super);
+    function UsingObservable(resourceFactory, observableFactory) {
+        _super.call(this);
+        this.resourceFactory = resourceFactory;
+        this.observableFactory = observableFactory;
+    }
+    UsingObservable.create = function (resourceFactory, observableFactory) {
+        return new UsingObservable(resourceFactory, observableFactory);
+    };
+    UsingObservable.prototype._subscribe = function (subscriber) {
+        var _a = this, resourceFactory = _a.resourceFactory, observableFactory = _a.observableFactory;
+        var resource;
+        try {
+            resource = resourceFactory();
+            return new UsingSubscriber(subscriber, resource, observableFactory);
+        }
+        catch (err) {
+            subscriber.error(err);
+        }
+    };
+    return UsingObservable;
+}(Observable_1.Observable));
+exports.UsingObservable = UsingObservable;
+var UsingSubscriber = (function (_super) {
+    __extends(UsingSubscriber, _super);
+    function UsingSubscriber(destination, resource, observableFactory) {
+        _super.call(this, destination);
+        this.resource = resource;
+        this.observableFactory = observableFactory;
+        destination.add(resource);
+        this.tryUse();
+    }
+    UsingSubscriber.prototype.tryUse = function () {
+        try {
+            var source = this.observableFactory.call(this, this.resource);
+            if (source) {
+                this.add(subscribeToResult_1.subscribeToResult(this, source));
+            }
+        }
+        catch (err) {
+            this._error(err);
+        }
+    };
+    return UsingSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../Observable":62,"../OuterSubscriber":64,"../util/subscribeToResult":403}],225:[function(require,module,exports){
+"use strict";
+var BoundCallbackObservable_1 = require('./BoundCallbackObservable');
+exports.bindCallback = BoundCallbackObservable_1.BoundCallbackObservable.create;
+
+},{"./BoundCallbackObservable":203}],226:[function(require,module,exports){
+"use strict";
+var BoundNodeCallbackObservable_1 = require('./BoundNodeCallbackObservable');
+exports.bindNodeCallback = BoundNodeCallbackObservable_1.BoundNodeCallbackObservable.create;
+
+},{"./BoundNodeCallbackObservable":204}],227:[function(require,module,exports){
+"use strict";
+var isScheduler_1 = require('../util/isScheduler');
+var isArray_1 = require('../util/isArray');
+var ArrayObservable_1 = require('./ArrayObservable');
+var combineLatest_1 = require('../operator/combineLatest');
+/* tslint:enable:max-line-length */
+/**
+ * Combines multiple Observables to create an Observable whose values are
+ * calculated from the latest values of each of its input Observables.
+ *
+ * <span class="informal">Whenever any input Observable emits a value, it
+ * computes a formula using the latest values from all the inputs, then emits
+ * the output of that formula.</span>
+ *
+ * <img src="./img/combineLatest.png" width="100%">
+ *
+ * `combineLatest` combines the values from all the Observables passed as
+ * arguments. This is done by subscribing to each Observable in order and,
+ * whenever any Observable emits, collecting an array of the most recent
+ * values from each Observable. So if you pass `n` Observables to operator,
+ * returned Observable will always emit an array of `n` values, in order
+ * corresponding to order of passed Observables (value from the first Observable
+ * on the first place and so on).
+ *
+ * Static version of `combineLatest` accepts either an array of Observables
+ * or each Observable can be put directly as an argument. Note that array of
+ * Observables is good choice, if you don't know beforehand how many Observables
+ * you will combine. Passing empty array will result in Observable that
+ * completes immediately.
+ *
+ * To ensure output array has always the same length, `combineLatest` will
+ * actually wait for all input Observables to emit at least once,
+ * before it starts emitting results. This means if some Observable emits
+ * values before other Observables started emitting, all that values but last
+ * will be lost. On the other hand, is some Observable does not emit value but
+ * completes, resulting Observable will complete at the same moment without
+ * emitting anything, since it will be now impossible to include value from
+ * completed Observable in resulting array. Also, if some input Observable does
+ * not emit any value and never completes, `combineLatest` will also never emit
+ * and never complete, since, again, it will wait for all streams to emit some
+ * value.
+ *
+ * If at least one Observable was passed to `combineLatest` and all passed Observables
+ * emitted something, resulting Observable will complete when all combined
+ * streams complete. So even if some Observable completes, result of
+ * `combineLatest` will still emit values when other Observables do. In case
+ * of completed Observable, its value from now on will always be the last
+ * emitted value. On the other hand, if any Observable errors, `combineLatest`
+ * will error immediately as well, and all other Observables will be unsubscribed.
+ *
+ * `combineLatest` accepts as optional parameter `project` function, which takes
+ * as arguments all values that would normally be emitted by resulting Observable.
+ * `project` can return any kind of value, which will be then emitted by Observable
+ * instead of default array. Note that `project` does not take as argument that array
+ * of values, but values themselves. That means default `project` can be imagined
+ * as function that takes all its arguments and puts them into an array.
+ *
+ *
+ * @example <caption>Combine two timer Observables</caption>
+ * const firstTimer = Rx.Observable.timer(0, 1000); // emit 0, 1, 2... after every second, starting from now
+ * const secondTimer = Rx.Observable.timer(500, 1000); // emit 0, 1, 2... after every second, starting 0,5s from now
+ * const combinedTimers = Rx.Observable.combineLatest(firstTimer, secondTimer);
+ * combinedTimers.subscribe(value => console.log(value));
+ * // Logs
+ * // [0, 0] after 0.5s
+ * // [1, 0] after 1s
+ * // [1, 1] after 1.5s
+ * // [2, 1] after 2s
+ *
+ *
+ * @example <caption>Combine an array of Observables</caption>
+ * const observables = [1, 5, 10].map(
+ *   n => Rx.Observable.of(n).delay(n * 1000).startWith(0) // emit 0 and then emit n after n seconds
+ * );
+ * const combined = Rx.Observable.combineLatest(observables);
+ * combined.subscribe(value => console.log(value));
+ * // Logs
+ * // [0, 0, 0] immediately
+ * // [1, 0, 0] after 1s
+ * // [1, 5, 0] after 5s
+ * // [1, 5, 10] after 10s
+ *
+ *
+ * @example <caption>Use project function to dynamically calculate the Body-Mass Index</caption>
+ * var weight = Rx.Observable.of(70, 72, 76, 79, 75);
+ * var height = Rx.Observable.of(1.76, 1.77, 1.78);
+ * var bmi = Rx.Observable.combineLatest(weight, height, (w, h) => w / (h * h));
+ * bmi.subscribe(x => console.log('BMI is ' + x));
+ *
+ * // With output to console:
+ * // BMI is 24.212293388429753
+ * // BMI is 23.93948099205209
+ * // BMI is 23.671253629592222
+ *
+ *
+ * @see {@link combineAll}
+ * @see {@link merge}
+ * @see {@link withLatestFrom}
+ *
+ * @param {ObservableInput} observable1 An input Observable to combine with other Observables.
+ * @param {ObservableInput} observable2 An input Observable to combine with other Observables.
+ * More than one input Observables may be given as arguments
+ * or an array of Observables may be given as the first argument.
+ * @param {function} [project] An optional function to project the values from
+ * the combined latest values into a new value on the output Observable.
+ * @param {Scheduler} [scheduler=null] The IScheduler to use for subscribing to
+ * each input Observable.
+ * @return {Observable} An Observable of projected values from the most recent
+ * values from each input Observable, or an array of the most recent values from
+ * each input Observable.
+ * @static true
+ * @name combineLatest
+ * @owner Observable
+ */
+function combineLatest() {
+    var observables = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        observables[_i - 0] = arguments[_i];
+    }
+    var project = null;
+    var scheduler = null;
+    if (isScheduler_1.isScheduler(observables[observables.length - 1])) {
+        scheduler = observables.pop();
+    }
+    if (typeof observables[observables.length - 1] === 'function') {
+        project = observables.pop();
+    }
+    // if the first and only other argument besides the resultSelector is an array
+    // assume it's been called with `combineLatest([obs1, obs2, obs3], project)`
+    if (observables.length === 1 && isArray_1.isArray(observables[0])) {
+        observables = observables[0];
+    }
+    return new ArrayObservable_1.ArrayObservable(observables, scheduler).lift(new combineLatest_1.CombineLatestOperator(project));
+}
+exports.combineLatest = combineLatest;
+
+},{"../operator/combineLatest":263,"../util/isArray":392,"../util/isScheduler":399,"./ArrayObservable":202}],228:[function(require,module,exports){
+"use strict";
+var concat_1 = require('../operator/concat');
+exports.concat = concat_1.concatStatic;
+
+},{"../operator/concat":264}],229:[function(require,module,exports){
+"use strict";
+var DeferObservable_1 = require('./DeferObservable');
+exports.defer = DeferObservable_1.DeferObservable.create;
+
+},{"./DeferObservable":206}],230:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var root_1 = require('../../util/root');
+var tryCatch_1 = require('../../util/tryCatch');
+var errorObject_1 = require('../../util/errorObject');
+var Observable_1 = require('../../Observable');
+var Subscriber_1 = require('../../Subscriber');
+var map_1 = require('../../operator/map');
+function getCORSRequest() {
+    if (root_1.root.XMLHttpRequest) {
+        return new root_1.root.XMLHttpRequest();
+    }
+    else if (!!root_1.root.XDomainRequest) {
+        return new root_1.root.XDomainRequest();
+    }
+    else {
+        throw new Error('CORS is not supported by your browser');
+    }
+}
+function getXMLHttpRequest() {
+    if (root_1.root.XMLHttpRequest) {
+        return new root_1.root.XMLHttpRequest();
+    }
+    else {
+        var progId = void 0;
+        try {
+            var progIds = ['Msxml2.XMLHTTP', 'Microsoft.XMLHTTP', 'Msxml2.XMLHTTP.4.0'];
+            for (var i = 0; i < 3; i++) {
+                try {
+                    progId = progIds[i];
+                    if (new root_1.root.ActiveXObject(progId)) {
+                        break;
+                    }
+                }
+                catch (e) {
+                }
+            }
+            return new root_1.root.ActiveXObject(progId);
+        }
+        catch (e) {
+            throw new Error('XMLHttpRequest is not supported by your browser');
+        }
+    }
+}
+function ajaxGet(url, headers) {
+    if (headers === void 0) { headers = null; }
+    return new AjaxObservable({ method: 'GET', url: url, headers: headers });
+}
+exports.ajaxGet = ajaxGet;
+;
+function ajaxPost(url, body, headers) {
+    return new AjaxObservable({ method: 'POST', url: url, body: body, headers: headers });
+}
+exports.ajaxPost = ajaxPost;
+;
+function ajaxDelete(url, headers) {
+    return new AjaxObservable({ method: 'DELETE', url: url, headers: headers });
+}
+exports.ajaxDelete = ajaxDelete;
+;
+function ajaxPut(url, body, headers) {
+    return new AjaxObservable({ method: 'PUT', url: url, body: body, headers: headers });
+}
+exports.ajaxPut = ajaxPut;
+;
+function ajaxPatch(url, body, headers) {
+    return new AjaxObservable({ method: 'PATCH', url: url, body: body, headers: headers });
+}
+exports.ajaxPatch = ajaxPatch;
+;
+function ajaxGetJSON(url, headers) {
+    return new AjaxObservable({ method: 'GET', url: url, responseType: 'json', headers: headers })
+        .lift(new map_1.MapOperator(function (x, index) { return x.response; }, null));
+}
+exports.ajaxGetJSON = ajaxGetJSON;
+;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var AjaxObservable = (function (_super) {
+    __extends(AjaxObservable, _super);
+    function AjaxObservable(urlOrRequest) {
+        _super.call(this);
+        var request = {
+            async: true,
+            createXHR: function () {
+                return this.crossDomain ? getCORSRequest.call(this) : getXMLHttpRequest();
+            },
+            crossDomain: false,
+            withCredentials: false,
+            headers: {},
+            method: 'GET',
+            responseType: 'json',
+            timeout: 0
+        };
+        if (typeof urlOrRequest === 'string') {
+            request.url = urlOrRequest;
+        }
+        else {
+            for (var prop in urlOrRequest) {
+                if (urlOrRequest.hasOwnProperty(prop)) {
+                    request[prop] = urlOrRequest[prop];
+                }
+            }
+        }
+        this.request = request;
+    }
+    AjaxObservable.prototype._subscribe = function (subscriber) {
+        return new AjaxSubscriber(subscriber, this.request);
+    };
+    /**
+     * Creates an observable for an Ajax request with either a request object with
+     * url, headers, etc or a string for a URL.
+     *
+     * @example
+     * source = Rx.Observable.ajax('/products');
+     * source = Rx.Observable.ajax({ url: 'products', method: 'GET' });
+     *
+     * @param {string|Object} request Can be one of the following:
+     *   A string of the URL to make the Ajax call.
+     *   An object with the following properties
+     *   - url: URL of the request
+     *   - body: The body of the request
+     *   - method: Method of the request, such as GET, POST, PUT, PATCH, DELETE
+     *   - async: Whether the request is async
+     *   - headers: Optional headers
+     *   - crossDomain: true if a cross domain request, else false
+     *   - createXHR: a function to override if you need to use an alternate
+     *   XMLHttpRequest implementation.
+     *   - resultSelector: a function to use to alter the output value type of
+     *   the Observable. Gets {@link AjaxResponse} as an argument.
+     * @return {Observable} An observable sequence containing the XMLHttpRequest.
+     * @static true
+     * @name ajax
+     * @owner Observable
+    */
+    AjaxObservable.create = (function () {
+        var create = function (urlOrRequest) {
+            return new AjaxObservable(urlOrRequest);
+        };
+        create.get = ajaxGet;
+        create.post = ajaxPost;
+        create.delete = ajaxDelete;
+        create.put = ajaxPut;
+        create.patch = ajaxPatch;
+        create.getJSON = ajaxGetJSON;
+        return create;
+    })();
+    return AjaxObservable;
+}(Observable_1.Observable));
+exports.AjaxObservable = AjaxObservable;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var AjaxSubscriber = (function (_super) {
+    __extends(AjaxSubscriber, _super);
+    function AjaxSubscriber(destination, request) {
+        _super.call(this, destination);
+        this.request = request;
+        this.done = false;
+        var headers = request.headers = request.headers || {};
+        // force CORS if requested
+        if (!request.crossDomain && !headers['X-Requested-With']) {
+            headers['X-Requested-With'] = 'XMLHttpRequest';
+        }
+        // ensure content type is set
+        if (!('Content-Type' in headers) && !(root_1.root.FormData && request.body instanceof root_1.root.FormData) && typeof request.body !== 'undefined') {
+            headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
+        }
+        // properly serialize body
+        request.body = this.serializeBody(request.body, request.headers['Content-Type']);
+        this.send();
+    }
+    AjaxSubscriber.prototype.next = function (e) {
+        this.done = true;
+        var _a = this, xhr = _a.xhr, request = _a.request, destination = _a.destination;
+        var response = new AjaxResponse(e, xhr, request);
+        destination.next(response);
+    };
+    AjaxSubscriber.prototype.send = function () {
+        var _a = this, request = _a.request, _b = _a.request, user = _b.user, method = _b.method, url = _b.url, async = _b.async, password = _b.password, headers = _b.headers, body = _b.body;
+        var createXHR = request.createXHR;
+        var xhr = tryCatch_1.tryCatch(createXHR).call(request);
+        if (xhr === errorObject_1.errorObject) {
+            this.error(errorObject_1.errorObject.e);
+        }
+        else {
+            this.xhr = xhr;
+            // set up the events before open XHR
+            // https://developer.mozilla.org/en/docs/Web/API/XMLHttpRequest/Using_XMLHttpRequest
+            // You need to add the event listeners before calling open() on the request.
+            // Otherwise the progress events will not fire.
+            this.setupEvents(xhr, request);
+            // open XHR
+            var result = void 0;
+            if (user) {
+                result = tryCatch_1.tryCatch(xhr.open).call(xhr, method, url, async, user, password);
+            }
+            else {
+                result = tryCatch_1.tryCatch(xhr.open).call(xhr, method, url, async);
+            }
+            if (result === errorObject_1.errorObject) {
+                this.error(errorObject_1.errorObject.e);
+                return null;
+            }
+            // timeout, responseType and withCredentials can be set once the XHR is open
+            if (async) {
+                xhr.timeout = request.timeout;
+                xhr.responseType = request.responseType;
+            }
+            if ('withCredentials' in xhr) {
+                xhr.withCredentials = !!request.withCredentials;
+            }
+            // set headers
+            this.setHeaders(xhr, headers);
+            // finally send the request
+            result = body ? tryCatch_1.tryCatch(xhr.send).call(xhr, body) : tryCatch_1.tryCatch(xhr.send).call(xhr);
+            if (result === errorObject_1.errorObject) {
+                this.error(errorObject_1.errorObject.e);
+                return null;
+            }
+        }
+        return xhr;
+    };
+    AjaxSubscriber.prototype.serializeBody = function (body, contentType) {
+        if (!body || typeof body === 'string') {
+            return body;
+        }
+        else if (root_1.root.FormData && body instanceof root_1.root.FormData) {
+            return body;
+        }
+        if (contentType) {
+            var splitIndex = contentType.indexOf(';');
+            if (splitIndex !== -1) {
+                contentType = contentType.substring(0, splitIndex);
+            }
+        }
+        switch (contentType) {
+            case 'application/x-www-form-urlencoded':
+                return Object.keys(body).map(function (key) { return (encodeURI(key) + "=" + encodeURI(body[key])); }).join('&');
+            case 'application/json':
+                return JSON.stringify(body);
+            default:
+                return body;
+        }
+    };
+    AjaxSubscriber.prototype.setHeaders = function (xhr, headers) {
+        for (var key in headers) {
+            if (headers.hasOwnProperty(key)) {
+                xhr.setRequestHeader(key, headers[key]);
+            }
+        }
+    };
+    AjaxSubscriber.prototype.setupEvents = function (xhr, request) {
+        var progressSubscriber = request.progressSubscriber;
+        function xhrTimeout(e) {
+            var _a = xhrTimeout, subscriber = _a.subscriber, progressSubscriber = _a.progressSubscriber, request = _a.request;
+            if (progressSubscriber) {
+                progressSubscriber.error(e);
+            }
+            subscriber.error(new AjaxTimeoutError(this, request)); //TODO: Make betterer.
+        }
+        ;
+        xhr.ontimeout = xhrTimeout;
+        xhrTimeout.request = request;
+        xhrTimeout.subscriber = this;
+        xhrTimeout.progressSubscriber = progressSubscriber;
+        if (xhr.upload && 'withCredentials' in xhr) {
+            if (progressSubscriber) {
+                var xhrProgress_1;
+                xhrProgress_1 = function (e) {
+                    var progressSubscriber = xhrProgress_1.progressSubscriber;
+                    progressSubscriber.next(e);
+                };
+                if (root_1.root.XDomainRequest) {
+                    xhr.onprogress = xhrProgress_1;
+                }
+                else {
+                    xhr.upload.onprogress = xhrProgress_1;
+                }
+                xhrProgress_1.progressSubscriber = progressSubscriber;
+            }
+            var xhrError_1;
+            xhrError_1 = function (e) {
+                var _a = xhrError_1, progressSubscriber = _a.progressSubscriber, subscriber = _a.subscriber, request = _a.request;
+                if (progressSubscriber) {
+                    progressSubscriber.error(e);
+                }
+                subscriber.error(new AjaxError('ajax error', this, request));
+            };
+            xhr.onerror = xhrError_1;
+            xhrError_1.request = request;
+            xhrError_1.subscriber = this;
+            xhrError_1.progressSubscriber = progressSubscriber;
+        }
+        function xhrReadyStateChange(e) {
+            var _a = xhrReadyStateChange, subscriber = _a.subscriber, progressSubscriber = _a.progressSubscriber, request = _a.request;
+            if (this.readyState === 4) {
+                // normalize IE9 bug (http://bugs.jquery.com/ticket/1450)
+                var status_1 = this.status === 1223 ? 204 : this.status;
+                var response = (this.responseType === 'text' ? (this.response || this.responseText) : this.response);
+                // fix status code when it is 0 (0 status is undocumented).
+                // Occurs when accessing file resources or on Android 4.1 stock browser
+                // while retrieving files from application cache.
+                if (status_1 === 0) {
+                    status_1 = response ? 200 : 0;
+                }
+                if (200 <= status_1 && status_1 < 300) {
+                    if (progressSubscriber) {
+                        progressSubscriber.complete();
+                    }
+                    subscriber.next(e);
+                    subscriber.complete();
+                }
+                else {
+                    if (progressSubscriber) {
+                        progressSubscriber.error(e);
+                    }
+                    subscriber.error(new AjaxError('ajax error ' + status_1, this, request));
+                }
+            }
+        }
+        ;
+        xhr.onreadystatechange = xhrReadyStateChange;
+        xhrReadyStateChange.subscriber = this;
+        xhrReadyStateChange.progressSubscriber = progressSubscriber;
+        xhrReadyStateChange.request = request;
+    };
+    AjaxSubscriber.prototype.unsubscribe = function () {
+        var _a = this, done = _a.done, xhr = _a.xhr;
+        if (!done && xhr && xhr.readyState !== 4 && typeof xhr.abort === 'function') {
+            xhr.abort();
+        }
+        _super.prototype.unsubscribe.call(this);
+    };
+    return AjaxSubscriber;
+}(Subscriber_1.Subscriber));
+exports.AjaxSubscriber = AjaxSubscriber;
+/**
+ * A normalized AJAX response.
+ *
+ * @see {@link ajax}
+ *
+ * @class AjaxResponse
+ */
+var AjaxResponse = (function () {
+    function AjaxResponse(originalEvent, xhr, request) {
+        this.originalEvent = originalEvent;
+        this.xhr = xhr;
+        this.request = request;
+        this.status = xhr.status;
+        this.responseType = xhr.responseType || request.responseType;
+        switch (this.responseType) {
+            case 'json':
+                if ('response' in xhr) {
+                    //IE does not support json as responseType, parse it internally
+                    this.response = xhr.responseType ? xhr.response : JSON.parse(xhr.response || xhr.responseText || 'null');
+                }
+                else {
+                    this.response = JSON.parse(xhr.responseText || 'null');
+                }
+                break;
+            case 'xml':
+                this.response = xhr.responseXML;
+                break;
+            case 'text':
+            default:
+                this.response = ('response' in xhr) ? xhr.response : xhr.responseText;
+                break;
+        }
+    }
+    return AjaxResponse;
+}());
+exports.AjaxResponse = AjaxResponse;
+/**
+ * A normalized AJAX error.
+ *
+ * @see {@link ajax}
+ *
+ * @class AjaxError
+ */
+var AjaxError = (function (_super) {
+    __extends(AjaxError, _super);
+    function AjaxError(message, xhr, request) {
+        _super.call(this, message);
+        this.message = message;
+        this.xhr = xhr;
+        this.request = request;
+        this.status = xhr.status;
+    }
+    return AjaxError;
+}(Error));
+exports.AjaxError = AjaxError;
+/**
+ * @see {@link ajax}
+ *
+ * @class AjaxTimeoutError
+ */
+var AjaxTimeoutError = (function (_super) {
+    __extends(AjaxTimeoutError, _super);
+    function AjaxTimeoutError(xhr, request) {
+        _super.call(this, 'ajax timeout', xhr, request);
+    }
+    return AjaxTimeoutError;
+}(AjaxError));
+exports.AjaxTimeoutError = AjaxTimeoutError;
+
+},{"../../Observable":62,"../../Subscriber":70,"../../operator/map":294,"../../util/errorObject":391,"../../util/root":402,"../../util/tryCatch":405}],231:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subject_1 = require('../../Subject');
+var Subscriber_1 = require('../../Subscriber');
+var Observable_1 = require('../../Observable');
+var Subscription_1 = require('../../Subscription');
+var root_1 = require('../../util/root');
+var ReplaySubject_1 = require('../../ReplaySubject');
+var tryCatch_1 = require('../../util/tryCatch');
+var errorObject_1 = require('../../util/errorObject');
+var assign_1 = require('../../util/assign');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @extends {Ignored}
+ * @hide true
+ */
+var WebSocketSubject = (function (_super) {
+    __extends(WebSocketSubject, _super);
+    function WebSocketSubject(urlConfigOrSource, destination) {
+        if (urlConfigOrSource instanceof Observable_1.Observable) {
+            _super.call(this, destination, urlConfigOrSource);
+        }
+        else {
+            _super.call(this);
+            this.WebSocketCtor = root_1.root.WebSocket;
+            this._output = new Subject_1.Subject();
+            if (typeof urlConfigOrSource === 'string') {
+                this.url = urlConfigOrSource;
+            }
+            else {
+                // WARNING: config object could override important members here.
+                assign_1.assign(this, urlConfigOrSource);
+            }
+            if (!this.WebSocketCtor) {
+                throw new Error('no WebSocket constructor can be found');
+            }
+            this.destination = new ReplaySubject_1.ReplaySubject();
+        }
+    }
+    WebSocketSubject.prototype.resultSelector = function (e) {
+        return JSON.parse(e.data);
+    };
+    /**
+     * Wrapper around the w3c-compatible WebSocket object provided by the browser.
+     *
+     * @example <caption>Wraps browser WebSocket</caption>
+     *
+     * let socket$ = Observable.webSocket('ws://localhost:8081');
+     *
+     * socket$.subscribe(
+     *    (msg) => console.log('message received: ' + msg),
+     *    (err) => console.log(err),
+     *    () => console.log('complete')
+     *  );
+     *
+     * socket$.next(JSON.stringify({ op: 'hello' }));
+     *
+     * @example <caption>Wraps WebSocket from nodejs-websocket (using node.js)</caption>
+     *
+     * import { w3cwebsocket } from 'websocket';
+     *
+     * let socket$ = Observable.webSocket({
+     *   url: 'ws://localhost:8081',
+     *   WebSocketCtor: w3cwebsocket
+     * });
+     *
+     * socket$.subscribe(
+     *    (msg) => console.log('message received: ' + msg),
+     *    (err) => console.log(err),
+     *    () => console.log('complete')
+     *  );
+     *
+     * socket$.next(JSON.stringify({ op: 'hello' }));
+     *
+     * @param {string | WebSocketSubjectConfig} urlConfigOrSource the source of the websocket as an url or a structure defining the websocket object
+     * @return {WebSocketSubject}
+     * @static true
+     * @name webSocket
+     * @owner Observable
+     */
+    WebSocketSubject.create = function (urlConfigOrSource) {
+        return new WebSocketSubject(urlConfigOrSource);
+    };
+    WebSocketSubject.prototype.lift = function (operator) {
+        var sock = new WebSocketSubject(this, this.destination);
+        sock.operator = operator;
+        return sock;
+    };
+    WebSocketSubject.prototype._resetState = function () {
+        this.socket = null;
+        if (!this.source) {
+            this.destination = new ReplaySubject_1.ReplaySubject();
+        }
+        this._output = new Subject_1.Subject();
+    };
+    // TODO: factor this out to be a proper Operator/Subscriber implementation and eliminate closures
+    WebSocketSubject.prototype.multiplex = function (subMsg, unsubMsg, messageFilter) {
+        var self = this;
+        return new Observable_1.Observable(function (observer) {
+            var result = tryCatch_1.tryCatch(subMsg)();
+            if (result === errorObject_1.errorObject) {
+                observer.error(errorObject_1.errorObject.e);
+            }
+            else {
+                self.next(result);
+            }
+            var subscription = self.subscribe(function (x) {
+                var result = tryCatch_1.tryCatch(messageFilter)(x);
+                if (result === errorObject_1.errorObject) {
+                    observer.error(errorObject_1.errorObject.e);
+                }
+                else if (result) {
+                    observer.next(x);
+                }
+            }, function (err) { return observer.error(err); }, function () { return observer.complete(); });
+            return function () {
+                var result = tryCatch_1.tryCatch(unsubMsg)();
+                if (result === errorObject_1.errorObject) {
+                    observer.error(errorObject_1.errorObject.e);
+                }
+                else {
+                    self.next(result);
+                }
+                subscription.unsubscribe();
+            };
+        });
+    };
+    WebSocketSubject.prototype._connectSocket = function () {
+        var _this = this;
+        var WebSocketCtor = this.WebSocketCtor;
+        var observer = this._output;
+        var socket = null;
+        try {
+            socket = this.protocol ?
+                new WebSocketCtor(this.url, this.protocol) :
+                new WebSocketCtor(this.url);
+            this.socket = socket;
+            if (this.binaryType) {
+                this.socket.binaryType = this.binaryType;
+            }
+        }
+        catch (e) {
+            observer.error(e);
+            return;
+        }
+        var subscription = new Subscription_1.Subscription(function () {
+            _this.socket = null;
+            if (socket && socket.readyState === 1) {
+                socket.close();
+            }
+        });
+        socket.onopen = function (e) {
+            var openObserver = _this.openObserver;
+            if (openObserver) {
+                openObserver.next(e);
+            }
+            var queue = _this.destination;
+            _this.destination = Subscriber_1.Subscriber.create(function (x) { return socket.readyState === 1 && socket.send(x); }, function (e) {
+                var closingObserver = _this.closingObserver;
+                if (closingObserver) {
+                    closingObserver.next(undefined);
+                }
+                if (e && e.code) {
+                    socket.close(e.code, e.reason);
+                }
+                else {
+                    observer.error(new TypeError('WebSocketSubject.error must be called with an object with an error code, ' +
+                        'and an optional reason: { code: number, reason: string }'));
+                }
+                _this._resetState();
+            }, function () {
+                var closingObserver = _this.closingObserver;
+                if (closingObserver) {
+                    closingObserver.next(undefined);
+                }
+                socket.close();
+                _this._resetState();
+            });
+            if (queue && queue instanceof ReplaySubject_1.ReplaySubject) {
+                subscription.add(queue.subscribe(_this.destination));
+            }
+        };
+        socket.onerror = function (e) {
+            _this._resetState();
+            observer.error(e);
+        };
+        socket.onclose = function (e) {
+            _this._resetState();
+            var closeObserver = _this.closeObserver;
+            if (closeObserver) {
+                closeObserver.next(e);
+            }
+            if (e.wasClean) {
+                observer.complete();
+            }
+            else {
+                observer.error(e);
+            }
+        };
+        socket.onmessage = function (e) {
+            var result = tryCatch_1.tryCatch(_this.resultSelector)(e);
+            if (result === errorObject_1.errorObject) {
+                observer.error(errorObject_1.errorObject.e);
+            }
+            else {
+                observer.next(result);
+            }
+        };
+    };
+    WebSocketSubject.prototype._subscribe = function (subscriber) {
+        var _this = this;
+        var source = this.source;
+        if (source) {
+            return source.subscribe(subscriber);
+        }
+        if (!this.socket) {
+            this._connectSocket();
+        }
+        var subscription = new Subscription_1.Subscription();
+        subscription.add(this._output.subscribe(subscriber));
+        subscription.add(function () {
+            var socket = _this.socket;
+            if (_this._output.observers.length === 0) {
+                if (socket && socket.readyState === 1) {
+                    socket.close();
+                }
+                _this._resetState();
+            }
+        });
+        return subscription;
+    };
+    WebSocketSubject.prototype.unsubscribe = function () {
+        var _a = this, source = _a.source, socket = _a.socket;
+        if (socket && socket.readyState === 1) {
+            socket.close();
+            this._resetState();
+        }
+        _super.prototype.unsubscribe.call(this);
+        if (!source) {
+            this.destination = new ReplaySubject_1.ReplaySubject();
+        }
+    };
+    return WebSocketSubject;
+}(Subject_1.AnonymousSubject));
+exports.WebSocketSubject = WebSocketSubject;
+
+},{"../../Observable":62,"../../ReplaySubject":65,"../../Subject":68,"../../Subscriber":70,"../../Subscription":71,"../../util/assign":390,"../../util/errorObject":391,"../../util/root":402,"../../util/tryCatch":405}],232:[function(require,module,exports){
+"use strict";
+var AjaxObservable_1 = require('./AjaxObservable');
+exports.ajax = AjaxObservable_1.AjaxObservable.create;
+
+},{"./AjaxObservable":230}],233:[function(require,module,exports){
+"use strict";
+var WebSocketSubject_1 = require('./WebSocketSubject');
+exports.webSocket = WebSocketSubject_1.WebSocketSubject.create;
+
+},{"./WebSocketSubject":231}],234:[function(require,module,exports){
+"use strict";
+var EmptyObservable_1 = require('./EmptyObservable');
+exports.empty = EmptyObservable_1.EmptyObservable.create;
+
+},{"./EmptyObservable":207}],235:[function(require,module,exports){
+"use strict";
+var ForkJoinObservable_1 = require('./ForkJoinObservable');
+exports.forkJoin = ForkJoinObservable_1.ForkJoinObservable.create;
+
+},{"./ForkJoinObservable":209}],236:[function(require,module,exports){
+"use strict";
+var FromObservable_1 = require('./FromObservable');
+exports.from = FromObservable_1.FromObservable.create;
+
+},{"./FromObservable":212}],237:[function(require,module,exports){
+"use strict";
+var FromEventObservable_1 = require('./FromEventObservable');
+exports.fromEvent = FromEventObservable_1.FromEventObservable.create;
+
+},{"./FromEventObservable":210}],238:[function(require,module,exports){
+"use strict";
+var FromEventPatternObservable_1 = require('./FromEventPatternObservable');
+exports.fromEventPattern = FromEventPatternObservable_1.FromEventPatternObservable.create;
+
+},{"./FromEventPatternObservable":211}],239:[function(require,module,exports){
+"use strict";
+var PromiseObservable_1 = require('./PromiseObservable');
+exports.fromPromise = PromiseObservable_1.PromiseObservable.create;
+
+},{"./PromiseObservable":219}],240:[function(require,module,exports){
+"use strict";
+var GenerateObservable_1 = require('./GenerateObservable');
+exports.generate = GenerateObservable_1.GenerateObservable.create;
+
+},{"./GenerateObservable":213}],241:[function(require,module,exports){
+"use strict";
+var IfObservable_1 = require('./IfObservable');
+exports._if = IfObservable_1.IfObservable.create;
+
+},{"./IfObservable":214}],242:[function(require,module,exports){
+"use strict";
+var IntervalObservable_1 = require('./IntervalObservable');
+exports.interval = IntervalObservable_1.IntervalObservable.create;
+
+},{"./IntervalObservable":215}],243:[function(require,module,exports){
+"use strict";
+var merge_1 = require('../operator/merge');
+exports.merge = merge_1.mergeStatic;
+
+},{"../operator/merge":298}],244:[function(require,module,exports){
+"use strict";
+var NeverObservable_1 = require('./NeverObservable');
+exports.never = NeverObservable_1.NeverObservable.create;
+
+},{"./NeverObservable":217}],245:[function(require,module,exports){
+"use strict";
+var ArrayObservable_1 = require('./ArrayObservable');
+exports.of = ArrayObservable_1.ArrayObservable.of;
+
+},{"./ArrayObservable":202}],246:[function(require,module,exports){
+"use strict";
+var onErrorResumeNext_1 = require('../operator/onErrorResumeNext');
+exports.onErrorResumeNext = onErrorResumeNext_1.onErrorResumeNextStatic;
+
+},{"../operator/onErrorResumeNext":306}],247:[function(require,module,exports){
+"use strict";
+var PairsObservable_1 = require('./PairsObservable');
+exports.pairs = PairsObservable_1.PairsObservable.create;
+
+},{"./PairsObservable":218}],248:[function(require,module,exports){
+"use strict";
+var race_1 = require('../operator/race');
+exports.race = race_1.raceStatic;
+
+},{"../operator/race":314}],249:[function(require,module,exports){
+"use strict";
+var RangeObservable_1 = require('./RangeObservable');
+exports.range = RangeObservable_1.RangeObservable.create;
+
+},{"./RangeObservable":220}],250:[function(require,module,exports){
+"use strict";
+var ErrorObservable_1 = require('./ErrorObservable');
+exports._throw = ErrorObservable_1.ErrorObservable.create;
+
+},{"./ErrorObservable":208}],251:[function(require,module,exports){
+"use strict";
+var TimerObservable_1 = require('./TimerObservable');
+exports.timer = TimerObservable_1.TimerObservable.create;
+
+},{"./TimerObservable":223}],252:[function(require,module,exports){
+"use strict";
+var UsingObservable_1 = require('./UsingObservable');
+exports.using = UsingObservable_1.UsingObservable.create;
+
+},{"./UsingObservable":224}],253:[function(require,module,exports){
+"use strict";
+var zip_1 = require('../operator/zip');
+exports.zip = zip_1.zipStatic;
+
+},{"../operator/zip":354}],254:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var tryCatch_1 = require('../util/tryCatch');
+var errorObject_1 = require('../util/errorObject');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Ignores source values for a duration determined by another Observable, then
+ * emits the most recent value from the source Observable, then repeats this
+ * process.
+ *
+ * <span class="informal">It's like {@link auditTime}, but the silencing
+ * duration is determined by a second Observable.</span>
+ *
+ * <img src="./img/audit.png" width="100%">
+ *
+ * `audit` is similar to `throttle`, but emits the last value from the silenced
+ * time window, instead of the first value. `audit` emits the most recent value
+ * from the source Observable on the output Observable as soon as its internal
+ * timer becomes disabled, and ignores source values while the timer is enabled.
+ * Initially, the timer is disabled. As soon as the first source value arrives,
+ * the timer is enabled by calling the `durationSelector` function with the
+ * source value, which returns the "duration" Observable. When the duration
+ * Observable emits a value or completes, the timer is disabled, then the most
+ * recent source value is emitted on the output Observable, and this process
+ * repeats for the next source value.
+ *
+ * @example <caption>Emit clicks at a rate of at most one click per second</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.audit(ev => Rx.Observable.interval(1000));
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link auditTime}
+ * @see {@link debounce}
+ * @see {@link delayWhen}
+ * @see {@link sample}
+ * @see {@link throttle}
+ *
+ * @param {function(value: T): SubscribableOrPromise} durationSelector A function
+ * that receives a value from the source Observable, for computing the silencing
+ * duration, returned as an Observable or a Promise.
+ * @return {Observable<T>} An Observable that performs rate-limiting of
+ * emissions from the source Observable.
+ * @method audit
+ * @owner Observable
+ */
+function audit(durationSelector) {
+    return this.lift(new AuditOperator(durationSelector));
+}
+exports.audit = audit;
+var AuditOperator = (function () {
+    function AuditOperator(durationSelector) {
+        this.durationSelector = durationSelector;
+    }
+    AuditOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new AuditSubscriber(subscriber, this.durationSelector));
+    };
+    return AuditOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var AuditSubscriber = (function (_super) {
+    __extends(AuditSubscriber, _super);
+    function AuditSubscriber(destination, durationSelector) {
+        _super.call(this, destination);
+        this.durationSelector = durationSelector;
+        this.hasValue = false;
+    }
+    AuditSubscriber.prototype._next = function (value) {
+        this.value = value;
+        this.hasValue = true;
+        if (!this.throttled) {
+            var duration = tryCatch_1.tryCatch(this.durationSelector)(value);
+            if (duration === errorObject_1.errorObject) {
+                this.destination.error(errorObject_1.errorObject.e);
+            }
+            else {
+                var innerSubscription = subscribeToResult_1.subscribeToResult(this, duration);
+                if (innerSubscription.closed) {
+                    this.clearThrottle();
+                }
+                else {
+                    this.add(this.throttled = innerSubscription);
+                }
+            }
+        }
+    };
+    AuditSubscriber.prototype.clearThrottle = function () {
+        var _a = this, value = _a.value, hasValue = _a.hasValue, throttled = _a.throttled;
+        if (throttled) {
+            this.remove(throttled);
+            this.throttled = null;
+            throttled.unsubscribe();
+        }
+        if (hasValue) {
+            this.value = null;
+            this.hasValue = false;
+            this.destination.next(value);
+        }
+    };
+    AuditSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex) {
+        this.clearThrottle();
+    };
+    AuditSubscriber.prototype.notifyComplete = function () {
+        this.clearThrottle();
+    };
+    return AuditSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/errorObject":391,"../util/subscribeToResult":403,"../util/tryCatch":405}],255:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var async_1 = require('../scheduler/async');
+var Subscriber_1 = require('../Subscriber');
+/**
+ * Ignores source values for `duration` milliseconds, then emits the most recent
+ * value from the source Observable, then repeats this process.
+ *
+ * <span class="informal">When it sees a source values, it ignores that plus
+ * the next ones for `duration` milliseconds, and then it emits the most recent
+ * value from the source.</span>
+ *
+ * <img src="./img/auditTime.png" width="100%">
+ *
+ * `auditTime` is similar to `throttleTime`, but emits the last value from the
+ * silenced time window, instead of the first value. `auditTime` emits the most
+ * recent value from the source Observable on the output Observable as soon as
+ * its internal timer becomes disabled, and ignores source values while the
+ * timer is enabled. Initially, the timer is disabled. As soon as the first
+ * source value arrives, the timer is enabled. After `duration` milliseconds (or
+ * the time unit determined internally by the optional `scheduler`) has passed,
+ * the timer is disabled, then the most recent source value is emitted on the
+ * output Observable, and this process repeats for the next source value.
+ * Optionally takes a {@link IScheduler} for managing timers.
+ *
+ * @example <caption>Emit clicks at a rate of at most one click per second</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.auditTime(1000);
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link audit}
+ * @see {@link debounceTime}
+ * @see {@link delay}
+ * @see {@link sampleTime}
+ * @see {@link throttleTime}
+ *
+ * @param {number} duration Time to wait before emitting the most recent source
+ * value, measured in milliseconds or the time unit determined internally
+ * by the optional `scheduler`.
+ * @param {Scheduler} [scheduler=async] The {@link IScheduler} to use for
+ * managing the timers that handle the rate-limiting behavior.
+ * @return {Observable<T>} An Observable that performs rate-limiting of
+ * emissions from the source Observable.
+ * @method auditTime
+ * @owner Observable
+ */
+function auditTime(duration, scheduler) {
+    if (scheduler === void 0) { scheduler = async_1.async; }
+    return this.lift(new AuditTimeOperator(duration, scheduler));
+}
+exports.auditTime = auditTime;
+var AuditTimeOperator = (function () {
+    function AuditTimeOperator(duration, scheduler) {
+        this.duration = duration;
+        this.scheduler = scheduler;
+    }
+    AuditTimeOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new AuditTimeSubscriber(subscriber, this.duration, this.scheduler));
+    };
+    return AuditTimeOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var AuditTimeSubscriber = (function (_super) {
+    __extends(AuditTimeSubscriber, _super);
+    function AuditTimeSubscriber(destination, duration, scheduler) {
+        _super.call(this, destination);
+        this.duration = duration;
+        this.scheduler = scheduler;
+        this.hasValue = false;
+    }
+    AuditTimeSubscriber.prototype._next = function (value) {
+        this.value = value;
+        this.hasValue = true;
+        if (!this.throttled) {
+            this.add(this.throttled = this.scheduler.schedule(dispatchNext, this.duration, this));
+        }
+    };
+    AuditTimeSubscriber.prototype.clearThrottle = function () {
+        var _a = this, value = _a.value, hasValue = _a.hasValue, throttled = _a.throttled;
+        if (throttled) {
+            this.remove(throttled);
+            this.throttled = null;
+            throttled.unsubscribe();
+        }
+        if (hasValue) {
+            this.value = null;
+            this.hasValue = false;
+            this.destination.next(value);
+        }
+    };
+    return AuditTimeSubscriber;
+}(Subscriber_1.Subscriber));
+function dispatchNext(subscriber) {
+    subscriber.clearThrottle();
+}
+
+},{"../Subscriber":70,"../scheduler/async":368}],256:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Buffers the source Observable values until `closingNotifier` emits.
+ *
+ * <span class="informal">Collects values from the past as an array, and emits
+ * that array only when another Observable emits.</span>
+ *
+ * <img src="./img/buffer.png" width="100%">
+ *
+ * Buffers the incoming Observable values until the given `closingNotifier`
+ * Observable emits a value, at which point it emits the buffer on the output
+ * Observable and starts a new buffer internally, awaiting the next time
+ * `closingNotifier` emits.
+ *
+ * @example <caption>On every click, emit array of most recent interval events</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var interval = Rx.Observable.interval(1000);
+ * var buffered = interval.buffer(clicks);
+ * buffered.subscribe(x => console.log(x));
+ *
+ * @see {@link bufferCount}
+ * @see {@link bufferTime}
+ * @see {@link bufferToggle}
+ * @see {@link bufferWhen}
+ * @see {@link window}
+ *
+ * @param {Observable<any>} closingNotifier An Observable that signals the
+ * buffer to be emitted on the output Observable.
+ * @return {Observable<T[]>} An Observable of buffers, which are arrays of
+ * values.
+ * @method buffer
+ * @owner Observable
+ */
+function buffer(closingNotifier) {
+    return this.lift(new BufferOperator(closingNotifier));
+}
+exports.buffer = buffer;
+var BufferOperator = (function () {
+    function BufferOperator(closingNotifier) {
+        this.closingNotifier = closingNotifier;
+    }
+    BufferOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new BufferSubscriber(subscriber, this.closingNotifier));
+    };
+    return BufferOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var BufferSubscriber = (function (_super) {
+    __extends(BufferSubscriber, _super);
+    function BufferSubscriber(destination, closingNotifier) {
+        _super.call(this, destination);
+        this.buffer = [];
+        this.add(subscribeToResult_1.subscribeToResult(this, closingNotifier));
+    }
+    BufferSubscriber.prototype._next = function (value) {
+        this.buffer.push(value);
+    };
+    BufferSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        var buffer = this.buffer;
+        this.buffer = [];
+        this.destination.next(buffer);
+    };
+    return BufferSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],257:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/**
+ * Buffers the source Observable values until the size hits the maximum
+ * `bufferSize` given.
+ *
+ * <span class="informal">Collects values from the past as an array, and emits
+ * that array only when its size reaches `bufferSize`.</span>
+ *
+ * <img src="./img/bufferCount.png" width="100%">
+ *
+ * Buffers a number of values from the source Observable by `bufferSize` then
+ * emits the buffer and clears it, and starts a new buffer each
+ * `startBufferEvery` values. If `startBufferEvery` is not provided or is
+ * `null`, then new buffers are started immediately at the start of the source
+ * and when each buffer closes and is emitted.
+ *
+ * @example <caption>Emit the last two click events as an array</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var buffered = clicks.bufferCount(2);
+ * buffered.subscribe(x => console.log(x));
+ *
+ * @example <caption>On every click, emit the last two click events as an array</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var buffered = clicks.bufferCount(2, 1);
+ * buffered.subscribe(x => console.log(x));
+ *
+ * @see {@link buffer}
+ * @see {@link bufferTime}
+ * @see {@link bufferToggle}
+ * @see {@link bufferWhen}
+ * @see {@link pairwise}
+ * @see {@link windowCount}
+ *
+ * @param {number} bufferSize The maximum size of the buffer emitted.
+ * @param {number} [startBufferEvery] Interval at which to start a new buffer.
+ * For example if `startBufferEvery` is `2`, then a new buffer will be started
+ * on every other value from the source. A new buffer is started at the
+ * beginning of the source by default.
+ * @return {Observable<T[]>} An Observable of arrays of buffered values.
+ * @method bufferCount
+ * @owner Observable
+ */
+function bufferCount(bufferSize, startBufferEvery) {
+    if (startBufferEvery === void 0) { startBufferEvery = null; }
+    return this.lift(new BufferCountOperator(bufferSize, startBufferEvery));
+}
+exports.bufferCount = bufferCount;
+var BufferCountOperator = (function () {
+    function BufferCountOperator(bufferSize, startBufferEvery) {
+        this.bufferSize = bufferSize;
+        this.startBufferEvery = startBufferEvery;
+        if (!startBufferEvery || bufferSize === startBufferEvery) {
+            this.subscriberClass = BufferCountSubscriber;
+        }
+        else {
+            this.subscriberClass = BufferSkipCountSubscriber;
+        }
+    }
+    BufferCountOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new this.subscriberClass(subscriber, this.bufferSize, this.startBufferEvery));
+    };
+    return BufferCountOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var BufferCountSubscriber = (function (_super) {
+    __extends(BufferCountSubscriber, _super);
+    function BufferCountSubscriber(destination, bufferSize) {
+        _super.call(this, destination);
+        this.bufferSize = bufferSize;
+        this.buffer = [];
+    }
+    BufferCountSubscriber.prototype._next = function (value) {
+        var buffer = this.buffer;
+        buffer.push(value);
+        if (buffer.length == this.bufferSize) {
+            this.destination.next(buffer);
+            this.buffer = [];
+        }
+    };
+    BufferCountSubscriber.prototype._complete = function () {
+        var buffer = this.buffer;
+        if (buffer.length > 0) {
+            this.destination.next(buffer);
+        }
+        _super.prototype._complete.call(this);
+    };
+    return BufferCountSubscriber;
+}(Subscriber_1.Subscriber));
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var BufferSkipCountSubscriber = (function (_super) {
+    __extends(BufferSkipCountSubscriber, _super);
+    function BufferSkipCountSubscriber(destination, bufferSize, startBufferEvery) {
+        _super.call(this, destination);
+        this.bufferSize = bufferSize;
+        this.startBufferEvery = startBufferEvery;
+        this.buffers = [];
+        this.count = 0;
+    }
+    BufferSkipCountSubscriber.prototype._next = function (value) {
+        var _a = this, bufferSize = _a.bufferSize, startBufferEvery = _a.startBufferEvery, buffers = _a.buffers, count = _a.count;
+        this.count++;
+        if (count % startBufferEvery === 0) {
+            buffers.push([]);
+        }
+        for (var i = buffers.length; i--;) {
+            var buffer = buffers[i];
+            buffer.push(value);
+            if (buffer.length === bufferSize) {
+                buffers.splice(i, 1);
+                this.destination.next(buffer);
+            }
+        }
+    };
+    BufferSkipCountSubscriber.prototype._complete = function () {
+        var _a = this, buffers = _a.buffers, destination = _a.destination;
+        while (buffers.length > 0) {
+            var buffer = buffers.shift();
+            if (buffer.length > 0) {
+                destination.next(buffer);
+            }
+        }
+        _super.prototype._complete.call(this);
+    };
+    return BufferSkipCountSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],258:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var async_1 = require('../scheduler/async');
+var Subscriber_1 = require('../Subscriber');
+var isScheduler_1 = require('../util/isScheduler');
+/* tslint:enable:max-line-length */
+/**
+ * Buffers the source Observable values for a specific time period.
+ *
+ * <span class="informal">Collects values from the past as an array, and emits
+ * those arrays periodically in time.</span>
+ *
+ * <img src="./img/bufferTime.png" width="100%">
+ *
+ * Buffers values from the source for a specific time duration `bufferTimeSpan`.
+ * Unless the optional argument `bufferCreationInterval` is given, it emits and
+ * resets the buffer every `bufferTimeSpan` milliseconds. If
+ * `bufferCreationInterval` is given, this operator opens the buffer every
+ * `bufferCreationInterval` milliseconds and closes (emits and resets) the
+ * buffer every `bufferTimeSpan` milliseconds. When the optional argument
+ * `maxBufferSize` is specified, the buffer will be closed either after
+ * `bufferTimeSpan` milliseconds or when it contains `maxBufferSize` elements.
+ *
+ * @example <caption>Every second, emit an array of the recent click events</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var buffered = clicks.bufferTime(1000);
+ * buffered.subscribe(x => console.log(x));
+ *
+ * @example <caption>Every 5 seconds, emit the click events from the next 2 seconds</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var buffered = clicks.bufferTime(2000, 5000);
+ * buffered.subscribe(x => console.log(x));
+ *
+ * @see {@link buffer}
+ * @see {@link bufferCount}
+ * @see {@link bufferToggle}
+ * @see {@link bufferWhen}
+ * @see {@link windowTime}
+ *
+ * @param {number} bufferTimeSpan The amount of time to fill each buffer array.
+ * @param {number} [bufferCreationInterval] The interval at which to start new
+ * buffers.
+ * @param {number} [maxBufferSize] The maximum buffer size.
+ * @param {Scheduler} [scheduler=async] The scheduler on which to schedule the
+ * intervals that determine buffer boundaries.
+ * @return {Observable<T[]>} An observable of arrays of buffered values.
+ * @method bufferTime
+ * @owner Observable
+ */
+function bufferTime(bufferTimeSpan) {
+    var length = arguments.length;
+    var scheduler = async_1.async;
+    if (isScheduler_1.isScheduler(arguments[arguments.length - 1])) {
+        scheduler = arguments[arguments.length - 1];
+        length--;
+    }
+    var bufferCreationInterval = null;
+    if (length >= 2) {
+        bufferCreationInterval = arguments[1];
+    }
+    var maxBufferSize = Number.POSITIVE_INFINITY;
+    if (length >= 3) {
+        maxBufferSize = arguments[2];
+    }
+    return this.lift(new BufferTimeOperator(bufferTimeSpan, bufferCreationInterval, maxBufferSize, scheduler));
+}
+exports.bufferTime = bufferTime;
+var BufferTimeOperator = (function () {
+    function BufferTimeOperator(bufferTimeSpan, bufferCreationInterval, maxBufferSize, scheduler) {
+        this.bufferTimeSpan = bufferTimeSpan;
+        this.bufferCreationInterval = bufferCreationInterval;
+        this.maxBufferSize = maxBufferSize;
+        this.scheduler = scheduler;
+    }
+    BufferTimeOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new BufferTimeSubscriber(subscriber, this.bufferTimeSpan, this.bufferCreationInterval, this.maxBufferSize, this.scheduler));
+    };
+    return BufferTimeOperator;
+}());
+var Context = (function () {
+    function Context() {
+        this.buffer = [];
+    }
+    return Context;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var BufferTimeSubscriber = (function (_super) {
+    __extends(BufferTimeSubscriber, _super);
+    function BufferTimeSubscriber(destination, bufferTimeSpan, bufferCreationInterval, maxBufferSize, scheduler) {
+        _super.call(this, destination);
+        this.bufferTimeSpan = bufferTimeSpan;
+        this.bufferCreationInterval = bufferCreationInterval;
+        this.maxBufferSize = maxBufferSize;
+        this.scheduler = scheduler;
+        this.contexts = [];
+        var context = this.openContext();
+        this.timespanOnly = bufferCreationInterval == null || bufferCreationInterval < 0;
+        if (this.timespanOnly) {
+            var timeSpanOnlyState = { subscriber: this, context: context, bufferTimeSpan: bufferTimeSpan };
+            this.add(context.closeAction = scheduler.schedule(dispatchBufferTimeSpanOnly, bufferTimeSpan, timeSpanOnlyState));
+        }
+        else {
+            var closeState = { subscriber: this, context: context };
+            var creationState = { bufferTimeSpan: bufferTimeSpan, bufferCreationInterval: bufferCreationInterval, subscriber: this, scheduler: scheduler };
+            this.add(context.closeAction = scheduler.schedule(dispatchBufferClose, bufferTimeSpan, closeState));
+            this.add(scheduler.schedule(dispatchBufferCreation, bufferCreationInterval, creationState));
+        }
+    }
+    BufferTimeSubscriber.prototype._next = function (value) {
+        var contexts = this.contexts;
+        var len = contexts.length;
+        var filledBufferContext;
+        for (var i = 0; i < len; i++) {
+            var context = contexts[i];
+            var buffer = context.buffer;
+            buffer.push(value);
+            if (buffer.length == this.maxBufferSize) {
+                filledBufferContext = context;
+            }
+        }
+        if (filledBufferContext) {
+            this.onBufferFull(filledBufferContext);
+        }
+    };
+    BufferTimeSubscriber.prototype._error = function (err) {
+        this.contexts.length = 0;
+        _super.prototype._error.call(this, err);
+    };
+    BufferTimeSubscriber.prototype._complete = function () {
+        var _a = this, contexts = _a.contexts, destination = _a.destination;
+        while (contexts.length > 0) {
+            var context = contexts.shift();
+            destination.next(context.buffer);
+        }
+        _super.prototype._complete.call(this);
+    };
+    BufferTimeSubscriber.prototype._unsubscribe = function () {
+        this.contexts = null;
+    };
+    BufferTimeSubscriber.prototype.onBufferFull = function (context) {
+        this.closeContext(context);
+        var closeAction = context.closeAction;
+        closeAction.unsubscribe();
+        this.remove(closeAction);
+        if (!this.closed && this.timespanOnly) {
+            context = this.openContext();
+            var bufferTimeSpan = this.bufferTimeSpan;
+            var timeSpanOnlyState = { subscriber: this, context: context, bufferTimeSpan: bufferTimeSpan };
+            this.add(context.closeAction = this.scheduler.schedule(dispatchBufferTimeSpanOnly, bufferTimeSpan, timeSpanOnlyState));
+        }
+    };
+    BufferTimeSubscriber.prototype.openContext = function () {
+        var context = new Context();
+        this.contexts.push(context);
+        return context;
+    };
+    BufferTimeSubscriber.prototype.closeContext = function (context) {
+        this.destination.next(context.buffer);
+        var contexts = this.contexts;
+        var spliceIndex = contexts ? contexts.indexOf(context) : -1;
+        if (spliceIndex >= 0) {
+            contexts.splice(contexts.indexOf(context), 1);
+        }
+    };
+    return BufferTimeSubscriber;
+}(Subscriber_1.Subscriber));
+function dispatchBufferTimeSpanOnly(state) {
+    var subscriber = state.subscriber;
+    var prevContext = state.context;
+    if (prevContext) {
+        subscriber.closeContext(prevContext);
+    }
+    if (!subscriber.closed) {
+        state.context = subscriber.openContext();
+        state.context.closeAction = this.schedule(state, state.bufferTimeSpan);
+    }
+}
+function dispatchBufferCreation(state) {
+    var bufferCreationInterval = state.bufferCreationInterval, bufferTimeSpan = state.bufferTimeSpan, subscriber = state.subscriber, scheduler = state.scheduler;
+    var context = subscriber.openContext();
+    var action = this;
+    if (!subscriber.closed) {
+        subscriber.add(context.closeAction = scheduler.schedule(dispatchBufferClose, bufferTimeSpan, { subscriber: subscriber, context: context }));
+        action.schedule(state, bufferCreationInterval);
+    }
+}
+function dispatchBufferClose(arg) {
+    var subscriber = arg.subscriber, context = arg.context;
+    subscriber.closeContext(context);
+}
+
+},{"../Subscriber":70,"../scheduler/async":368,"../util/isScheduler":399}],259:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscription_1 = require('../Subscription');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+/**
+ * Buffers the source Observable values starting from an emission from
+ * `openings` and ending when the output of `closingSelector` emits.
+ *
+ * <span class="informal">Collects values from the past as an array. Starts
+ * collecting only when `opening` emits, and calls the `closingSelector`
+ * function to get an Observable that tells when to close the buffer.</span>
+ *
+ * <img src="./img/bufferToggle.png" width="100%">
+ *
+ * Buffers values from the source by opening the buffer via signals from an
+ * Observable provided to `openings`, and closing and sending the buffers when
+ * a Subscribable or Promise returned by the `closingSelector` function emits.
+ *
+ * @example <caption>Every other second, emit the click events from the next 500ms</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var openings = Rx.Observable.interval(1000);
+ * var buffered = clicks.bufferToggle(openings, i =>
+ *   i % 2 ? Rx.Observable.interval(500) : Rx.Observable.empty()
+ * );
+ * buffered.subscribe(x => console.log(x));
+ *
+ * @see {@link buffer}
+ * @see {@link bufferCount}
+ * @see {@link bufferTime}
+ * @see {@link bufferWhen}
+ * @see {@link windowToggle}
+ *
+ * @param {SubscribableOrPromise<O>} openings A Subscribable or Promise of notifications to start new
+ * buffers.
+ * @param {function(value: O): SubscribableOrPromise} closingSelector A function that takes
+ * the value emitted by the `openings` observable and returns a Subscribable or Promise,
+ * which, when it emits, signals that the associated buffer should be emitted
+ * and cleared.
+ * @return {Observable<T[]>} An observable of arrays of buffered values.
+ * @method bufferToggle
+ * @owner Observable
+ */
+function bufferToggle(openings, closingSelector) {
+    return this.lift(new BufferToggleOperator(openings, closingSelector));
+}
+exports.bufferToggle = bufferToggle;
+var BufferToggleOperator = (function () {
+    function BufferToggleOperator(openings, closingSelector) {
+        this.openings = openings;
+        this.closingSelector = closingSelector;
+    }
+    BufferToggleOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new BufferToggleSubscriber(subscriber, this.openings, this.closingSelector));
+    };
+    return BufferToggleOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var BufferToggleSubscriber = (function (_super) {
+    __extends(BufferToggleSubscriber, _super);
+    function BufferToggleSubscriber(destination, openings, closingSelector) {
+        _super.call(this, destination);
+        this.openings = openings;
+        this.closingSelector = closingSelector;
+        this.contexts = [];
+        this.add(subscribeToResult_1.subscribeToResult(this, openings));
+    }
+    BufferToggleSubscriber.prototype._next = function (value) {
+        var contexts = this.contexts;
+        var len = contexts.length;
+        for (var i = 0; i < len; i++) {
+            contexts[i].buffer.push(value);
+        }
+    };
+    BufferToggleSubscriber.prototype._error = function (err) {
+        var contexts = this.contexts;
+        while (contexts.length > 0) {
+            var context = contexts.shift();
+            context.subscription.unsubscribe();
+            context.buffer = null;
+            context.subscription = null;
+        }
+        this.contexts = null;
+        _super.prototype._error.call(this, err);
+    };
+    BufferToggleSubscriber.prototype._complete = function () {
+        var contexts = this.contexts;
+        while (contexts.length > 0) {
+            var context = contexts.shift();
+            this.destination.next(context.buffer);
+            context.subscription.unsubscribe();
+            context.buffer = null;
+            context.subscription = null;
+        }
+        this.contexts = null;
+        _super.prototype._complete.call(this);
+    };
+    BufferToggleSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        outerValue ? this.closeBuffer(outerValue) : this.openBuffer(innerValue);
+    };
+    BufferToggleSubscriber.prototype.notifyComplete = function (innerSub) {
+        this.closeBuffer(innerSub.context);
+    };
+    BufferToggleSubscriber.prototype.openBuffer = function (value) {
+        try {
+            var closingSelector = this.closingSelector;
+            var closingNotifier = closingSelector.call(this, value);
+            if (closingNotifier) {
+                this.trySubscribe(closingNotifier);
+            }
+        }
+        catch (err) {
+            this._error(err);
+        }
+    };
+    BufferToggleSubscriber.prototype.closeBuffer = function (context) {
+        var contexts = this.contexts;
+        if (contexts && context) {
+            var buffer = context.buffer, subscription = context.subscription;
+            this.destination.next(buffer);
+            contexts.splice(contexts.indexOf(context), 1);
+            this.remove(subscription);
+            subscription.unsubscribe();
+        }
+    };
+    BufferToggleSubscriber.prototype.trySubscribe = function (closingNotifier) {
+        var contexts = this.contexts;
+        var buffer = [];
+        var subscription = new Subscription_1.Subscription();
+        var context = { buffer: buffer, subscription: subscription };
+        contexts.push(context);
+        var innerSubscription = subscribeToResult_1.subscribeToResult(this, closingNotifier, context);
+        if (!innerSubscription || innerSubscription.closed) {
+            this.closeBuffer(context);
+        }
+        else {
+            innerSubscription.context = context;
+            this.add(innerSubscription);
+            subscription.add(innerSubscription);
+        }
+    };
+    return BufferToggleSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../Subscription":71,"../util/subscribeToResult":403}],260:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscription_1 = require('../Subscription');
+var tryCatch_1 = require('../util/tryCatch');
+var errorObject_1 = require('../util/errorObject');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Buffers the source Observable values, using a factory function of closing
+ * Observables to determine when to close, emit, and reset the buffer.
+ *
+ * <span class="informal">Collects values from the past as an array. When it
+ * starts collecting values, it calls a function that returns an Observable that
+ * tells when to close the buffer and restart collecting.</span>
+ *
+ * <img src="./img/bufferWhen.png" width="100%">
+ *
+ * Opens a buffer immediately, then closes the buffer when the observable
+ * returned by calling `closingSelector` function emits a value. When it closes
+ * the buffer, it immediately opens a new buffer and repeats the process.
+ *
+ * @example <caption>Emit an array of the last clicks every [1-5] random seconds</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var buffered = clicks.bufferWhen(() =>
+ *   Rx.Observable.interval(1000 + Math.random() * 4000)
+ * );
+ * buffered.subscribe(x => console.log(x));
+ *
+ * @see {@link buffer}
+ * @see {@link bufferCount}
+ * @see {@link bufferTime}
+ * @see {@link bufferToggle}
+ * @see {@link windowWhen}
+ *
+ * @param {function(): Observable} closingSelector A function that takes no
+ * arguments and returns an Observable that signals buffer closure.
+ * @return {Observable<T[]>} An observable of arrays of buffered values.
+ * @method bufferWhen
+ * @owner Observable
+ */
+function bufferWhen(closingSelector) {
+    return this.lift(new BufferWhenOperator(closingSelector));
+}
+exports.bufferWhen = bufferWhen;
+var BufferWhenOperator = (function () {
+    function BufferWhenOperator(closingSelector) {
+        this.closingSelector = closingSelector;
+    }
+    BufferWhenOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new BufferWhenSubscriber(subscriber, this.closingSelector));
+    };
+    return BufferWhenOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var BufferWhenSubscriber = (function (_super) {
+    __extends(BufferWhenSubscriber, _super);
+    function BufferWhenSubscriber(destination, closingSelector) {
+        _super.call(this, destination);
+        this.closingSelector = closingSelector;
+        this.subscribing = false;
+        this.openBuffer();
+    }
+    BufferWhenSubscriber.prototype._next = function (value) {
+        this.buffer.push(value);
+    };
+    BufferWhenSubscriber.prototype._complete = function () {
+        var buffer = this.buffer;
+        if (buffer) {
+            this.destination.next(buffer);
+        }
+        _super.prototype._complete.call(this);
+    };
+    BufferWhenSubscriber.prototype._unsubscribe = function () {
+        this.buffer = null;
+        this.subscribing = false;
+    };
+    BufferWhenSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.openBuffer();
+    };
+    BufferWhenSubscriber.prototype.notifyComplete = function () {
+        if (this.subscribing) {
+            this.complete();
+        }
+        else {
+            this.openBuffer();
+        }
+    };
+    BufferWhenSubscriber.prototype.openBuffer = function () {
+        var closingSubscription = this.closingSubscription;
+        if (closingSubscription) {
+            this.remove(closingSubscription);
+            closingSubscription.unsubscribe();
+        }
+        var buffer = this.buffer;
+        if (this.buffer) {
+            this.destination.next(buffer);
+        }
+        this.buffer = [];
+        var closingNotifier = tryCatch_1.tryCatch(this.closingSelector)();
+        if (closingNotifier === errorObject_1.errorObject) {
+            this.error(errorObject_1.errorObject.e);
+        }
+        else {
+            closingSubscription = new Subscription_1.Subscription();
+            this.closingSubscription = closingSubscription;
+            this.add(closingSubscription);
+            this.subscribing = true;
+            closingSubscription.add(subscribeToResult_1.subscribeToResult(this, closingNotifier));
+            this.subscribing = false;
+        }
+    };
+    return BufferWhenSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../Subscription":71,"../util/errorObject":391,"../util/subscribeToResult":403,"../util/tryCatch":405}],261:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Catches errors on the observable to be handled by returning a new observable or throwing an error.
+ *
+ * <img src="./img/catch.png" width="100%">
+ *
+ * @example <caption>Continues with a different Observable when there's an error</caption>
+ *
+ * Observable.of(1, 2, 3, 4, 5)
+ *   .map(n => {
+ * 	   if (n == 4) {
+ * 	     throw 'four!';
+ *     }
+ *	   return n;
+ *   })
+ *   .catch(err => Observable.of('I', 'II', 'III', 'IV', 'V'))
+ *   .subscribe(x => console.log(x));
+ *   // 1, 2, 3, I, II, III, IV, V
+ *
+ * @example <caption>Retries the caught source Observable again in case of error, similar to retry() operator</caption>
+ *
+ * Observable.of(1, 2, 3, 4, 5)
+ *   .map(n => {
+ * 	   if (n === 4) {
+ * 	     throw 'four!';
+ *     }
+ * 	   return n;
+ *   })
+ *   .catch((err, caught) => caught)
+ *   .take(30)
+ *   .subscribe(x => console.log(x));
+ *   // 1, 2, 3, 1, 2, 3, ...
+ *
+ * @example <caption>Throws a new error when the source Observable throws an error</caption>
+ *
+ * Observable.of(1, 2, 3, 4, 5)
+ *   .map(n => {
+ *     if (n == 4) {
+ *       throw 'four!';
+ *     }
+ *     return n;
+ *   })
+ *   .catch(err => {
+ *     throw 'error in source. Details: ' + err;
+ *   })
+ *   .subscribe(
+ *     x => console.log(x),
+ *     err => console.log(err)
+ *   );
+ *   // 1, 2, 3, error in source. Details: four!
+ *
+ * @param {function} selector a function that takes as arguments `err`, which is the error, and `caught`, which
+ *  is the source observable, in case you'd like to "retry" that observable by returning it again. Whatever observable
+ *  is returned by the `selector` will be used to continue the observable chain.
+ * @return {Observable} An observable that originates from either the source or the observable returned by the
+ *  catch `selector` function.
+ * @method catch
+ * @name catch
+ * @owner Observable
+ */
+function _catch(selector) {
+    var operator = new CatchOperator(selector);
+    var caught = this.lift(operator);
+    return (operator.caught = caught);
+}
+exports._catch = _catch;
+var CatchOperator = (function () {
+    function CatchOperator(selector) {
+        this.selector = selector;
+    }
+    CatchOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new CatchSubscriber(subscriber, this.selector, this.caught));
+    };
+    return CatchOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var CatchSubscriber = (function (_super) {
+    __extends(CatchSubscriber, _super);
+    function CatchSubscriber(destination, selector, caught) {
+        _super.call(this, destination);
+        this.selector = selector;
+        this.caught = caught;
+    }
+    // NOTE: overriding `error` instead of `_error` because we don't want
+    // to have this flag this subscriber as `isStopped`. We can mimic the
+    // behavior of the RetrySubscriber (from the `retry` operator), where
+    // we unsubscribe from our source chain, reset our Subscriber flags,
+    // then subscribe to the selector result.
+    CatchSubscriber.prototype.error = function (err) {
+        if (!this.isStopped) {
+            var result = void 0;
+            try {
+                result = this.selector(err, this.caught);
+            }
+            catch (err2) {
+                _super.prototype.error.call(this, err2);
+                return;
+            }
+            this._unsubscribeAndRecycle();
+            this.add(subscribeToResult_1.subscribeToResult(this, result));
+        }
+    };
+    return CatchSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],262:[function(require,module,exports){
+"use strict";
+var combineLatest_1 = require('./combineLatest');
+/**
+ * Converts a higher-order Observable into a first-order Observable by waiting
+ * for the outer Observable to complete, then applying {@link combineLatest}.
+ *
+ * <span class="informal">Flattens an Observable-of-Observables by applying
+ * {@link combineLatest} when the Observable-of-Observables completes.</span>
+ *
+ * <img src="./img/combineAll.png" width="100%">
+ *
+ * Takes an Observable of Observables, and collects all Observables from it.
+ * Once the outer Observable completes, it subscribes to all collected
+ * Observables and combines their values using the {@link combineLatest}
+ * strategy, such that:
+ * - Every time an inner Observable emits, the output Observable emits.
+ * - When the returned observable emits, it emits all of the latest values by:
+ *   - If a `project` function is provided, it is called with each recent value
+ *     from each inner Observable in whatever order they arrived, and the result
+ *     of the `project` function is what is emitted by the output Observable.
+ *   - If there is no `project` function, an array of all of the most recent
+ *     values is emitted by the output Observable.
+ *
+ * @example <caption>Map two click events to a finite interval Observable, then apply combineAll</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var higherOrder = clicks.map(ev =>
+ *   Rx.Observable.interval(Math.random()*2000).take(3)
+ * ).take(2);
+ * var result = higherOrder.combineAll();
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link combineLatest}
+ * @see {@link mergeAll}
+ *
+ * @param {function} [project] An optional function to map the most recent
+ * values from each inner Observable into a new result. Takes each of the most
+ * recent values from each collected inner Observable as arguments, in order.
+ * @return {Observable} An Observable of projected results or arrays of recent
+ * values.
+ * @method combineAll
+ * @owner Observable
+ */
+function combineAll(project) {
+    return this.lift(new combineLatest_1.CombineLatestOperator(project));
+}
+exports.combineAll = combineAll;
+
+},{"./combineLatest":263}],263:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var ArrayObservable_1 = require('../observable/ArrayObservable');
+var isArray_1 = require('../util/isArray');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+var none = {};
+/* tslint:enable:max-line-length */
+/**
+ * Combines multiple Observables to create an Observable whose values are
+ * calculated from the latest values of each of its input Observables.
+ *
+ * <span class="informal">Whenever any input Observable emits a value, it
+ * computes a formula using the latest values from all the inputs, then emits
+ * the output of that formula.</span>
+ *
+ * <img src="./img/combineLatest.png" width="100%">
+ *
+ * `combineLatest` combines the values from this Observable with values from
+ * Observables passed as arguments. This is done by subscribing to each
+ * Observable, in order, and collecting an array of each of the most recent
+ * values any time any of the input Observables emits, then either taking that
+ * array and passing it as arguments to an optional `project` function and
+ * emitting the return value of that, or just emitting the array of recent
+ * values directly if there is no `project` function.
+ *
+ * @example <caption>Dynamically calculate the Body-Mass Index from an Observable of weight and one for height</caption>
+ * var weight = Rx.Observable.of(70, 72, 76, 79, 75);
+ * var height = Rx.Observable.of(1.76, 1.77, 1.78);
+ * var bmi = weight.combineLatest(height, (w, h) => w / (h * h));
+ * bmi.subscribe(x => console.log('BMI is ' + x));
+ *
+ * // With output to console:
+ * // BMI is 24.212293388429753
+ * // BMI is 23.93948099205209
+ * // BMI is 23.671253629592222
+ *
+ * @see {@link combineAll}
+ * @see {@link merge}
+ * @see {@link withLatestFrom}
+ *
+ * @param {ObservableInput} other An input Observable to combine with the source
+ * Observable. More than one input Observables may be given as argument.
+ * @param {function} [project] An optional function to project the values from
+ * the combined latest values into a new value on the output Observable.
+ * @return {Observable} An Observable of projected values from the most recent
+ * values from each input Observable, or an array of the most recent values from
+ * each input Observable.
+ * @method combineLatest
+ * @owner Observable
+ */
+function combineLatest() {
+    var observables = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        observables[_i - 0] = arguments[_i];
+    }
+    var project = null;
+    if (typeof observables[observables.length - 1] === 'function') {
+        project = observables.pop();
+    }
+    // if the first and only other argument besides the resultSelector is an array
+    // assume it's been called with `combineLatest([obs1, obs2, obs3], project)`
+    if (observables.length === 1 && isArray_1.isArray(observables[0])) {
+        observables = observables[0].slice();
+    }
+    observables.unshift(this);
+    return this.lift.call(new ArrayObservable_1.ArrayObservable(observables), new CombineLatestOperator(project));
+}
+exports.combineLatest = combineLatest;
+var CombineLatestOperator = (function () {
+    function CombineLatestOperator(project) {
+        this.project = project;
+    }
+    CombineLatestOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new CombineLatestSubscriber(subscriber, this.project));
+    };
+    return CombineLatestOperator;
+}());
+exports.CombineLatestOperator = CombineLatestOperator;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var CombineLatestSubscriber = (function (_super) {
+    __extends(CombineLatestSubscriber, _super);
+    function CombineLatestSubscriber(destination, project) {
+        _super.call(this, destination);
+        this.project = project;
+        this.active = 0;
+        this.values = [];
+        this.observables = [];
+    }
+    CombineLatestSubscriber.prototype._next = function (observable) {
+        this.values.push(none);
+        this.observables.push(observable);
+    };
+    CombineLatestSubscriber.prototype._complete = function () {
+        var observables = this.observables;
+        var len = observables.length;
+        if (len === 0) {
+            this.destination.complete();
+        }
+        else {
+            this.active = len;
+            this.toRespond = len;
+            for (var i = 0; i < len; i++) {
+                var observable = observables[i];
+                this.add(subscribeToResult_1.subscribeToResult(this, observable, observable, i));
+            }
+        }
+    };
+    CombineLatestSubscriber.prototype.notifyComplete = function (unused) {
+        if ((this.active -= 1) === 0) {
+            this.destination.complete();
+        }
+    };
+    CombineLatestSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        var values = this.values;
+        var oldVal = values[outerIndex];
+        var toRespond = !this.toRespond
+            ? 0
+            : oldVal === none ? --this.toRespond : this.toRespond;
+        values[outerIndex] = innerValue;
+        if (toRespond === 0) {
+            if (this.project) {
+                this._tryProject(values);
+            }
+            else {
+                this.destination.next(values.slice());
+            }
+        }
+    };
+    CombineLatestSubscriber.prototype._tryProject = function (values) {
+        var result;
+        try {
+            result = this.project.apply(this, values);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        this.destination.next(result);
+    };
+    return CombineLatestSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+exports.CombineLatestSubscriber = CombineLatestSubscriber;
+
+},{"../OuterSubscriber":64,"../observable/ArrayObservable":202,"../util/isArray":392,"../util/subscribeToResult":403}],264:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../Observable');
+var isScheduler_1 = require('../util/isScheduler');
+var ArrayObservable_1 = require('../observable/ArrayObservable');
+var mergeAll_1 = require('./mergeAll');
+/* tslint:enable:max-line-length */
+/**
+ * Creates an output Observable which sequentially emits all values from every
+ * given input Observable after the current Observable.
+ *
+ * <span class="informal">Concatenates multiple Observables together by
+ * sequentially emitting their values, one Observable after the other.</span>
+ *
+ * <img src="./img/concat.png" width="100%">
+ *
+ * Joins this Observable with multiple other Observables by subscribing to them
+ * one at a time, starting with the source, and merging their results into the
+ * output Observable. Will wait for each Observable to complete before moving
+ * on to the next.
+ *
+ * @example <caption>Concatenate a timer counting from 0 to 3 with a synchronous sequence from 1 to 10</caption>
+ * var timer = Rx.Observable.interval(1000).take(4);
+ * var sequence = Rx.Observable.range(1, 10);
+ * var result = timer.concat(sequence);
+ * result.subscribe(x => console.log(x));
+ *
+ * // results in:
+ * // 1000ms-> 0 -1000ms-> 1 -1000ms-> 2 -1000ms-> 3 -immediate-> 1 ... 10
+ *
+ * @example <caption>Concatenate 3 Observables</caption>
+ * var timer1 = Rx.Observable.interval(1000).take(10);
+ * var timer2 = Rx.Observable.interval(2000).take(6);
+ * var timer3 = Rx.Observable.interval(500).take(10);
+ * var result = timer1.concat(timer2, timer3);
+ * result.subscribe(x => console.log(x));
+ *
+ * // results in the following:
+ * // (Prints to console sequentially)
+ * // -1000ms-> 0 -1000ms-> 1 -1000ms-> ... 9
+ * // -2000ms-> 0 -2000ms-> 1 -2000ms-> ... 5
+ * // -500ms-> 0 -500ms-> 1 -500ms-> ... 9
+ *
+ * @see {@link concatAll}
+ * @see {@link concatMap}
+ * @see {@link concatMapTo}
+ *
+ * @param {ObservableInput} other An input Observable to concatenate after the source
+ * Observable. More than one input Observables may be given as argument.
+ * @param {Scheduler} [scheduler=null] An optional IScheduler to schedule each
+ * Observable subscription on.
+ * @return {Observable} All values of each passed Observable merged into a
+ * single Observable, in order, in serial fashion.
+ * @method concat
+ * @owner Observable
+ */
+function concat() {
+    var observables = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        observables[_i - 0] = arguments[_i];
+    }
+    return this.lift.call(concatStatic.apply(void 0, [this].concat(observables)));
+}
+exports.concat = concat;
+/* tslint:enable:max-line-length */
+/**
+ * Creates an output Observable which sequentially emits all values from given
+ * Observable and then moves on to the next.
+ *
+ * <span class="informal">Concatenates multiple Observables together by
+ * sequentially emitting their values, one Observable after the other.</span>
+ *
+ * <img src="./img/concat.png" width="100%">
+ *
+ * `concat` joins multiple Observables together, by subscribing to them one at a time and
+ * merging their results into the output Observable. You can pass either an array of
+ * Observables, or put them directly as arguments. Passing an empty array will result
+ * in Observable that completes immediately.
+ *
+ * `concat` will subscribe to first input Observable and emit all its values, without
+ * changing or affecting them in any way. When that Observable completes, it will
+ * subscribe to then next Observable passed and, again, emit its values. This will be
+ * repeated, until the operator runs out of Observables. When last input Observable completes,
+ * `concat` will complete as well. At any given moment only one Observable passed to operator
+ * emits values. If you would like to emit values from passed Observables concurrently, check out
+ * {@link merge} instead, especially with optional `concurrent` parameter. As a matter of fact,
+ * `concat` is an equivalent of `merge` operator with `concurrent` parameter set to `1`.
+ *
+ * Note that if some input Observable never completes, `concat` will also never complete
+ * and Observables following the one that did not complete will never be subscribed. On the other
+ * hand, if some Observable simply completes immediately after it is subscribed, it will be
+ * invisible for `concat`, which will just move on to the next Observable.
+ *
+ * If any Observable in chain errors, instead of passing control to the next Observable,
+ * `concat` will error immediately as well. Observables that would be subscribed after
+ * the one that emitted error, never will.
+ *
+ * If you pass to `concat` the same Observable many times, its stream of values
+ * will be "replayed" on every subscription, which means you can repeat given Observable
+ * as many times as you like. If passing the same Observable to `concat` 1000 times becomes tedious,
+ * you can always use {@link repeat}.
+ *
+ * @example <caption>Concatenate a timer counting from 0 to 3 with a synchronous sequence from 1 to 10</caption>
+ * var timer = Rx.Observable.interval(1000).take(4);
+ * var sequence = Rx.Observable.range(1, 10);
+ * var result = Rx.Observable.concat(timer, sequence);
+ * result.subscribe(x => console.log(x));
+ *
+ * // results in:
+ * // 0 -1000ms-> 1 -1000ms-> 2 -1000ms-> 3 -immediate-> 1 ... 10
+ *
+ *
+ * @example <caption>Concatenate an array of 3 Observables</caption>
+ * var timer1 = Rx.Observable.interval(1000).take(10);
+ * var timer2 = Rx.Observable.interval(2000).take(6);
+ * var timer3 = Rx.Observable.interval(500).take(10);
+ * var result = Rx.Observable.concat([timer1, timer2, timer3]); // note that array is passed
+ * result.subscribe(x => console.log(x));
+ *
+ * // results in the following:
+ * // (Prints to console sequentially)
+ * // -1000ms-> 0 -1000ms-> 1 -1000ms-> ... 9
+ * // -2000ms-> 0 -2000ms-> 1 -2000ms-> ... 5
+ * // -500ms-> 0 -500ms-> 1 -500ms-> ... 9
+ *
+ *
+ * @example <caption>Concatenate the same Observable to repeat it</caption>
+ * const timer = Rx.Observable.interval(1000).take(2);
+ *
+ * Rx.Observable.concat(timer, timer) // concating the same Observable!
+ * .subscribe(
+ *   value => console.log(value),
+ *   err => {},
+ *   () => console.log('...and it is done!')
+ * );
+ *
+ * // Logs:
+ * // 0 after 1s
+ * // 1 after 2s
+ * // 0 after 3s
+ * // 1 after 4s
+ * // "...and it is done!" also after 4s
+ *
+ * @see {@link concatAll}
+ * @see {@link concatMap}
+ * @see {@link concatMapTo}
+ *
+ * @param {ObservableInput} input1 An input Observable to concatenate with others.
+ * @param {ObservableInput} input2 An input Observable to concatenate with others.
+ * More than one input Observables may be given as argument.
+ * @param {Scheduler} [scheduler=null] An optional IScheduler to schedule each
+ * Observable subscription on.
+ * @return {Observable} All values of each passed Observable merged into a
+ * single Observable, in order, in serial fashion.
+ * @static true
+ * @name concat
+ * @owner Observable
+ */
+function concatStatic() {
+    var observables = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        observables[_i - 0] = arguments[_i];
+    }
+    var scheduler = null;
+    var args = observables;
+    if (isScheduler_1.isScheduler(args[observables.length - 1])) {
+        scheduler = args.pop();
+    }
+    if (scheduler === null && observables.length === 1 && observables[0] instanceof Observable_1.Observable) {
+        return observables[0];
+    }
+    return new ArrayObservable_1.ArrayObservable(observables, scheduler).lift(new mergeAll_1.MergeAllOperator(1));
+}
+exports.concatStatic = concatStatic;
+
+},{"../Observable":62,"../observable/ArrayObservable":202,"../util/isScheduler":399,"./mergeAll":299}],265:[function(require,module,exports){
+"use strict";
+var mergeAll_1 = require('./mergeAll');
+/* tslint:enable:max-line-length */
+/**
+ * Converts a higher-order Observable into a first-order Observable by
+ * concatenating the inner Observables in order.
+ *
+ * <span class="informal">Flattens an Observable-of-Observables by putting one
+ * inner Observable after the other.</span>
+ *
+ * <img src="./img/concatAll.png" width="100%">
+ *
+ * Joins every Observable emitted by the source (a higher-order Observable), in
+ * a serial fashion. It subscribes to each inner Observable only after the
+ * previous inner Observable has completed, and merges all of their values into
+ * the returned observable.
+ *
+ * __Warning:__ If the source Observable emits Observables quickly and
+ * endlessly, and the inner Observables it emits generally complete slower than
+ * the source emits, you can run into memory issues as the incoming Observables
+ * collect in an unbounded buffer.
+ *
+ * Note: `concatAll` is equivalent to `mergeAll` with concurrency parameter set
+ * to `1`.
+ *
+ * @example <caption>For each click event, tick every second from 0 to 3, with no concurrency</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var higherOrder = clicks.map(ev => Rx.Observable.interval(1000).take(4));
+ * var firstOrder = higherOrder.concatAll();
+ * firstOrder.subscribe(x => console.log(x));
+ *
+ * // Results in the following:
+ * // (results are not concurrent)
+ * // For every click on the "document" it will emit values 0 to 3 spaced
+ * // on a 1000ms interval
+ * // one click = 1000ms-> 0 -1000ms-> 1 -1000ms-> 2 -1000ms-> 3
+ *
+ * @see {@link combineAll}
+ * @see {@link concat}
+ * @see {@link concatMap}
+ * @see {@link concatMapTo}
+ * @see {@link exhaust}
+ * @see {@link mergeAll}
+ * @see {@link switch}
+ * @see {@link zipAll}
+ *
+ * @return {Observable} An Observable emitting values from all the inner
+ * Observables concatenated.
+ * @method concatAll
+ * @owner Observable
+ */
+function concatAll() {
+    return this.lift(new mergeAll_1.MergeAllOperator(1));
+}
+exports.concatAll = concatAll;
+
+},{"./mergeAll":299}],266:[function(require,module,exports){
+"use strict";
+var mergeMap_1 = require('./mergeMap');
+/* tslint:enable:max-line-length */
+/**
+ * Projects each source value to an Observable which is merged in the output
+ * Observable, in a serialized fashion waiting for each one to complete before
+ * merging the next.
+ *
+ * <span class="informal">Maps each value to an Observable, then flattens all of
+ * these inner Observables using {@link concatAll}.</span>
+ *
+ * <img src="./img/concatMap.png" width="100%">
+ *
+ * Returns an Observable that emits items based on applying a function that you
+ * supply to each item emitted by the source Observable, where that function
+ * returns an (so-called "inner") Observable. Each new inner Observable is
+ * concatenated with the previous inner Observable.
+ *
+ * __Warning:__ if source values arrive endlessly and faster than their
+ * corresponding inner Observables can complete, it will result in memory issues
+ * as inner Observables amass in an unbounded buffer waiting for their turn to
+ * be subscribed to.
+ *
+ * Note: `concatMap` is equivalent to `mergeMap` with concurrency parameter set
+ * to `1`.
+ *
+ * @example <caption>For each click event, tick every second from 0 to 3, with no concurrency</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.concatMap(ev => Rx.Observable.interval(1000).take(4));
+ * result.subscribe(x => console.log(x));
+ *
+ * // Results in the following:
+ * // (results are not concurrent)
+ * // For every click on the "document" it will emit values 0 to 3 spaced
+ * // on a 1000ms interval
+ * // one click = 1000ms-> 0 -1000ms-> 1 -1000ms-> 2 -1000ms-> 3
+ *
+ * @see {@link concat}
+ * @see {@link concatAll}
+ * @see {@link concatMapTo}
+ * @see {@link exhaustMap}
+ * @see {@link mergeMap}
+ * @see {@link switchMap}
+ *
+ * @param {function(value: T, ?index: number): ObservableInput} project A function
+ * that, when applied to an item emitted by the source Observable, returns an
+ * Observable.
+ * @param {function(outerValue: T, innerValue: I, outerIndex: number, innerIndex: number): any} [resultSelector]
+ * A function to produce the value on the output Observable based on the values
+ * and the indices of the source (outer) emission and the inner Observable
+ * emission. The arguments passed to this function are:
+ * - `outerValue`: the value that came from the source
+ * - `innerValue`: the value that came from the projected Observable
+ * - `outerIndex`: the "index" of the value that came from the source
+ * - `innerIndex`: the "index" of the value from the projected Observable
+ * @return {Observable} An Observable that emits the result of applying the
+ * projection function (and the optional `resultSelector`) to each item emitted
+ * by the source Observable and taking values from each projected inner
+ * Observable sequentially.
+ * @method concatMap
+ * @owner Observable
+ */
+function concatMap(project, resultSelector) {
+    return this.lift(new mergeMap_1.MergeMapOperator(project, resultSelector, 1));
+}
+exports.concatMap = concatMap;
+
+},{"./mergeMap":300}],267:[function(require,module,exports){
+"use strict";
+var mergeMapTo_1 = require('./mergeMapTo');
+/* tslint:enable:max-line-length */
+/**
+ * Projects each source value to the same Observable which is merged multiple
+ * times in a serialized fashion on the output Observable.
+ *
+ * <span class="informal">It's like {@link concatMap}, but maps each value
+ * always to the same inner Observable.</span>
+ *
+ * <img src="./img/concatMapTo.png" width="100%">
+ *
+ * Maps each source value to the given Observable `innerObservable` regardless
+ * of the source value, and then flattens those resulting Observables into one
+ * single Observable, which is the output Observable. Each new `innerObservable`
+ * instance emitted on the output Observable is concatenated with the previous
+ * `innerObservable` instance.
+ *
+ * __Warning:__ if source values arrive endlessly and faster than their
+ * corresponding inner Observables can complete, it will result in memory issues
+ * as inner Observables amass in an unbounded buffer waiting for their turn to
+ * be subscribed to.
+ *
+ * Note: `concatMapTo` is equivalent to `mergeMapTo` with concurrency parameter
+ * set to `1`.
+ *
+ * @example <caption>For each click event, tick every second from 0 to 3, with no concurrency</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.concatMapTo(Rx.Observable.interval(1000).take(4));
+ * result.subscribe(x => console.log(x));
+ *
+ * // Results in the following:
+ * // (results are not concurrent)
+ * // For every click on the "document" it will emit values 0 to 3 spaced
+ * // on a 1000ms interval
+ * // one click = 1000ms-> 0 -1000ms-> 1 -1000ms-> 2 -1000ms-> 3
+ *
+ * @see {@link concat}
+ * @see {@link concatAll}
+ * @see {@link concatMap}
+ * @see {@link mergeMapTo}
+ * @see {@link switchMapTo}
+ *
+ * @param {ObservableInput} innerObservable An Observable to replace each value from
+ * the source Observable.
+ * @param {function(outerValue: T, innerValue: I, outerIndex: number, innerIndex: number): any} [resultSelector]
+ * A function to produce the value on the output Observable based on the values
+ * and the indices of the source (outer) emission and the inner Observable
+ * emission. The arguments passed to this function are:
+ * - `outerValue`: the value that came from the source
+ * - `innerValue`: the value that came from the projected Observable
+ * - `outerIndex`: the "index" of the value that came from the source
+ * - `innerIndex`: the "index" of the value from the projected Observable
+ * @return {Observable} An observable of values merged together by joining the
+ * passed observable with itself, one after the other, for each value emitted
+ * from the source.
+ * @method concatMapTo
+ * @owner Observable
+ */
+function concatMapTo(innerObservable, resultSelector) {
+    return this.lift(new mergeMapTo_1.MergeMapToOperator(innerObservable, resultSelector, 1));
+}
+exports.concatMapTo = concatMapTo;
+
+},{"./mergeMapTo":301}],268:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/**
+ * Counts the number of emissions on the source and emits that number when the
+ * source completes.
+ *
+ * <span class="informal">Tells how many values were emitted, when the source
+ * completes.</span>
+ *
+ * <img src="./img/count.png" width="100%">
+ *
+ * `count` transforms an Observable that emits values into an Observable that
+ * emits a single value that represents the number of values emitted by the
+ * source Observable. If the source Observable terminates with an error, `count`
+ * will pass this error notification along without emitting a value first. If
+ * the source Observable does not terminate at all, `count` will neither emit
+ * a value nor terminate. This operator takes an optional `predicate` function
+ * as argument, in which case the output emission will represent the number of
+ * source values that matched `true` with the `predicate`.
+ *
+ * @example <caption>Counts how many seconds have passed before the first click happened</caption>
+ * var seconds = Rx.Observable.interval(1000);
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var secondsBeforeClick = seconds.takeUntil(clicks);
+ * var result = secondsBeforeClick.count();
+ * result.subscribe(x => console.log(x));
+ *
+ * @example <caption>Counts how many odd numbers are there between 1 and 7</caption>
+ * var numbers = Rx.Observable.range(1, 7);
+ * var result = numbers.count(i => i % 2 === 1);
+ * result.subscribe(x => console.log(x));
+ *
+ * // Results in:
+ * // 4
+ *
+ * @see {@link max}
+ * @see {@link min}
+ * @see {@link reduce}
+ *
+ * @param {function(value: T, i: number, source: Observable<T>): boolean} [predicate] A
+ * boolean function to select what values are to be counted. It is provided with
+ * arguments of:
+ * - `value`: the value from the source Observable.
+ * - `index`: the (zero-based) "index" of the value from the source Observable.
+ * - `source`: the source Observable instance itself.
+ * @return {Observable} An Observable of one number that represents the count as
+ * described above.
+ * @method count
+ * @owner Observable
+ */
+function count(predicate) {
+    return this.lift(new CountOperator(predicate, this));
+}
+exports.count = count;
+var CountOperator = (function () {
+    function CountOperator(predicate, source) {
+        this.predicate = predicate;
+        this.source = source;
+    }
+    CountOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new CountSubscriber(subscriber, this.predicate, this.source));
+    };
+    return CountOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var CountSubscriber = (function (_super) {
+    __extends(CountSubscriber, _super);
+    function CountSubscriber(destination, predicate, source) {
+        _super.call(this, destination);
+        this.predicate = predicate;
+        this.source = source;
+        this.count = 0;
+        this.index = 0;
+    }
+    CountSubscriber.prototype._next = function (value) {
+        if (this.predicate) {
+            this._tryPredicate(value);
+        }
+        else {
+            this.count++;
+        }
+    };
+    CountSubscriber.prototype._tryPredicate = function (value) {
+        var result;
+        try {
+            result = this.predicate(value, this.index++, this.source);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        if (result) {
+            this.count++;
+        }
+    };
+    CountSubscriber.prototype._complete = function () {
+        this.destination.next(this.count);
+        this.destination.complete();
+    };
+    return CountSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],269:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Emits a value from the source Observable only after a particular time span
+ * determined by another Observable has passed without another source emission.
+ *
+ * <span class="informal">It's like {@link debounceTime}, but the time span of
+ * emission silence is determined by a second Observable.</span>
+ *
+ * <img src="./img/debounce.png" width="100%">
+ *
+ * `debounce` delays values emitted by the source Observable, but drops previous
+ * pending delayed emissions if a new value arrives on the source Observable.
+ * This operator keeps track of the most recent value from the source
+ * Observable, and spawns a duration Observable by calling the
+ * `durationSelector` function. The value is emitted only when the duration
+ * Observable emits a value or completes, and if no other value was emitted on
+ * the source Observable since the duration Observable was spawned. If a new
+ * value appears before the duration Observable emits, the previous value will
+ * be dropped and will not be emitted on the output Observable.
+ *
+ * Like {@link debounceTime}, this is a rate-limiting operator, and also a
+ * delay-like operator since output emissions do not necessarily occur at the
+ * same time as they did on the source Observable.
+ *
+ * @example <caption>Emit the most recent click after a burst of clicks</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.debounce(() => Rx.Observable.interval(1000));
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link audit}
+ * @see {@link debounceTime}
+ * @see {@link delayWhen}
+ * @see {@link throttle}
+ *
+ * @param {function(value: T): SubscribableOrPromise} durationSelector A function
+ * that receives a value from the source Observable, for computing the timeout
+ * duration for each source value, returned as an Observable or a Promise.
+ * @return {Observable} An Observable that delays the emissions of the source
+ * Observable by the specified duration Observable returned by
+ * `durationSelector`, and may drop some values if they occur too frequently.
+ * @method debounce
+ * @owner Observable
+ */
+function debounce(durationSelector) {
+    return this.lift(new DebounceOperator(durationSelector));
+}
+exports.debounce = debounce;
+var DebounceOperator = (function () {
+    function DebounceOperator(durationSelector) {
+        this.durationSelector = durationSelector;
+    }
+    DebounceOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new DebounceSubscriber(subscriber, this.durationSelector));
+    };
+    return DebounceOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var DebounceSubscriber = (function (_super) {
+    __extends(DebounceSubscriber, _super);
+    function DebounceSubscriber(destination, durationSelector) {
+        _super.call(this, destination);
+        this.durationSelector = durationSelector;
+        this.hasValue = false;
+        this.durationSubscription = null;
+    }
+    DebounceSubscriber.prototype._next = function (value) {
+        try {
+            var result = this.durationSelector.call(this, value);
+            if (result) {
+                this._tryNext(value, result);
+            }
+        }
+        catch (err) {
+            this.destination.error(err);
+        }
+    };
+    DebounceSubscriber.prototype._complete = function () {
+        this.emitValue();
+        this.destination.complete();
+    };
+    DebounceSubscriber.prototype._tryNext = function (value, duration) {
+        var subscription = this.durationSubscription;
+        this.value = value;
+        this.hasValue = true;
+        if (subscription) {
+            subscription.unsubscribe();
+            this.remove(subscription);
+        }
+        subscription = subscribeToResult_1.subscribeToResult(this, duration);
+        if (!subscription.closed) {
+            this.add(this.durationSubscription = subscription);
+        }
+    };
+    DebounceSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.emitValue();
+    };
+    DebounceSubscriber.prototype.notifyComplete = function () {
+        this.emitValue();
+    };
+    DebounceSubscriber.prototype.emitValue = function () {
+        if (this.hasValue) {
+            var value = this.value;
+            var subscription = this.durationSubscription;
+            if (subscription) {
+                this.durationSubscription = null;
+                subscription.unsubscribe();
+                this.remove(subscription);
+            }
+            this.value = null;
+            this.hasValue = false;
+            _super.prototype._next.call(this, value);
+        }
+    };
+    return DebounceSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],270:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var async_1 = require('../scheduler/async');
+/**
+ * Emits a value from the source Observable only after a particular time span
+ * has passed without another source emission.
+ *
+ * <span class="informal">It's like {@link delay}, but passes only the most
+ * recent value from each burst of emissions.</span>
+ *
+ * <img src="./img/debounceTime.png" width="100%">
+ *
+ * `debounceTime` delays values emitted by the source Observable, but drops
+ * previous pending delayed emissions if a new value arrives on the source
+ * Observable. This operator keeps track of the most recent value from the
+ * source Observable, and emits that only when `dueTime` enough time has passed
+ * without any other value appearing on the source Observable. If a new value
+ * appears before `dueTime` silence occurs, the previous value will be dropped
+ * and will not be emitted on the output Observable.
+ *
+ * This is a rate-limiting operator, because it is impossible for more than one
+ * value to be emitted in any time window of duration `dueTime`, but it is also
+ * a delay-like operator since output emissions do not occur at the same time as
+ * they did on the source Observable. Optionally takes a {@link IScheduler} for
+ * managing timers.
+ *
+ * @example <caption>Emit the most recent click after a burst of clicks</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.debounceTime(1000);
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link auditTime}
+ * @see {@link debounce}
+ * @see {@link delay}
+ * @see {@link sampleTime}
+ * @see {@link throttleTime}
+ *
+ * @param {number} dueTime The timeout duration in milliseconds (or the time
+ * unit determined internally by the optional `scheduler`) for the window of
+ * time required to wait for emission silence before emitting the most recent
+ * source value.
+ * @param {Scheduler} [scheduler=async] The {@link IScheduler} to use for
+ * managing the timers that handle the timeout for each value.
+ * @return {Observable} An Observable that delays the emissions of the source
+ * Observable by the specified `dueTime`, and may drop some values if they occur
+ * too frequently.
+ * @method debounceTime
+ * @owner Observable
+ */
+function debounceTime(dueTime, scheduler) {
+    if (scheduler === void 0) { scheduler = async_1.async; }
+    return this.lift(new DebounceTimeOperator(dueTime, scheduler));
+}
+exports.debounceTime = debounceTime;
+var DebounceTimeOperator = (function () {
+    function DebounceTimeOperator(dueTime, scheduler) {
+        this.dueTime = dueTime;
+        this.scheduler = scheduler;
+    }
+    DebounceTimeOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new DebounceTimeSubscriber(subscriber, this.dueTime, this.scheduler));
+    };
+    return DebounceTimeOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var DebounceTimeSubscriber = (function (_super) {
+    __extends(DebounceTimeSubscriber, _super);
+    function DebounceTimeSubscriber(destination, dueTime, scheduler) {
+        _super.call(this, destination);
+        this.dueTime = dueTime;
+        this.scheduler = scheduler;
+        this.debouncedSubscription = null;
+        this.lastValue = null;
+        this.hasValue = false;
+    }
+    DebounceTimeSubscriber.prototype._next = function (value) {
+        this.clearDebounce();
+        this.lastValue = value;
+        this.hasValue = true;
+        this.add(this.debouncedSubscription = this.scheduler.schedule(dispatchNext, this.dueTime, this));
+    };
+    DebounceTimeSubscriber.prototype._complete = function () {
+        this.debouncedNext();
+        this.destination.complete();
+    };
+    DebounceTimeSubscriber.prototype.debouncedNext = function () {
+        this.clearDebounce();
+        if (this.hasValue) {
+            this.destination.next(this.lastValue);
+            this.lastValue = null;
+            this.hasValue = false;
+        }
+    };
+    DebounceTimeSubscriber.prototype.clearDebounce = function () {
+        var debouncedSubscription = this.debouncedSubscription;
+        if (debouncedSubscription !== null) {
+            this.remove(debouncedSubscription);
+            debouncedSubscription.unsubscribe();
+            this.debouncedSubscription = null;
+        }
+    };
+    return DebounceTimeSubscriber;
+}(Subscriber_1.Subscriber));
+function dispatchNext(subscriber) {
+    subscriber.debouncedNext();
+}
+
+},{"../Subscriber":70,"../scheduler/async":368}],271:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/* tslint:enable:max-line-length */
+/**
+ * Emits a given value if the source Observable completes without emitting any
+ * `next` value, otherwise mirrors the source Observable.
+ *
+ * <span class="informal">If the source Observable turns out to be empty, then
+ * this operator will emit a default value.</span>
+ *
+ * <img src="./img/defaultIfEmpty.png" width="100%">
+ *
+ * `defaultIfEmpty` emits the values emitted by the source Observable or a
+ * specified default value if the source Observable is empty (completes without
+ * having emitted any `next` value).
+ *
+ * @example <caption>If no clicks happen in 5 seconds, then emit "no clicks"</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var clicksBeforeFive = clicks.takeUntil(Rx.Observable.interval(5000));
+ * var result = clicksBeforeFive.defaultIfEmpty('no clicks');
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link empty}
+ * @see {@link last}
+ *
+ * @param {any} [defaultValue=null] The default value used if the source
+ * Observable is empty.
+ * @return {Observable} An Observable that emits either the specified
+ * `defaultValue` if the source Observable emits no items, or the values emitted
+ * by the source Observable.
+ * @method defaultIfEmpty
+ * @owner Observable
+ */
+function defaultIfEmpty(defaultValue) {
+    if (defaultValue === void 0) { defaultValue = null; }
+    return this.lift(new DefaultIfEmptyOperator(defaultValue));
+}
+exports.defaultIfEmpty = defaultIfEmpty;
+var DefaultIfEmptyOperator = (function () {
+    function DefaultIfEmptyOperator(defaultValue) {
+        this.defaultValue = defaultValue;
+    }
+    DefaultIfEmptyOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new DefaultIfEmptySubscriber(subscriber, this.defaultValue));
+    };
+    return DefaultIfEmptyOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var DefaultIfEmptySubscriber = (function (_super) {
+    __extends(DefaultIfEmptySubscriber, _super);
+    function DefaultIfEmptySubscriber(destination, defaultValue) {
+        _super.call(this, destination);
+        this.defaultValue = defaultValue;
+        this.isEmpty = true;
+    }
+    DefaultIfEmptySubscriber.prototype._next = function (value) {
+        this.isEmpty = false;
+        this.destination.next(value);
+    };
+    DefaultIfEmptySubscriber.prototype._complete = function () {
+        if (this.isEmpty) {
+            this.destination.next(this.defaultValue);
+        }
+        this.destination.complete();
+    };
+    return DefaultIfEmptySubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],272:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -18346,7 +29789,2191 @@ var DelayMessage = (function () {
     return DelayMessage;
 }());
 
-},{"../Notification":41,"../Subscriber":48,"../scheduler/async":59,"../util/isDate":68}],54:[function(require,module,exports){
+},{"../Notification":61,"../Subscriber":70,"../scheduler/async":368,"../util/isDate":394}],273:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var Observable_1 = require('../Observable');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Delays the emission of items from the source Observable by a given time span
+ * determined by the emissions of another Observable.
+ *
+ * <span class="informal">It's like {@link delay}, but the time span of the
+ * delay duration is determined by a second Observable.</span>
+ *
+ * <img src="./img/delayWhen.png" width="100%">
+ *
+ * `delayWhen` time shifts each emitted value from the source Observable by a
+ * time span determined by another Observable. When the source emits a value,
+ * the `delayDurationSelector` function is called with the source value as
+ * argument, and should return an Observable, called the "duration" Observable.
+ * The source value is emitted on the output Observable only when the duration
+ * Observable emits a value or completes.
+ *
+ * Optionally, `delayWhen` takes a second argument, `subscriptionDelay`, which
+ * is an Observable. When `subscriptionDelay` emits its first value or
+ * completes, the source Observable is subscribed to and starts behaving like
+ * described in the previous paragraph. If `subscriptionDelay` is not provided,
+ * `delayWhen` will subscribe to the source Observable as soon as the output
+ * Observable is subscribed.
+ *
+ * @example <caption>Delay each click by a random amount of time, between 0 and 5 seconds</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var delayedClicks = clicks.delayWhen(event =>
+ *   Rx.Observable.interval(Math.random() * 5000)
+ * );
+ * delayedClicks.subscribe(x => console.log(x));
+ *
+ * @see {@link debounce}
+ * @see {@link delay}
+ *
+ * @param {function(value: T): Observable} delayDurationSelector A function that
+ * returns an Observable for each value emitted by the source Observable, which
+ * is then used to delay the emission of that item on the output Observable
+ * until the Observable returned from this function emits a value.
+ * @param {Observable} subscriptionDelay An Observable that triggers the
+ * subscription to the source Observable once it emits any value.
+ * @return {Observable} An Observable that delays the emissions of the source
+ * Observable by an amount of time specified by the Observable returned by
+ * `delayDurationSelector`.
+ * @method delayWhen
+ * @owner Observable
+ */
+function delayWhen(delayDurationSelector, subscriptionDelay) {
+    if (subscriptionDelay) {
+        return new SubscriptionDelayObservable(this, subscriptionDelay)
+            .lift(new DelayWhenOperator(delayDurationSelector));
+    }
+    return this.lift(new DelayWhenOperator(delayDurationSelector));
+}
+exports.delayWhen = delayWhen;
+var DelayWhenOperator = (function () {
+    function DelayWhenOperator(delayDurationSelector) {
+        this.delayDurationSelector = delayDurationSelector;
+    }
+    DelayWhenOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new DelayWhenSubscriber(subscriber, this.delayDurationSelector));
+    };
+    return DelayWhenOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var DelayWhenSubscriber = (function (_super) {
+    __extends(DelayWhenSubscriber, _super);
+    function DelayWhenSubscriber(destination, delayDurationSelector) {
+        _super.call(this, destination);
+        this.delayDurationSelector = delayDurationSelector;
+        this.completed = false;
+        this.delayNotifierSubscriptions = [];
+        this.values = [];
+    }
+    DelayWhenSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.destination.next(outerValue);
+        this.removeSubscription(innerSub);
+        this.tryComplete();
+    };
+    DelayWhenSubscriber.prototype.notifyError = function (error, innerSub) {
+        this._error(error);
+    };
+    DelayWhenSubscriber.prototype.notifyComplete = function (innerSub) {
+        var value = this.removeSubscription(innerSub);
+        if (value) {
+            this.destination.next(value);
+        }
+        this.tryComplete();
+    };
+    DelayWhenSubscriber.prototype._next = function (value) {
+        try {
+            var delayNotifier = this.delayDurationSelector(value);
+            if (delayNotifier) {
+                this.tryDelay(delayNotifier, value);
+            }
+        }
+        catch (err) {
+            this.destination.error(err);
+        }
+    };
+    DelayWhenSubscriber.prototype._complete = function () {
+        this.completed = true;
+        this.tryComplete();
+    };
+    DelayWhenSubscriber.prototype.removeSubscription = function (subscription) {
+        subscription.unsubscribe();
+        var subscriptionIdx = this.delayNotifierSubscriptions.indexOf(subscription);
+        var value = null;
+        if (subscriptionIdx !== -1) {
+            value = this.values[subscriptionIdx];
+            this.delayNotifierSubscriptions.splice(subscriptionIdx, 1);
+            this.values.splice(subscriptionIdx, 1);
+        }
+        return value;
+    };
+    DelayWhenSubscriber.prototype.tryDelay = function (delayNotifier, value) {
+        var notifierSubscription = subscribeToResult_1.subscribeToResult(this, delayNotifier, value);
+        if (notifierSubscription && !notifierSubscription.closed) {
+            this.add(notifierSubscription);
+            this.delayNotifierSubscriptions.push(notifierSubscription);
+        }
+        this.values.push(value);
+    };
+    DelayWhenSubscriber.prototype.tryComplete = function () {
+        if (this.completed && this.delayNotifierSubscriptions.length === 0) {
+            this.destination.complete();
+        }
+    };
+    return DelayWhenSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SubscriptionDelayObservable = (function (_super) {
+    __extends(SubscriptionDelayObservable, _super);
+    function SubscriptionDelayObservable(source, subscriptionDelay) {
+        _super.call(this);
+        this.source = source;
+        this.subscriptionDelay = subscriptionDelay;
+    }
+    SubscriptionDelayObservable.prototype._subscribe = function (subscriber) {
+        this.subscriptionDelay.subscribe(new SubscriptionDelaySubscriber(subscriber, this.source));
+    };
+    return SubscriptionDelayObservable;
+}(Observable_1.Observable));
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SubscriptionDelaySubscriber = (function (_super) {
+    __extends(SubscriptionDelaySubscriber, _super);
+    function SubscriptionDelaySubscriber(parent, source) {
+        _super.call(this);
+        this.parent = parent;
+        this.source = source;
+        this.sourceSubscribed = false;
+    }
+    SubscriptionDelaySubscriber.prototype._next = function (unused) {
+        this.subscribeToSource();
+    };
+    SubscriptionDelaySubscriber.prototype._error = function (err) {
+        this.unsubscribe();
+        this.parent.error(err);
+    };
+    SubscriptionDelaySubscriber.prototype._complete = function () {
+        this.subscribeToSource();
+    };
+    SubscriptionDelaySubscriber.prototype.subscribeToSource = function () {
+        if (!this.sourceSubscribed) {
+            this.sourceSubscribed = true;
+            this.unsubscribe();
+            this.source.subscribe(this.parent);
+        }
+    };
+    return SubscriptionDelaySubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Observable":62,"../OuterSubscriber":64,"../Subscriber":70,"../util/subscribeToResult":403}],274:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/**
+ * Converts an Observable of {@link Notification} objects into the emissions
+ * that they represent.
+ *
+ * <span class="informal">Unwraps {@link Notification} objects as actual `next`,
+ * `error` and `complete` emissions. The opposite of {@link materialize}.</span>
+ *
+ * <img src="./img/dematerialize.png" width="100%">
+ *
+ * `dematerialize` is assumed to operate an Observable that only emits
+ * {@link Notification} objects as `next` emissions, and does not emit any
+ * `error`. Such Observable is the output of a `materialize` operation. Those
+ * notifications are then unwrapped using the metadata they contain, and emitted
+ * as `next`, `error`, and `complete` on the output Observable.
+ *
+ * Use this operator in conjunction with {@link materialize}.
+ *
+ * @example <caption>Convert an Observable of Notifications to an actual Observable</caption>
+ * var notifA = new Rx.Notification('N', 'A');
+ * var notifB = new Rx.Notification('N', 'B');
+ * var notifE = new Rx.Notification('E', void 0,
+ *   new TypeError('x.toUpperCase is not a function')
+ * );
+ * var materialized = Rx.Observable.of(notifA, notifB, notifE);
+ * var upperCase = materialized.dematerialize();
+ * upperCase.subscribe(x => console.log(x), e => console.error(e));
+ *
+ * // Results in:
+ * // A
+ * // B
+ * // TypeError: x.toUpperCase is not a function
+ *
+ * @see {@link Notification}
+ * @see {@link materialize}
+ *
+ * @return {Observable} An Observable that emits items and notifications
+ * embedded in Notification objects emitted by the source Observable.
+ * @method dematerialize
+ * @owner Observable
+ */
+function dematerialize() {
+    return this.lift(new DeMaterializeOperator());
+}
+exports.dematerialize = dematerialize;
+var DeMaterializeOperator = (function () {
+    function DeMaterializeOperator() {
+    }
+    DeMaterializeOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new DeMaterializeSubscriber(subscriber));
+    };
+    return DeMaterializeOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var DeMaterializeSubscriber = (function (_super) {
+    __extends(DeMaterializeSubscriber, _super);
+    function DeMaterializeSubscriber(destination) {
+        _super.call(this, destination);
+    }
+    DeMaterializeSubscriber.prototype._next = function (value) {
+        value.observe(this.destination);
+    };
+    return DeMaterializeSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],275:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+var Set_1 = require('../util/Set');
+/**
+ * Returns an Observable that emits all items emitted by the source Observable that are distinct by comparison from previous items.
+ *
+ * If a keySelector function is provided, then it will project each value from the source observable into a new value that it will
+ * check for equality with previously projected values. If a keySelector function is not provided, it will use each value from the
+ * source observable directly with an equality check against previous values.
+ *
+ * In JavaScript runtimes that support `Set`, this operator will use a `Set` to improve performance of the distinct value checking.
+ *
+ * In other runtimes, this operator will use a minimal implementation of `Set` that relies on an `Array` and `indexOf` under the
+ * hood, so performance will degrade as more values are checked for distinction. Even in newer browsers, a long-running `distinct`
+ * use might result in memory leaks. To help alleviate this in some scenarios, an optional `flushes` parameter is also provided so
+ * that the internal `Set` can be "flushed", basically clearing it of values.
+ *
+ * @example <caption>A simple example with numbers</caption>
+ * Observable.of(1, 1, 2, 2, 2, 1, 2, 3, 4, 3, 2, 1)
+ *   .distinct()
+ *   .subscribe(x => console.log(x)); // 1, 2, 3, 4
+ *
+ * @example <caption>An example using a keySelector function</caption>
+ * interface Person {
+ *    age: number,
+ *    name: string
+ * }
+ *
+ * Observable.of<Person>(
+ *     { age: 4, name: 'Foo'},
+ *     { age: 7, name: 'Bar'},
+ *     { age: 5, name: 'Foo'})
+ *     .distinct((p: Person) => p.name)
+ *     .subscribe(x => console.log(x));
+ *
+ * // displays:
+ * // { age: 4, name: 'Foo' }
+ * // { age: 7, name: 'Bar' }
+ *
+ * @see {@link distinctUntilChanged}
+ * @see {@link distinctUntilKeyChanged}
+ *
+ * @param {function} [keySelector] Optional function to select which value you want to check as distinct.
+ * @param {Observable} [flushes] Optional Observable for flushing the internal HashSet of the operator.
+ * @return {Observable} An Observable that emits items from the source Observable with distinct values.
+ * @method distinct
+ * @owner Observable
+ */
+function distinct(keySelector, flushes) {
+    return this.lift(new DistinctOperator(keySelector, flushes));
+}
+exports.distinct = distinct;
+var DistinctOperator = (function () {
+    function DistinctOperator(keySelector, flushes) {
+        this.keySelector = keySelector;
+        this.flushes = flushes;
+    }
+    DistinctOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new DistinctSubscriber(subscriber, this.keySelector, this.flushes));
+    };
+    return DistinctOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var DistinctSubscriber = (function (_super) {
+    __extends(DistinctSubscriber, _super);
+    function DistinctSubscriber(destination, keySelector, flushes) {
+        _super.call(this, destination);
+        this.keySelector = keySelector;
+        this.values = new Set_1.Set();
+        if (flushes) {
+            this.add(subscribeToResult_1.subscribeToResult(this, flushes));
+        }
+    }
+    DistinctSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.values.clear();
+    };
+    DistinctSubscriber.prototype.notifyError = function (error, innerSub) {
+        this._error(error);
+    };
+    DistinctSubscriber.prototype._next = function (value) {
+        if (this.keySelector) {
+            this._useKeySelector(value);
+        }
+        else {
+            this._finalizeNext(value, value);
+        }
+    };
+    DistinctSubscriber.prototype._useKeySelector = function (value) {
+        var key;
+        var destination = this.destination;
+        try {
+            key = this.keySelector(value);
+        }
+        catch (err) {
+            destination.error(err);
+            return;
+        }
+        this._finalizeNext(key, value);
+    };
+    DistinctSubscriber.prototype._finalizeNext = function (key, value) {
+        var values = this.values;
+        if (!values.has(key)) {
+            values.add(key);
+            this.destination.next(value);
+        }
+    };
+    return DistinctSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+exports.DistinctSubscriber = DistinctSubscriber;
+
+},{"../OuterSubscriber":64,"../util/Set":386,"../util/subscribeToResult":403}],276:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var tryCatch_1 = require('../util/tryCatch');
+var errorObject_1 = require('../util/errorObject');
+/* tslint:enable:max-line-length */
+/**
+ * Returns an Observable that emits all items emitted by the source Observable that are distinct by comparison from the previous item.
+ *
+ * If a comparator function is provided, then it will be called for each item to test for whether or not that value should be emitted.
+ *
+ * If a comparator function is not provided, an equality check is used by default.
+ *
+ * @example <caption>A simple example with numbers</caption>
+ * Observable.of(1, 1, 2, 2, 2, 1, 1, 2, 3, 3, 4)
+ *   .distinctUntilChanged()
+ *   .subscribe(x => console.log(x)); // 1, 2, 1, 2, 3, 4
+ *
+ * @example <caption>An example using a compare function</caption>
+ * interface Person {
+ *    age: number,
+ *    name: string
+ * }
+ *
+ * Observable.of<Person>(
+ *     { age: 4, name: 'Foo'},
+ *     { age: 7, name: 'Bar'},
+ *     { age: 5, name: 'Foo'})
+ *     { age: 6, name: 'Foo'})
+ *     .distinctUntilChanged((p: Person, q: Person) => p.name === q.name)
+ *     .subscribe(x => console.log(x));
+ *
+ * // displays:
+ * // { age: 4, name: 'Foo' }
+ * // { age: 7, name: 'Bar' }
+ * // { age: 5, name: 'Foo' }
+ *
+ * @see {@link distinct}
+ * @see {@link distinctUntilKeyChanged}
+ *
+ * @param {function} [compare] Optional comparison function called to test if an item is distinct from the previous item in the source.
+ * @return {Observable} An Observable that emits items from the source Observable with distinct values.
+ * @method distinctUntilChanged
+ * @owner Observable
+ */
+function distinctUntilChanged(compare, keySelector) {
+    return this.lift(new DistinctUntilChangedOperator(compare, keySelector));
+}
+exports.distinctUntilChanged = distinctUntilChanged;
+var DistinctUntilChangedOperator = (function () {
+    function DistinctUntilChangedOperator(compare, keySelector) {
+        this.compare = compare;
+        this.keySelector = keySelector;
+    }
+    DistinctUntilChangedOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new DistinctUntilChangedSubscriber(subscriber, this.compare, this.keySelector));
+    };
+    return DistinctUntilChangedOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var DistinctUntilChangedSubscriber = (function (_super) {
+    __extends(DistinctUntilChangedSubscriber, _super);
+    function DistinctUntilChangedSubscriber(destination, compare, keySelector) {
+        _super.call(this, destination);
+        this.keySelector = keySelector;
+        this.hasKey = false;
+        if (typeof compare === 'function') {
+            this.compare = compare;
+        }
+    }
+    DistinctUntilChangedSubscriber.prototype.compare = function (x, y) {
+        return x === y;
+    };
+    DistinctUntilChangedSubscriber.prototype._next = function (value) {
+        var keySelector = this.keySelector;
+        var key = value;
+        if (keySelector) {
+            key = tryCatch_1.tryCatch(this.keySelector)(value);
+            if (key === errorObject_1.errorObject) {
+                return this.destination.error(errorObject_1.errorObject.e);
+            }
+        }
+        var result = false;
+        if (this.hasKey) {
+            result = tryCatch_1.tryCatch(this.compare)(this.key, key);
+            if (result === errorObject_1.errorObject) {
+                return this.destination.error(errorObject_1.errorObject.e);
+            }
+        }
+        else {
+            this.hasKey = true;
+        }
+        if (Boolean(result) === false) {
+            this.key = key;
+            this.destination.next(value);
+        }
+    };
+    return DistinctUntilChangedSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../util/errorObject":391,"../util/tryCatch":405}],277:[function(require,module,exports){
+"use strict";
+var distinctUntilChanged_1 = require('./distinctUntilChanged');
+/* tslint:enable:max-line-length */
+/**
+ * Returns an Observable that emits all items emitted by the source Observable that are distinct by comparison from the previous item,
+ * using a property accessed by using the key provided to check if the two items are distinct.
+ *
+ * If a comparator function is provided, then it will be called for each item to test for whether or not that value should be emitted.
+ *
+ * If a comparator function is not provided, an equality check is used by default.
+ *
+ * @example <caption>An example comparing the name of persons</caption>
+ *
+ *  interface Person {
+ *     age: number,
+ *     name: string
+ *  }
+ *
+ * Observable.of<Person>(
+ *     { age: 4, name: 'Foo'},
+ *     { age: 7, name: 'Bar'},
+ *     { age: 5, name: 'Foo'},
+ *     { age: 6, name: 'Foo'})
+ *     .distinctUntilKeyChanged('name')
+ *     .subscribe(x => console.log(x));
+ *
+ * // displays:
+ * // { age: 4, name: 'Foo' }
+ * // { age: 7, name: 'Bar' }
+ * // { age: 5, name: 'Foo' }
+ *
+ * @example <caption>An example comparing the first letters of the name</caption>
+ *
+ * interface Person {
+ *     age: number,
+ *     name: string
+ *  }
+ *
+ * Observable.of<Person>(
+ *     { age: 4, name: 'Foo1'},
+ *     { age: 7, name: 'Bar'},
+ *     { age: 5, name: 'Foo2'},
+ *     { age: 6, name: 'Foo3'})
+ *     .distinctUntilKeyChanged('name', (x: string, y: string) => x.substring(0, 3) === y.substring(0, 3))
+ *     .subscribe(x => console.log(x));
+ *
+ * // displays:
+ * // { age: 4, name: 'Foo1' }
+ * // { age: 7, name: 'Bar' }
+ * // { age: 5, name: 'Foo2' }
+ *
+ * @see {@link distinct}
+ * @see {@link distinctUntilChanged}
+ *
+ * @param {string} key String key for object property lookup on each item.
+ * @param {function} [compare] Optional comparison function called to test if an item is distinct from the previous item in the source.
+ * @return {Observable} An Observable that emits items from the source Observable with distinct values based on the key specified.
+ * @method distinctUntilKeyChanged
+ * @owner Observable
+ */
+function distinctUntilKeyChanged(key, compare) {
+    return distinctUntilChanged_1.distinctUntilChanged.call(this, function (x, y) {
+        if (compare) {
+            return compare(x[key], y[key]);
+        }
+        return x[key] === y[key];
+    });
+}
+exports.distinctUntilKeyChanged = distinctUntilKeyChanged;
+
+},{"./distinctUntilChanged":276}],278:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/* tslint:enable:max-line-length */
+/**
+ * Perform a side effect for every emission on the source Observable, but return
+ * an Observable that is identical to the source.
+ *
+ * <span class="informal">Intercepts each emission on the source and runs a
+ * function, but returns an output which is identical to the source as long as errors don't occur.</span>
+ *
+ * <img src="./img/do.png" width="100%">
+ *
+ * Returns a mirrored Observable of the source Observable, but modified so that
+ * the provided Observer is called to perform a side effect for every value,
+ * error, and completion emitted by the source. Any errors that are thrown in
+ * the aforementioned Observer or handlers are safely sent down the error path
+ * of the output Observable.
+ *
+ * This operator is useful for debugging your Observables for the correct values
+ * or performing other side effects.
+ *
+ * Note: this is different to a `subscribe` on the Observable. If the Observable
+ * returned by `do` is not subscribed, the side effects specified by the
+ * Observer will never happen. `do` therefore simply spies on existing
+ * execution, it does not trigger an execution to happen like `subscribe` does.
+ *
+ * @example <caption>Map every click to the clientX position of that click, while also logging the click event</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var positions = clicks
+ *   .do(ev => console.log(ev))
+ *   .map(ev => ev.clientX);
+ * positions.subscribe(x => console.log(x));
+ *
+ * @see {@link map}
+ * @see {@link subscribe}
+ *
+ * @param {Observer|function} [nextOrObserver] A normal Observer object or a
+ * callback for `next`.
+ * @param {function} [error] Callback for errors in the source.
+ * @param {function} [complete] Callback for the completion of the source.
+ * @return {Observable} An Observable identical to the source, but runs the
+ * specified Observer or callback(s) for each item.
+ * @method do
+ * @name do
+ * @owner Observable
+ */
+function _do(nextOrObserver, error, complete) {
+    return this.lift(new DoOperator(nextOrObserver, error, complete));
+}
+exports._do = _do;
+var DoOperator = (function () {
+    function DoOperator(nextOrObserver, error, complete) {
+        this.nextOrObserver = nextOrObserver;
+        this.error = error;
+        this.complete = complete;
+    }
+    DoOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new DoSubscriber(subscriber, this.nextOrObserver, this.error, this.complete));
+    };
+    return DoOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var DoSubscriber = (function (_super) {
+    __extends(DoSubscriber, _super);
+    function DoSubscriber(destination, nextOrObserver, error, complete) {
+        _super.call(this, destination);
+        var safeSubscriber = new Subscriber_1.Subscriber(nextOrObserver, error, complete);
+        safeSubscriber.syncErrorThrowable = true;
+        this.add(safeSubscriber);
+        this.safeSubscriber = safeSubscriber;
+    }
+    DoSubscriber.prototype._next = function (value) {
+        var safeSubscriber = this.safeSubscriber;
+        safeSubscriber.next(value);
+        if (safeSubscriber.syncErrorThrown) {
+            this.destination.error(safeSubscriber.syncErrorValue);
+        }
+        else {
+            this.destination.next(value);
+        }
+    };
+    DoSubscriber.prototype._error = function (err) {
+        var safeSubscriber = this.safeSubscriber;
+        safeSubscriber.error(err);
+        if (safeSubscriber.syncErrorThrown) {
+            this.destination.error(safeSubscriber.syncErrorValue);
+        }
+        else {
+            this.destination.error(err);
+        }
+    };
+    DoSubscriber.prototype._complete = function () {
+        var safeSubscriber = this.safeSubscriber;
+        safeSubscriber.complete();
+        if (safeSubscriber.syncErrorThrown) {
+            this.destination.error(safeSubscriber.syncErrorValue);
+        }
+        else {
+            this.destination.complete();
+        }
+    };
+    return DoSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],279:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var ArgumentOutOfRangeError_1 = require('../util/ArgumentOutOfRangeError');
+/**
+ * Emits the single value at the specified `index` in a sequence of emissions
+ * from the source Observable.
+ *
+ * <span class="informal">Emits only the i-th value, then completes.</span>
+ *
+ * <img src="./img/elementAt.png" width="100%">
+ *
+ * `elementAt` returns an Observable that emits the item at the specified
+ * `index` in the source Observable, or a default value if that `index` is out
+ * of range and the `default` argument is provided. If the `default` argument is
+ * not given and the `index` is out of range, the output Observable will emit an
+ * `ArgumentOutOfRangeError` error.
+ *
+ * @example <caption>Emit only the third click event</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.elementAt(2);
+ * result.subscribe(x => console.log(x));
+ *
+ * // Results in:
+ * // click 1 = nothing
+ * // click 2 = nothing
+ * // click 3 = MouseEvent object logged to console
+ *
+ * @see {@link first}
+ * @see {@link last}
+ * @see {@link skip}
+ * @see {@link single}
+ * @see {@link take}
+ *
+ * @throws {ArgumentOutOfRangeError} When using `elementAt(i)`, it delivers an
+ * ArgumentOutOrRangeError to the Observer's `error` callback if `i < 0` or the
+ * Observable has completed before emitting the i-th `next` notification.
+ *
+ * @param {number} index Is the number `i` for the i-th source emission that has
+ * happened since the subscription, starting from the number `0`.
+ * @param {T} [defaultValue] The default value returned for missing indices.
+ * @return {Observable} An Observable that emits a single item, if it is found.
+ * Otherwise, will emit the default value if given. If not, then emits an error.
+ * @method elementAt
+ * @owner Observable
+ */
+function elementAt(index, defaultValue) {
+    return this.lift(new ElementAtOperator(index, defaultValue));
+}
+exports.elementAt = elementAt;
+var ElementAtOperator = (function () {
+    function ElementAtOperator(index, defaultValue) {
+        this.index = index;
+        this.defaultValue = defaultValue;
+        if (index < 0) {
+            throw new ArgumentOutOfRangeError_1.ArgumentOutOfRangeError;
+        }
+    }
+    ElementAtOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new ElementAtSubscriber(subscriber, this.index, this.defaultValue));
+    };
+    return ElementAtOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var ElementAtSubscriber = (function (_super) {
+    __extends(ElementAtSubscriber, _super);
+    function ElementAtSubscriber(destination, index, defaultValue) {
+        _super.call(this, destination);
+        this.index = index;
+        this.defaultValue = defaultValue;
+    }
+    ElementAtSubscriber.prototype._next = function (x) {
+        if (this.index-- === 0) {
+            this.destination.next(x);
+            this.destination.complete();
+        }
+    };
+    ElementAtSubscriber.prototype._complete = function () {
+        var destination = this.destination;
+        if (this.index >= 0) {
+            if (typeof this.defaultValue !== 'undefined') {
+                destination.next(this.defaultValue);
+            }
+            else {
+                destination.error(new ArgumentOutOfRangeError_1.ArgumentOutOfRangeError);
+            }
+        }
+        destination.complete();
+    };
+    return ElementAtSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../util/ArgumentOutOfRangeError":379}],280:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/**
+ * Returns an Observable that emits whether or not every item of the source satisfies the condition specified.
+ *
+ * @example <caption>A simple example emitting true if all elements are less than 5, false otherwise</caption>
+ *  Observable.of(1, 2, 3, 4, 5, 6)
+ *     .every(x => x < 5)
+ *     .subscribe(x => console.log(x)); // -> false
+ *
+ * @param {function} predicate A function for determining if an item meets a specified condition.
+ * @param {any} [thisArg] Optional object to use for `this` in the callback.
+ * @return {Observable} An Observable of booleans that determines if all items of the source Observable meet the condition specified.
+ * @method every
+ * @owner Observable
+ */
+function every(predicate, thisArg) {
+    return this.lift(new EveryOperator(predicate, thisArg, this));
+}
+exports.every = every;
+var EveryOperator = (function () {
+    function EveryOperator(predicate, thisArg, source) {
+        this.predicate = predicate;
+        this.thisArg = thisArg;
+        this.source = source;
+    }
+    EveryOperator.prototype.call = function (observer, source) {
+        return source.subscribe(new EverySubscriber(observer, this.predicate, this.thisArg, this.source));
+    };
+    return EveryOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var EverySubscriber = (function (_super) {
+    __extends(EverySubscriber, _super);
+    function EverySubscriber(destination, predicate, thisArg, source) {
+        _super.call(this, destination);
+        this.predicate = predicate;
+        this.thisArg = thisArg;
+        this.source = source;
+        this.index = 0;
+        this.thisArg = thisArg || this;
+    }
+    EverySubscriber.prototype.notifyComplete = function (everyValueMatch) {
+        this.destination.next(everyValueMatch);
+        this.destination.complete();
+    };
+    EverySubscriber.prototype._next = function (value) {
+        var result = false;
+        try {
+            result = this.predicate.call(this.thisArg, value, this.index++, this.source);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        if (!result) {
+            this.notifyComplete(false);
+        }
+    };
+    EverySubscriber.prototype._complete = function () {
+        this.notifyComplete(true);
+    };
+    return EverySubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],281:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Converts a higher-order Observable into a first-order Observable by dropping
+ * inner Observables while the previous inner Observable has not yet completed.
+ *
+ * <span class="informal">Flattens an Observable-of-Observables by dropping the
+ * next inner Observables while the current inner is still executing.</span>
+ *
+ * <img src="./img/exhaust.png" width="100%">
+ *
+ * `exhaust` subscribes to an Observable that emits Observables, also known as a
+ * higher-order Observable. Each time it observes one of these emitted inner
+ * Observables, the output Observable begins emitting the items emitted by that
+ * inner Observable. So far, it behaves like {@link mergeAll}. However,
+ * `exhaust` ignores every new inner Observable if the previous Observable has
+ * not yet completed. Once that one completes, it will accept and flatten the
+ * next inner Observable and repeat this process.
+ *
+ * @example <caption>Run a finite timer for each click, only if there is no currently active timer</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var higherOrder = clicks.map((ev) => Rx.Observable.interval(1000).take(5));
+ * var result = higherOrder.exhaust();
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link combineAll}
+ * @see {@link concatAll}
+ * @see {@link switch}
+ * @see {@link mergeAll}
+ * @see {@link exhaustMap}
+ * @see {@link zipAll}
+ *
+ * @return {Observable} An Observable that takes a source of Observables and propagates the first observable
+ * exclusively until it completes before subscribing to the next.
+ * @method exhaust
+ * @owner Observable
+ */
+function exhaust() {
+    return this.lift(new SwitchFirstOperator());
+}
+exports.exhaust = exhaust;
+var SwitchFirstOperator = (function () {
+    function SwitchFirstOperator() {
+    }
+    SwitchFirstOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new SwitchFirstSubscriber(subscriber));
+    };
+    return SwitchFirstOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SwitchFirstSubscriber = (function (_super) {
+    __extends(SwitchFirstSubscriber, _super);
+    function SwitchFirstSubscriber(destination) {
+        _super.call(this, destination);
+        this.hasCompleted = false;
+        this.hasSubscription = false;
+    }
+    SwitchFirstSubscriber.prototype._next = function (value) {
+        if (!this.hasSubscription) {
+            this.hasSubscription = true;
+            this.add(subscribeToResult_1.subscribeToResult(this, value));
+        }
+    };
+    SwitchFirstSubscriber.prototype._complete = function () {
+        this.hasCompleted = true;
+        if (!this.hasSubscription) {
+            this.destination.complete();
+        }
+    };
+    SwitchFirstSubscriber.prototype.notifyComplete = function (innerSub) {
+        this.remove(innerSub);
+        this.hasSubscription = false;
+        if (this.hasCompleted) {
+            this.destination.complete();
+        }
+    };
+    return SwitchFirstSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],282:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/* tslint:enable:max-line-length */
+/**
+ * Projects each source value to an Observable which is merged in the output
+ * Observable only if the previous projected Observable has completed.
+ *
+ * <span class="informal">Maps each value to an Observable, then flattens all of
+ * these inner Observables using {@link exhaust}.</span>
+ *
+ * <img src="./img/exhaustMap.png" width="100%">
+ *
+ * Returns an Observable that emits items based on applying a function that you
+ * supply to each item emitted by the source Observable, where that function
+ * returns an (so-called "inner") Observable. When it projects a source value to
+ * an Observable, the output Observable begins emitting the items emitted by
+ * that projected Observable. However, `exhaustMap` ignores every new projected
+ * Observable if the previous projected Observable has not yet completed. Once
+ * that one completes, it will accept and flatten the next projected Observable
+ * and repeat this process.
+ *
+ * @example <caption>Run a finite timer for each click, only if there is no currently active timer</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.exhaustMap((ev) => Rx.Observable.interval(1000).take(5));
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link concatMap}
+ * @see {@link exhaust}
+ * @see {@link mergeMap}
+ * @see {@link switchMap}
+ *
+ * @param {function(value: T, ?index: number): ObservableInput} project A function
+ * that, when applied to an item emitted by the source Observable, returns an
+ * Observable.
+ * @param {function(outerValue: T, innerValue: I, outerIndex: number, innerIndex: number): any} [resultSelector]
+ * A function to produce the value on the output Observable based on the values
+ * and the indices of the source (outer) emission and the inner Observable
+ * emission. The arguments passed to this function are:
+ * - `outerValue`: the value that came from the source
+ * - `innerValue`: the value that came from the projected Observable
+ * - `outerIndex`: the "index" of the value that came from the source
+ * - `innerIndex`: the "index" of the value from the projected Observable
+ * @return {Observable} An Observable containing projected Observables
+ * of each item of the source, ignoring projected Observables that start before
+ * their preceding Observable has completed.
+ * @method exhaustMap
+ * @owner Observable
+ */
+function exhaustMap(project, resultSelector) {
+    return this.lift(new SwitchFirstMapOperator(project, resultSelector));
+}
+exports.exhaustMap = exhaustMap;
+var SwitchFirstMapOperator = (function () {
+    function SwitchFirstMapOperator(project, resultSelector) {
+        this.project = project;
+        this.resultSelector = resultSelector;
+    }
+    SwitchFirstMapOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new SwitchFirstMapSubscriber(subscriber, this.project, this.resultSelector));
+    };
+    return SwitchFirstMapOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SwitchFirstMapSubscriber = (function (_super) {
+    __extends(SwitchFirstMapSubscriber, _super);
+    function SwitchFirstMapSubscriber(destination, project, resultSelector) {
+        _super.call(this, destination);
+        this.project = project;
+        this.resultSelector = resultSelector;
+        this.hasSubscription = false;
+        this.hasCompleted = false;
+        this.index = 0;
+    }
+    SwitchFirstMapSubscriber.prototype._next = function (value) {
+        if (!this.hasSubscription) {
+            this.tryNext(value);
+        }
+    };
+    SwitchFirstMapSubscriber.prototype.tryNext = function (value) {
+        var index = this.index++;
+        var destination = this.destination;
+        try {
+            var result = this.project(value, index);
+            this.hasSubscription = true;
+            this.add(subscribeToResult_1.subscribeToResult(this, result, value, index));
+        }
+        catch (err) {
+            destination.error(err);
+        }
+    };
+    SwitchFirstMapSubscriber.prototype._complete = function () {
+        this.hasCompleted = true;
+        if (!this.hasSubscription) {
+            this.destination.complete();
+        }
+    };
+    SwitchFirstMapSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        var _a = this, resultSelector = _a.resultSelector, destination = _a.destination;
+        if (resultSelector) {
+            this.trySelectResult(outerValue, innerValue, outerIndex, innerIndex);
+        }
+        else {
+            destination.next(innerValue);
+        }
+    };
+    SwitchFirstMapSubscriber.prototype.trySelectResult = function (outerValue, innerValue, outerIndex, innerIndex) {
+        var _a = this, resultSelector = _a.resultSelector, destination = _a.destination;
+        try {
+            var result = resultSelector(outerValue, innerValue, outerIndex, innerIndex);
+            destination.next(result);
+        }
+        catch (err) {
+            destination.error(err);
+        }
+    };
+    SwitchFirstMapSubscriber.prototype.notifyError = function (err) {
+        this.destination.error(err);
+    };
+    SwitchFirstMapSubscriber.prototype.notifyComplete = function (innerSub) {
+        this.remove(innerSub);
+        this.hasSubscription = false;
+        if (this.hasCompleted) {
+            this.destination.complete();
+        }
+    };
+    return SwitchFirstMapSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],283:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var tryCatch_1 = require('../util/tryCatch');
+var errorObject_1 = require('../util/errorObject');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/* tslint:enable:max-line-length */
+/**
+ * Recursively projects each source value to an Observable which is merged in
+ * the output Observable.
+ *
+ * <span class="informal">It's similar to {@link mergeMap}, but applies the
+ * projection function to every source value as well as every output value.
+ * It's recursive.</span>
+ *
+ * <img src="./img/expand.png" width="100%">
+ *
+ * Returns an Observable that emits items based on applying a function that you
+ * supply to each item emitted by the source Observable, where that function
+ * returns an Observable, and then merging those resulting Observables and
+ * emitting the results of this merger. *Expand* will re-emit on the output
+ * Observable every source value. Then, each output value is given to the
+ * `project` function which returns an inner Observable to be merged on the
+ * output Observable. Those output values resulting from the projection are also
+ * given to the `project` function to produce new output values. This is how
+ * *expand* behaves recursively.
+ *
+ * @example <caption>Start emitting the powers of two on every click, at most 10 of them</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var powersOfTwo = clicks
+ *   .mapTo(1)
+ *   .expand(x => Rx.Observable.of(2 * x).delay(1000))
+ *   .take(10);
+ * powersOfTwo.subscribe(x => console.log(x));
+ *
+ * @see {@link mergeMap}
+ * @see {@link mergeScan}
+ *
+ * @param {function(value: T, index: number) => Observable} project A function
+ * that, when applied to an item emitted by the source or the output Observable,
+ * returns an Observable.
+ * @param {number} [concurrent=Number.POSITIVE_INFINITY] Maximum number of input
+ * Observables being subscribed to concurrently.
+ * @param {Scheduler} [scheduler=null] The IScheduler to use for subscribing to
+ * each projected inner Observable.
+ * @return {Observable} An Observable that emits the source values and also
+ * result of applying the projection function to each value emitted on the
+ * output Observable and and merging the results of the Observables obtained
+ * from this transformation.
+ * @method expand
+ * @owner Observable
+ */
+function expand(project, concurrent, scheduler) {
+    if (concurrent === void 0) { concurrent = Number.POSITIVE_INFINITY; }
+    if (scheduler === void 0) { scheduler = undefined; }
+    concurrent = (concurrent || 0) < 1 ? Number.POSITIVE_INFINITY : concurrent;
+    return this.lift(new ExpandOperator(project, concurrent, scheduler));
+}
+exports.expand = expand;
+var ExpandOperator = (function () {
+    function ExpandOperator(project, concurrent, scheduler) {
+        this.project = project;
+        this.concurrent = concurrent;
+        this.scheduler = scheduler;
+    }
+    ExpandOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new ExpandSubscriber(subscriber, this.project, this.concurrent, this.scheduler));
+    };
+    return ExpandOperator;
+}());
+exports.ExpandOperator = ExpandOperator;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var ExpandSubscriber = (function (_super) {
+    __extends(ExpandSubscriber, _super);
+    function ExpandSubscriber(destination, project, concurrent, scheduler) {
+        _super.call(this, destination);
+        this.project = project;
+        this.concurrent = concurrent;
+        this.scheduler = scheduler;
+        this.index = 0;
+        this.active = 0;
+        this.hasCompleted = false;
+        if (concurrent < Number.POSITIVE_INFINITY) {
+            this.buffer = [];
+        }
+    }
+    ExpandSubscriber.dispatch = function (arg) {
+        var subscriber = arg.subscriber, result = arg.result, value = arg.value, index = arg.index;
+        subscriber.subscribeToProjection(result, value, index);
+    };
+    ExpandSubscriber.prototype._next = function (value) {
+        var destination = this.destination;
+        if (destination.closed) {
+            this._complete();
+            return;
+        }
+        var index = this.index++;
+        if (this.active < this.concurrent) {
+            destination.next(value);
+            var result = tryCatch_1.tryCatch(this.project)(value, index);
+            if (result === errorObject_1.errorObject) {
+                destination.error(errorObject_1.errorObject.e);
+            }
+            else if (!this.scheduler) {
+                this.subscribeToProjection(result, value, index);
+            }
+            else {
+                var state = { subscriber: this, result: result, value: value, index: index };
+                this.add(this.scheduler.schedule(ExpandSubscriber.dispatch, 0, state));
+            }
+        }
+        else {
+            this.buffer.push(value);
+        }
+    };
+    ExpandSubscriber.prototype.subscribeToProjection = function (result, value, index) {
+        this.active++;
+        this.add(subscribeToResult_1.subscribeToResult(this, result, value, index));
+    };
+    ExpandSubscriber.prototype._complete = function () {
+        this.hasCompleted = true;
+        if (this.hasCompleted && this.active === 0) {
+            this.destination.complete();
+        }
+    };
+    ExpandSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this._next(innerValue);
+    };
+    ExpandSubscriber.prototype.notifyComplete = function (innerSub) {
+        var buffer = this.buffer;
+        this.remove(innerSub);
+        this.active--;
+        if (buffer && buffer.length > 0) {
+            this._next(buffer.shift());
+        }
+        if (this.hasCompleted && this.active === 0) {
+            this.destination.complete();
+        }
+    };
+    return ExpandSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+exports.ExpandSubscriber = ExpandSubscriber;
+
+},{"../OuterSubscriber":64,"../util/errorObject":391,"../util/subscribeToResult":403,"../util/tryCatch":405}],284:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/* tslint:enable:max-line-length */
+/**
+ * Filter items emitted by the source Observable by only emitting those that
+ * satisfy a specified predicate.
+ *
+ * <span class="informal">Like
+ * [Array.prototype.filter()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/filter),
+ * it only emits a value from the source if it passes a criterion function.</span>
+ *
+ * <img src="./img/filter.png" width="100%">
+ *
+ * Similar to the well-known `Array.prototype.filter` method, this operator
+ * takes values from the source Observable, passes them through a `predicate`
+ * function and only emits those values that yielded `true`.
+ *
+ * @example <caption>Emit only click events whose target was a DIV element</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var clicksOnDivs = clicks.filter(ev => ev.target.tagName === 'DIV');
+ * clicksOnDivs.subscribe(x => console.log(x));
+ *
+ * @see {@link distinct}
+ * @see {@link distinctUntilChanged}
+ * @see {@link distinctUntilKeyChanged}
+ * @see {@link ignoreElements}
+ * @see {@link partition}
+ * @see {@link skip}
+ *
+ * @param {function(value: T, index: number): boolean} predicate A function that
+ * evaluates each value emitted by the source Observable. If it returns `true`,
+ * the value is emitted, if `false` the value is not passed to the output
+ * Observable. The `index` parameter is the number `i` for the i-th source
+ * emission that has happened since the subscription, starting from the number
+ * `0`.
+ * @param {any} [thisArg] An optional argument to determine the value of `this`
+ * in the `predicate` function.
+ * @return {Observable} An Observable of values from the source that were
+ * allowed by the `predicate` function.
+ * @method filter
+ * @owner Observable
+ */
+function filter(predicate, thisArg) {
+    return this.lift(new FilterOperator(predicate, thisArg));
+}
+exports.filter = filter;
+var FilterOperator = (function () {
+    function FilterOperator(predicate, thisArg) {
+        this.predicate = predicate;
+        this.thisArg = thisArg;
+    }
+    FilterOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new FilterSubscriber(subscriber, this.predicate, this.thisArg));
+    };
+    return FilterOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var FilterSubscriber = (function (_super) {
+    __extends(FilterSubscriber, _super);
+    function FilterSubscriber(destination, predicate, thisArg) {
+        _super.call(this, destination);
+        this.predicate = predicate;
+        this.thisArg = thisArg;
+        this.count = 0;
+    }
+    // the try catch block below is left specifically for
+    // optimization and perf reasons. a tryCatcher is not necessary here.
+    FilterSubscriber.prototype._next = function (value) {
+        var result;
+        try {
+            result = this.predicate.call(this.thisArg, value, this.count++);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        if (result) {
+            this.destination.next(value);
+        }
+    };
+    return FilterSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],285:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var Subscription_1 = require('../Subscription');
+/**
+ * Returns an Observable that mirrors the source Observable, but will call a specified function when
+ * the source terminates on complete or error.
+ * @param {function} callback Function to be called when source terminates.
+ * @return {Observable} An Observable that mirrors the source, but will call the specified function on termination.
+ * @method finally
+ * @owner Observable
+ */
+function _finally(callback) {
+    return this.lift(new FinallyOperator(callback));
+}
+exports._finally = _finally;
+var FinallyOperator = (function () {
+    function FinallyOperator(callback) {
+        this.callback = callback;
+    }
+    FinallyOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new FinallySubscriber(subscriber, this.callback));
+    };
+    return FinallyOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var FinallySubscriber = (function (_super) {
+    __extends(FinallySubscriber, _super);
+    function FinallySubscriber(destination, callback) {
+        _super.call(this, destination);
+        this.add(new Subscription_1.Subscription(callback));
+    }
+    return FinallySubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../Subscription":71}],286:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/* tslint:enable:max-line-length */
+/**
+ * Emits only the first value emitted by the source Observable that meets some
+ * condition.
+ *
+ * <span class="informal">Finds the first value that passes some test and emits
+ * that.</span>
+ *
+ * <img src="./img/find.png" width="100%">
+ *
+ * `find` searches for the first item in the source Observable that matches the
+ * specified condition embodied by the `predicate`, and returns the first
+ * occurrence in the source. Unlike {@link first}, the `predicate` is required
+ * in `find`, and does not emit an error if a valid value is not found.
+ *
+ * @example <caption>Find and emit the first click that happens on a DIV element</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.find(ev => ev.target.tagName === 'DIV');
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link filter}
+ * @see {@link first}
+ * @see {@link findIndex}
+ * @see {@link take}
+ *
+ * @param {function(value: T, index: number, source: Observable<T>): boolean} predicate
+ * A function called with each item to test for condition matching.
+ * @param {any} [thisArg] An optional argument to determine the value of `this`
+ * in the `predicate` function.
+ * @return {Observable<T>} An Observable of the first item that matches the
+ * condition.
+ * @method find
+ * @owner Observable
+ */
+function find(predicate, thisArg) {
+    if (typeof predicate !== 'function') {
+        throw new TypeError('predicate is not a function');
+    }
+    return this.lift(new FindValueOperator(predicate, this, false, thisArg));
+}
+exports.find = find;
+var FindValueOperator = (function () {
+    function FindValueOperator(predicate, source, yieldIndex, thisArg) {
+        this.predicate = predicate;
+        this.source = source;
+        this.yieldIndex = yieldIndex;
+        this.thisArg = thisArg;
+    }
+    FindValueOperator.prototype.call = function (observer, source) {
+        return source.subscribe(new FindValueSubscriber(observer, this.predicate, this.source, this.yieldIndex, this.thisArg));
+    };
+    return FindValueOperator;
+}());
+exports.FindValueOperator = FindValueOperator;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var FindValueSubscriber = (function (_super) {
+    __extends(FindValueSubscriber, _super);
+    function FindValueSubscriber(destination, predicate, source, yieldIndex, thisArg) {
+        _super.call(this, destination);
+        this.predicate = predicate;
+        this.source = source;
+        this.yieldIndex = yieldIndex;
+        this.thisArg = thisArg;
+        this.index = 0;
+    }
+    FindValueSubscriber.prototype.notifyComplete = function (value) {
+        var destination = this.destination;
+        destination.next(value);
+        destination.complete();
+    };
+    FindValueSubscriber.prototype._next = function (value) {
+        var _a = this, predicate = _a.predicate, thisArg = _a.thisArg;
+        var index = this.index++;
+        try {
+            var result = predicate.call(thisArg || this, value, index, this.source);
+            if (result) {
+                this.notifyComplete(this.yieldIndex ? index : value);
+            }
+        }
+        catch (err) {
+            this.destination.error(err);
+        }
+    };
+    FindValueSubscriber.prototype._complete = function () {
+        this.notifyComplete(this.yieldIndex ? -1 : undefined);
+    };
+    return FindValueSubscriber;
+}(Subscriber_1.Subscriber));
+exports.FindValueSubscriber = FindValueSubscriber;
+
+},{"../Subscriber":70}],287:[function(require,module,exports){
+"use strict";
+var find_1 = require('./find');
+/**
+ * Emits only the index of the first value emitted by the source Observable that
+ * meets some condition.
+ *
+ * <span class="informal">It's like {@link find}, but emits the index of the
+ * found value, not the value itself.</span>
+ *
+ * <img src="./img/findIndex.png" width="100%">
+ *
+ * `findIndex` searches for the first item in the source Observable that matches
+ * the specified condition embodied by the `predicate`, and returns the
+ * (zero-based) index of the first occurrence in the source. Unlike
+ * {@link first}, the `predicate` is required in `findIndex`, and does not emit
+ * an error if a valid value is not found.
+ *
+ * @example <caption>Emit the index of first click that happens on a DIV element</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.findIndex(ev => ev.target.tagName === 'DIV');
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link filter}
+ * @see {@link find}
+ * @see {@link first}
+ * @see {@link take}
+ *
+ * @param {function(value: T, index: number, source: Observable<T>): boolean} predicate
+ * A function called with each item to test for condition matching.
+ * @param {any} [thisArg] An optional argument to determine the value of `this`
+ * in the `predicate` function.
+ * @return {Observable} An Observable of the index of the first item that
+ * matches the condition.
+ * @method find
+ * @owner Observable
+ */
+function findIndex(predicate, thisArg) {
+    return this.lift(new find_1.FindValueOperator(predicate, this, true, thisArg));
+}
+exports.findIndex = findIndex;
+
+},{"./find":286}],288:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var EmptyError_1 = require('../util/EmptyError');
+/**
+ * Emits only the first value (or the first value that meets some condition)
+ * emitted by the source Observable.
+ *
+ * <span class="informal">Emits only the first value. Or emits only the first
+ * value that passes some test.</span>
+ *
+ * <img src="./img/first.png" width="100%">
+ *
+ * If called with no arguments, `first` emits the first value of the source
+ * Observable, then completes. If called with a `predicate` function, `first`
+ * emits the first value of the source that matches the specified condition. It
+ * may also take a `resultSelector` function to produce the output value from
+ * the input value, and a `defaultValue` to emit in case the source completes
+ * before it is able to emit a valid value. Throws an error if `defaultValue`
+ * was not provided and a matching element is not found.
+ *
+ * @example <caption>Emit only the first click that happens on the DOM</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.first();
+ * result.subscribe(x => console.log(x));
+ *
+ * @example <caption>Emits the first click that happens on a DIV</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.first(ev => ev.target.tagName === 'DIV');
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link filter}
+ * @see {@link find}
+ * @see {@link take}
+ *
+ * @throws {EmptyError} Delivers an EmptyError to the Observer's `error`
+ * callback if the Observable completes before any `next` notification was sent.
+ *
+ * @param {function(value: T, index: number, source: Observable<T>): boolean} [predicate]
+ * An optional function called with each item to test for condition matching.
+ * @param {function(value: T, index: number): R} [resultSelector] A function to
+ * produce the value on the output Observable based on the values
+ * and the indices of the source Observable. The arguments passed to this
+ * function are:
+ * - `value`: the value that was emitted on the source.
+ * - `index`: the "index" of the value from the source.
+ * @param {R} [defaultValue] The default value emitted in case no valid value
+ * was found on the source.
+ * @return {Observable<T|R>} An Observable of the first item that matches the
+ * condition.
+ * @method first
+ * @owner Observable
+ */
+function first(predicate, resultSelector, defaultValue) {
+    return this.lift(new FirstOperator(predicate, resultSelector, defaultValue, this));
+}
+exports.first = first;
+var FirstOperator = (function () {
+    function FirstOperator(predicate, resultSelector, defaultValue, source) {
+        this.predicate = predicate;
+        this.resultSelector = resultSelector;
+        this.defaultValue = defaultValue;
+        this.source = source;
+    }
+    FirstOperator.prototype.call = function (observer, source) {
+        return source.subscribe(new FirstSubscriber(observer, this.predicate, this.resultSelector, this.defaultValue, this.source));
+    };
+    return FirstOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var FirstSubscriber = (function (_super) {
+    __extends(FirstSubscriber, _super);
+    function FirstSubscriber(destination, predicate, resultSelector, defaultValue, source) {
+        _super.call(this, destination);
+        this.predicate = predicate;
+        this.resultSelector = resultSelector;
+        this.defaultValue = defaultValue;
+        this.source = source;
+        this.index = 0;
+        this.hasCompleted = false;
+        this._emitted = false;
+    }
+    FirstSubscriber.prototype._next = function (value) {
+        var index = this.index++;
+        if (this.predicate) {
+            this._tryPredicate(value, index);
+        }
+        else {
+            this._emit(value, index);
+        }
+    };
+    FirstSubscriber.prototype._tryPredicate = function (value, index) {
+        var result;
+        try {
+            result = this.predicate(value, index, this.source);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        if (result) {
+            this._emit(value, index);
+        }
+    };
+    FirstSubscriber.prototype._emit = function (value, index) {
+        if (this.resultSelector) {
+            this._tryResultSelector(value, index);
+            return;
+        }
+        this._emitFinal(value);
+    };
+    FirstSubscriber.prototype._tryResultSelector = function (value, index) {
+        var result;
+        try {
+            result = this.resultSelector(value, index);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        this._emitFinal(result);
+    };
+    FirstSubscriber.prototype._emitFinal = function (value) {
+        var destination = this.destination;
+        if (!this._emitted) {
+            this._emitted = true;
+            destination.next(value);
+            destination.complete();
+            this.hasCompleted = true;
+        }
+    };
+    FirstSubscriber.prototype._complete = function () {
+        var destination = this.destination;
+        if (!this.hasCompleted && typeof this.defaultValue !== 'undefined') {
+            destination.next(this.defaultValue);
+            destination.complete();
+        }
+        else if (!this.hasCompleted) {
+            destination.error(new EmptyError_1.EmptyError);
+        }
+    };
+    return FirstSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../util/EmptyError":380}],289:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var Subscription_1 = require('../Subscription');
+var Observable_1 = require('../Observable');
+var Subject_1 = require('../Subject');
+var Map_1 = require('../util/Map');
+var FastMap_1 = require('../util/FastMap');
+/* tslint:enable:max-line-length */
+/**
+ * Groups the items emitted by an Observable according to a specified criterion,
+ * and emits these grouped items as `GroupedObservables`, one
+ * {@link GroupedObservable} per group.
+ *
+ * <img src="./img/groupBy.png" width="100%">
+ *
+ * @example <caption>Group objects by id and return as array</caption>
+ * Observable.of<Obj>({id: 1, name: 'aze1'},
+ *                    {id: 2, name: 'sf2'},
+ *                    {id: 2, name: 'dg2'},
+ *                    {id: 1, name: 'erg1'},
+ *                    {id: 1, name: 'df1'},
+ *                    {id: 2, name: 'sfqfb2'},
+ *                    {id: 3, name: 'qfs3'},
+ *                    {id: 2, name: 'qsgqsfg2'}
+ *     )
+ *     .groupBy(p => p.id)
+ *     .flatMap( (group$) => group$.reduce((acc, cur) => [...acc, cur], []))
+ *     .subscribe(p => console.log(p));
+ *
+ * // displays:
+ * // [ { id: 1, name: 'aze1' },
+ * //   { id: 1, name: 'erg1' },
+ * //   { id: 1, name: 'df1' } ]
+ * //
+ * // [ { id: 2, name: 'sf2' },
+ * //   { id: 2, name: 'dg2' },
+ * //   { id: 2, name: 'sfqfb2' },
+ * //   { id: 2, name: 'qsgqsfg2' } ]
+ * //
+ * // [ { id: 3, name: 'qfs3' } ]
+ *
+ * @example <caption>Pivot data on the id field</caption>
+ * Observable.of<Obj>({id: 1, name: 'aze1'},
+ *                    {id: 2, name: 'sf2'},
+ *                    {id: 2, name: 'dg2'},
+ *                    {id: 1, name: 'erg1'},
+ *                    {id: 1, name: 'df1'},
+ *                    {id: 2, name: 'sfqfb2'},
+ *                    {id: 3, name: 'qfs1'},
+ *                    {id: 2, name: 'qsgqsfg2'}
+ *                   )
+ *     .groupBy(p => p.id, p => p.name)
+ *     .flatMap( (group$) => group$.reduce((acc, cur) => [...acc, cur], ["" + group$.key]))
+ *     .map(arr => ({'id': parseInt(arr[0]), 'values': arr.slice(1)}))
+ *     .subscribe(p => console.log(p));
+ *
+ * // displays:
+ * // { id: 1, values: [ 'aze1', 'erg1', 'df1' ] }
+ * // { id: 2, values: [ 'sf2', 'dg2', 'sfqfb2', 'qsgqsfg2' ] }
+ * // { id: 3, values: [ 'qfs1' ] }
+ *
+ * @param {function(value: T): K} keySelector A function that extracts the key
+ * for each item.
+ * @param {function(value: T): R} [elementSelector] A function that extracts the
+ * return element for each item.
+ * @param {function(grouped: GroupedObservable<K,R>): Observable<any>} [durationSelector]
+ * A function that returns an Observable to determine how long each group should
+ * exist.
+ * @return {Observable<GroupedObservable<K,R>>} An Observable that emits
+ * GroupedObservables, each of which corresponds to a unique key value and each
+ * of which emits those items from the source Observable that share that key
+ * value.
+ * @method groupBy
+ * @owner Observable
+ */
+function groupBy(keySelector, elementSelector, durationSelector, subjectSelector) {
+    return this.lift(new GroupByOperator(keySelector, elementSelector, durationSelector, subjectSelector));
+}
+exports.groupBy = groupBy;
+var GroupByOperator = (function () {
+    function GroupByOperator(keySelector, elementSelector, durationSelector, subjectSelector) {
+        this.keySelector = keySelector;
+        this.elementSelector = elementSelector;
+        this.durationSelector = durationSelector;
+        this.subjectSelector = subjectSelector;
+    }
+    GroupByOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new GroupBySubscriber(subscriber, this.keySelector, this.elementSelector, this.durationSelector, this.subjectSelector));
+    };
+    return GroupByOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var GroupBySubscriber = (function (_super) {
+    __extends(GroupBySubscriber, _super);
+    function GroupBySubscriber(destination, keySelector, elementSelector, durationSelector, subjectSelector) {
+        _super.call(this, destination);
+        this.keySelector = keySelector;
+        this.elementSelector = elementSelector;
+        this.durationSelector = durationSelector;
+        this.subjectSelector = subjectSelector;
+        this.groups = null;
+        this.attemptedToUnsubscribe = false;
+        this.count = 0;
+    }
+    GroupBySubscriber.prototype._next = function (value) {
+        var key;
+        try {
+            key = this.keySelector(value);
+        }
+        catch (err) {
+            this.error(err);
+            return;
+        }
+        this._group(value, key);
+    };
+    GroupBySubscriber.prototype._group = function (value, key) {
+        var groups = this.groups;
+        if (!groups) {
+            groups = this.groups = typeof key === 'string' ? new FastMap_1.FastMap() : new Map_1.Map();
+        }
+        var group = groups.get(key);
+        var element;
+        if (this.elementSelector) {
+            try {
+                element = this.elementSelector(value);
+            }
+            catch (err) {
+                this.error(err);
+            }
+        }
+        else {
+            element = value;
+        }
+        if (!group) {
+            group = this.subjectSelector ? this.subjectSelector() : new Subject_1.Subject();
+            groups.set(key, group);
+            var groupedObservable = new GroupedObservable(key, group, this);
+            this.destination.next(groupedObservable);
+            if (this.durationSelector) {
+                var duration = void 0;
+                try {
+                    duration = this.durationSelector(new GroupedObservable(key, group));
+                }
+                catch (err) {
+                    this.error(err);
+                    return;
+                }
+                this.add(duration.subscribe(new GroupDurationSubscriber(key, group, this)));
+            }
+        }
+        if (!group.closed) {
+            group.next(element);
+        }
+    };
+    GroupBySubscriber.prototype._error = function (err) {
+        var groups = this.groups;
+        if (groups) {
+            groups.forEach(function (group, key) {
+                group.error(err);
+            });
+            groups.clear();
+        }
+        this.destination.error(err);
+    };
+    GroupBySubscriber.prototype._complete = function () {
+        var groups = this.groups;
+        if (groups) {
+            groups.forEach(function (group, key) {
+                group.complete();
+            });
+            groups.clear();
+        }
+        this.destination.complete();
+    };
+    GroupBySubscriber.prototype.removeGroup = function (key) {
+        this.groups.delete(key);
+    };
+    GroupBySubscriber.prototype.unsubscribe = function () {
+        if (!this.closed) {
+            this.attemptedToUnsubscribe = true;
+            if (this.count === 0) {
+                _super.prototype.unsubscribe.call(this);
+            }
+        }
+    };
+    return GroupBySubscriber;
+}(Subscriber_1.Subscriber));
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var GroupDurationSubscriber = (function (_super) {
+    __extends(GroupDurationSubscriber, _super);
+    function GroupDurationSubscriber(key, group, parent) {
+        _super.call(this, group);
+        this.key = key;
+        this.group = group;
+        this.parent = parent;
+    }
+    GroupDurationSubscriber.prototype._next = function (value) {
+        this.complete();
+    };
+    GroupDurationSubscriber.prototype._unsubscribe = function () {
+        var _a = this, parent = _a.parent, key = _a.key;
+        this.key = this.parent = null;
+        if (parent) {
+            parent.removeGroup(key);
+        }
+    };
+    return GroupDurationSubscriber;
+}(Subscriber_1.Subscriber));
+/**
+ * An Observable representing values belonging to the same group represented by
+ * a common key. The values emitted by a GroupedObservable come from the source
+ * Observable. The common key is available as the field `key` on a
+ * GroupedObservable instance.
+ *
+ * @class GroupedObservable<K, T>
+ */
+var GroupedObservable = (function (_super) {
+    __extends(GroupedObservable, _super);
+    function GroupedObservable(key, groupSubject, refCountSubscription) {
+        _super.call(this);
+        this.key = key;
+        this.groupSubject = groupSubject;
+        this.refCountSubscription = refCountSubscription;
+    }
+    GroupedObservable.prototype._subscribe = function (subscriber) {
+        var subscription = new Subscription_1.Subscription();
+        var _a = this, refCountSubscription = _a.refCountSubscription, groupSubject = _a.groupSubject;
+        if (refCountSubscription && !refCountSubscription.closed) {
+            subscription.add(new InnerRefCountSubscription(refCountSubscription));
+        }
+        subscription.add(groupSubject.subscribe(subscriber));
+        return subscription;
+    };
+    return GroupedObservable;
+}(Observable_1.Observable));
+exports.GroupedObservable = GroupedObservable;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var InnerRefCountSubscription = (function (_super) {
+    __extends(InnerRefCountSubscription, _super);
+    function InnerRefCountSubscription(parent) {
+        _super.call(this);
+        this.parent = parent;
+        parent.count++;
+    }
+    InnerRefCountSubscription.prototype.unsubscribe = function () {
+        var parent = this.parent;
+        if (!parent.closed && !this.closed) {
+            _super.prototype.unsubscribe.call(this);
+            parent.count -= 1;
+            if (parent.count === 0 && parent.attemptedToUnsubscribe) {
+                parent.unsubscribe();
+            }
+        }
+    };
+    return InnerRefCountSubscription;
+}(Subscription_1.Subscription));
+
+},{"../Observable":62,"../Subject":68,"../Subscriber":70,"../Subscription":71,"../util/FastMap":381,"../util/Map":383}],290:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var noop_1 = require('../util/noop');
+/**
+ * Ignores all items emitted by the source Observable and only passes calls of `complete` or `error`.
+ *
+ * <img src="./img/ignoreElements.png" width="100%">
+ *
+ * @return {Observable} An empty Observable that only calls `complete`
+ * or `error`, based on which one is called by the source Observable.
+ * @method ignoreElements
+ * @owner Observable
+ */
+function ignoreElements() {
+    return this.lift(new IgnoreElementsOperator());
+}
+exports.ignoreElements = ignoreElements;
+;
+var IgnoreElementsOperator = (function () {
+    function IgnoreElementsOperator() {
+    }
+    IgnoreElementsOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new IgnoreElementsSubscriber(subscriber));
+    };
+    return IgnoreElementsOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var IgnoreElementsSubscriber = (function (_super) {
+    __extends(IgnoreElementsSubscriber, _super);
+    function IgnoreElementsSubscriber() {
+        _super.apply(this, arguments);
+    }
+    IgnoreElementsSubscriber.prototype._next = function (unused) {
+        noop_1.noop();
+    };
+    return IgnoreElementsSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../util/noop":400}],291:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/**
+ * If the source Observable is empty it returns an Observable that emits true, otherwise it emits false.
+ *
+ * <img src="./img/isEmpty.png" width="100%">
+ *
+ * @return {Observable} An Observable that emits a Boolean.
+ * @method isEmpty
+ * @owner Observable
+ */
+function isEmpty() {
+    return this.lift(new IsEmptyOperator());
+}
+exports.isEmpty = isEmpty;
+var IsEmptyOperator = (function () {
+    function IsEmptyOperator() {
+    }
+    IsEmptyOperator.prototype.call = function (observer, source) {
+        return source.subscribe(new IsEmptySubscriber(observer));
+    };
+    return IsEmptyOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var IsEmptySubscriber = (function (_super) {
+    __extends(IsEmptySubscriber, _super);
+    function IsEmptySubscriber(destination) {
+        _super.call(this, destination);
+    }
+    IsEmptySubscriber.prototype.notifyComplete = function (isEmpty) {
+        var destination = this.destination;
+        destination.next(isEmpty);
+        destination.complete();
+    };
+    IsEmptySubscriber.prototype._next = function (value) {
+        this.notifyComplete(false);
+    };
+    IsEmptySubscriber.prototype._complete = function () {
+        this.notifyComplete(true);
+    };
+    return IsEmptySubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],292:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var EmptyError_1 = require('../util/EmptyError');
+/* tslint:enable:max-line-length */
+/**
+ * Returns an Observable that emits only the last item emitted by the source Observable.
+ * It optionally takes a predicate function as a parameter, in which case, rather than emitting
+ * the last item from the source Observable, the resulting Observable will emit the last item
+ * from the source Observable that satisfies the predicate.
+ *
+ * <img src="./img/last.png" width="100%">
+ *
+ * @throws {EmptyError} Delivers an EmptyError to the Observer's `error`
+ * callback if the Observable completes before any `next` notification was sent.
+ * @param {function} predicate - The condition any source emitted item has to satisfy.
+ * @return {Observable} An Observable that emits only the last item satisfying the given condition
+ * from the source, or an NoSuchElementException if no such items are emitted.
+ * @throws - Throws if no items that match the predicate are emitted by the source Observable.
+ * @method last
+ * @owner Observable
+ */
+function last(predicate, resultSelector, defaultValue) {
+    return this.lift(new LastOperator(predicate, resultSelector, defaultValue, this));
+}
+exports.last = last;
+var LastOperator = (function () {
+    function LastOperator(predicate, resultSelector, defaultValue, source) {
+        this.predicate = predicate;
+        this.resultSelector = resultSelector;
+        this.defaultValue = defaultValue;
+        this.source = source;
+    }
+    LastOperator.prototype.call = function (observer, source) {
+        return source.subscribe(new LastSubscriber(observer, this.predicate, this.resultSelector, this.defaultValue, this.source));
+    };
+    return LastOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var LastSubscriber = (function (_super) {
+    __extends(LastSubscriber, _super);
+    function LastSubscriber(destination, predicate, resultSelector, defaultValue, source) {
+        _super.call(this, destination);
+        this.predicate = predicate;
+        this.resultSelector = resultSelector;
+        this.defaultValue = defaultValue;
+        this.source = source;
+        this.hasValue = false;
+        this.index = 0;
+        if (typeof defaultValue !== 'undefined') {
+            this.lastValue = defaultValue;
+            this.hasValue = true;
+        }
+    }
+    LastSubscriber.prototype._next = function (value) {
+        var index = this.index++;
+        if (this.predicate) {
+            this._tryPredicate(value, index);
+        }
+        else {
+            if (this.resultSelector) {
+                this._tryResultSelector(value, index);
+                return;
+            }
+            this.lastValue = value;
+            this.hasValue = true;
+        }
+    };
+    LastSubscriber.prototype._tryPredicate = function (value, index) {
+        var result;
+        try {
+            result = this.predicate(value, index, this.source);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        if (result) {
+            if (this.resultSelector) {
+                this._tryResultSelector(value, index);
+                return;
+            }
+            this.lastValue = value;
+            this.hasValue = true;
+        }
+    };
+    LastSubscriber.prototype._tryResultSelector = function (value, index) {
+        var result;
+        try {
+            result = this.resultSelector(value, index);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        this.lastValue = result;
+        this.hasValue = true;
+    };
+    LastSubscriber.prototype._complete = function () {
+        var destination = this.destination;
+        if (this.hasValue) {
+            destination.next(this.lastValue);
+            destination.complete();
+        }
+        else {
+            destination.error(new EmptyError_1.EmptyError);
+        }
+    };
+    return LastSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../util/EmptyError":380}],293:[function(require,module,exports){
+"use strict";
+/**
+ * @param func
+ * @return {Observable<R>}
+ * @method let
+ * @owner Observable
+ */
+function letProto(func) {
+    return func(this);
+}
+exports.letProto = letProto;
+
+},{}],294:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -18434,7 +32061,2018 @@ var MapSubscriber = (function (_super) {
     return MapSubscriber;
 }(Subscriber_1.Subscriber));
 
-},{"../Subscriber":48}],55:[function(require,module,exports){
+},{"../Subscriber":70}],295:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/**
+ * Emits the given constant value on the output Observable every time the source
+ * Observable emits a value.
+ *
+ * <span class="informal">Like {@link map}, but it maps every source value to
+ * the same output value every time.</span>
+ *
+ * <img src="./img/mapTo.png" width="100%">
+ *
+ * Takes a constant `value` as argument, and emits that whenever the source
+ * Observable emits a value. In other words, ignores the actual source value,
+ * and simply uses the emission moment to know when to emit the given `value`.
+ *
+ * @example <caption>Map every click to the string 'Hi'</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var greetings = clicks.mapTo('Hi');
+ * greetings.subscribe(x => console.log(x));
+ *
+ * @see {@link map}
+ *
+ * @param {any} value The value to map each source value to.
+ * @return {Observable} An Observable that emits the given `value` every time
+ * the source Observable emits something.
+ * @method mapTo
+ * @owner Observable
+ */
+function mapTo(value) {
+    return this.lift(new MapToOperator(value));
+}
+exports.mapTo = mapTo;
+var MapToOperator = (function () {
+    function MapToOperator(value) {
+        this.value = value;
+    }
+    MapToOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new MapToSubscriber(subscriber, this.value));
+    };
+    return MapToOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var MapToSubscriber = (function (_super) {
+    __extends(MapToSubscriber, _super);
+    function MapToSubscriber(destination, value) {
+        _super.call(this, destination);
+        this.value = value;
+    }
+    MapToSubscriber.prototype._next = function (x) {
+        this.destination.next(this.value);
+    };
+    return MapToSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],296:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var Notification_1 = require('../Notification');
+/**
+ * Represents all of the notifications from the source Observable as `next`
+ * emissions marked with their original types within {@link Notification}
+ * objects.
+ *
+ * <span class="informal">Wraps `next`, `error` and `complete` emissions in
+ * {@link Notification} objects, emitted as `next` on the output Observable.
+ * </span>
+ *
+ * <img src="./img/materialize.png" width="100%">
+ *
+ * `materialize` returns an Observable that emits a `next` notification for each
+ * `next`, `error`, or `complete` emission of the source Observable. When the
+ * source Observable emits `complete`, the output Observable will emit `next` as
+ * a Notification of type "complete", and then it will emit `complete` as well.
+ * When the source Observable emits `error`, the output will emit `next` as a
+ * Notification of type "error", and then `complete`.
+ *
+ * This operator is useful for producing metadata of the source Observable, to
+ * be consumed as `next` emissions. Use it in conjunction with
+ * {@link dematerialize}.
+ *
+ * @example <caption>Convert a faulty Observable to an Observable of Notifications</caption>
+ * var letters = Rx.Observable.of('a', 'b', 13, 'd');
+ * var upperCase = letters.map(x => x.toUpperCase());
+ * var materialized = upperCase.materialize();
+ * materialized.subscribe(x => console.log(x));
+ *
+ * // Results in the following:
+ * // - Notification {kind: "N", value: "A", error: undefined, hasValue: true}
+ * // - Notification {kind: "N", value: "B", error: undefined, hasValue: true}
+ * // - Notification {kind: "E", value: undefined, error: TypeError:
+ * //   x.toUpperCase is not a function at MapSubscriber.letters.map.x
+ * //   [as project] (http://1…, hasValue: false}
+ *
+ * @see {@link Notification}
+ * @see {@link dematerialize}
+ *
+ * @return {Observable<Notification<T>>} An Observable that emits
+ * {@link Notification} objects that wrap the original emissions from the source
+ * Observable with metadata.
+ * @method materialize
+ * @owner Observable
+ */
+function materialize() {
+    return this.lift(new MaterializeOperator());
+}
+exports.materialize = materialize;
+var MaterializeOperator = (function () {
+    function MaterializeOperator() {
+    }
+    MaterializeOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new MaterializeSubscriber(subscriber));
+    };
+    return MaterializeOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var MaterializeSubscriber = (function (_super) {
+    __extends(MaterializeSubscriber, _super);
+    function MaterializeSubscriber(destination) {
+        _super.call(this, destination);
+    }
+    MaterializeSubscriber.prototype._next = function (value) {
+        this.destination.next(Notification_1.Notification.createNext(value));
+    };
+    MaterializeSubscriber.prototype._error = function (err) {
+        var destination = this.destination;
+        destination.next(Notification_1.Notification.createError(err));
+        destination.complete();
+    };
+    MaterializeSubscriber.prototype._complete = function () {
+        var destination = this.destination;
+        destination.next(Notification_1.Notification.createComplete());
+        destination.complete();
+    };
+    return MaterializeSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Notification":61,"../Subscriber":70}],297:[function(require,module,exports){
+"use strict";
+var reduce_1 = require('./reduce');
+/**
+ * The Max operator operates on an Observable that emits numbers (or items that can be compared with a provided function),
+ * and when source Observable completes it emits a single item: the item with the largest value.
+ *
+ * <img src="./img/max.png" width="100%">
+ *
+ * @example <caption>Get the maximal value of a series of numbers</caption>
+ * Rx.Observable.of(5, 4, 7, 2, 8)
+ *   .max()
+ *   .subscribe(x => console.log(x)); // -> 8
+ *
+ * @example <caption>Use a comparer function to get the maximal item</caption>
+ * interface Person {
+ *   age: number,
+ *   name: string
+ * }
+ * Observable.of<Person>({age: 7, name: 'Foo'},
+ *                       {age: 5, name: 'Bar'},
+ *                       {age: 9, name: 'Beer'})
+ *           .max<Person>((a: Person, b: Person) => a.age < b.age ? -1 : 1)
+ *           .subscribe((x: Person) => console.log(x.name)); // -> 'Beer'
+ * }
+ *
+ * @see {@link min}
+ *
+ * @param {Function} [comparer] - Optional comparer function that it will use instead of its default to compare the
+ * value of two items.
+ * @return {Observable} An Observable that emits item with the largest value.
+ * @method max
+ * @owner Observable
+ */
+function max(comparer) {
+    var max = (typeof comparer === 'function')
+        ? function (x, y) { return comparer(x, y) > 0 ? x : y; }
+        : function (x, y) { return x > y ? x : y; };
+    return this.lift(new reduce_1.ReduceOperator(max));
+}
+exports.max = max;
+
+},{"./reduce":315}],298:[function(require,module,exports){
+"use strict";
+var Observable_1 = require('../Observable');
+var ArrayObservable_1 = require('../observable/ArrayObservable');
+var mergeAll_1 = require('./mergeAll');
+var isScheduler_1 = require('../util/isScheduler');
+/* tslint:enable:max-line-length */
+/**
+ * Creates an output Observable which concurrently emits all values from every
+ * given input Observable.
+ *
+ * <span class="informal">Flattens multiple Observables together by blending
+ * their values into one Observable.</span>
+ *
+ * <img src="./img/merge.png" width="100%">
+ *
+ * `merge` subscribes to each given input Observable (either the source or an
+ * Observable given as argument), and simply forwards (without doing any
+ * transformation) all the values from all the input Observables to the output
+ * Observable. The output Observable only completes once all input Observables
+ * have completed. Any error delivered by an input Observable will be immediately
+ * emitted on the output Observable.
+ *
+ * @example <caption>Merge together two Observables: 1s interval and clicks</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var timer = Rx.Observable.interval(1000);
+ * var clicksOrTimer = clicks.merge(timer);
+ * clicksOrTimer.subscribe(x => console.log(x));
+ *
+ * @example <caption>Merge together 3 Observables, but only 2 run concurrently</caption>
+ * var timer1 = Rx.Observable.interval(1000).take(10);
+ * var timer2 = Rx.Observable.interval(2000).take(6);
+ * var timer3 = Rx.Observable.interval(500).take(10);
+ * var concurrent = 2; // the argument
+ * var merged = timer1.merge(timer2, timer3, concurrent);
+ * merged.subscribe(x => console.log(x));
+ *
+ * @see {@link mergeAll}
+ * @see {@link mergeMap}
+ * @see {@link mergeMapTo}
+ * @see {@link mergeScan}
+ *
+ * @param {ObservableInput} other An input Observable to merge with the source
+ * Observable. More than one input Observables may be given as argument.
+ * @param {number} [concurrent=Number.POSITIVE_INFINITY] Maximum number of input
+ * Observables being subscribed to concurrently.
+ * @param {Scheduler} [scheduler=null] The IScheduler to use for managing
+ * concurrency of input Observables.
+ * @return {Observable} An Observable that emits items that are the result of
+ * every input Observable.
+ * @method merge
+ * @owner Observable
+ */
+function merge() {
+    var observables = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        observables[_i - 0] = arguments[_i];
+    }
+    return this.lift.call(mergeStatic.apply(void 0, [this].concat(observables)));
+}
+exports.merge = merge;
+/* tslint:enable:max-line-length */
+/**
+ * Creates an output Observable which concurrently emits all values from every
+ * given input Observable.
+ *
+ * <span class="informal">Flattens multiple Observables together by blending
+ * their values into one Observable.</span>
+ *
+ * <img src="./img/merge.png" width="100%">
+ *
+ * `merge` subscribes to each given input Observable (as arguments), and simply
+ * forwards (without doing any transformation) all the values from all the input
+ * Observables to the output Observable. The output Observable only completes
+ * once all input Observables have completed. Any error delivered by an input
+ * Observable will be immediately emitted on the output Observable.
+ *
+ * @example <caption>Merge together two Observables: 1s interval and clicks</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var timer = Rx.Observable.interval(1000);
+ * var clicksOrTimer = Rx.Observable.merge(clicks, timer);
+ * clicksOrTimer.subscribe(x => console.log(x));
+ *
+ * // Results in the following:
+ * // timer will emit ascending values, one every second(1000ms) to console
+ * // clicks logs MouseEvents to console everytime the "document" is clicked
+ * // Since the two streams are merged you see these happening
+ * // as they occur.
+ *
+ * @example <caption>Merge together 3 Observables, but only 2 run concurrently</caption>
+ * var timer1 = Rx.Observable.interval(1000).take(10);
+ * var timer2 = Rx.Observable.interval(2000).take(6);
+ * var timer3 = Rx.Observable.interval(500).take(10);
+ * var concurrent = 2; // the argument
+ * var merged = Rx.Observable.merge(timer1, timer2, timer3, concurrent);
+ * merged.subscribe(x => console.log(x));
+ *
+ * // Results in the following:
+ * // - First timer1 and timer2 will run concurrently
+ * // - timer1 will emit a value every 1000ms for 10 iterations
+ * // - timer2 will emit a value every 2000ms for 6 iterations
+ * // - after timer1 hits it's max iteration, timer2 will
+ * //   continue, and timer3 will start to run concurrently with timer2
+ * // - when timer2 hits it's max iteration it terminates, and
+ * //   timer3 will continue to emit a value every 500ms until it is complete
+ *
+ * @see {@link mergeAll}
+ * @see {@link mergeMap}
+ * @see {@link mergeMapTo}
+ * @see {@link mergeScan}
+ *
+ * @param {...ObservableInput} observables Input Observables to merge together.
+ * @param {number} [concurrent=Number.POSITIVE_INFINITY] Maximum number of input
+ * Observables being subscribed to concurrently.
+ * @param {Scheduler} [scheduler=null] The IScheduler to use for managing
+ * concurrency of input Observables.
+ * @return {Observable} an Observable that emits items that are the result of
+ * every input Observable.
+ * @static true
+ * @name merge
+ * @owner Observable
+ */
+function mergeStatic() {
+    var observables = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        observables[_i - 0] = arguments[_i];
+    }
+    var concurrent = Number.POSITIVE_INFINITY;
+    var scheduler = null;
+    var last = observables[observables.length - 1];
+    if (isScheduler_1.isScheduler(last)) {
+        scheduler = observables.pop();
+        if (observables.length > 1 && typeof observables[observables.length - 1] === 'number') {
+            concurrent = observables.pop();
+        }
+    }
+    else if (typeof last === 'number') {
+        concurrent = observables.pop();
+    }
+    if (scheduler === null && observables.length === 1 && observables[0] instanceof Observable_1.Observable) {
+        return observables[0];
+    }
+    return new ArrayObservable_1.ArrayObservable(observables, scheduler).lift(new mergeAll_1.MergeAllOperator(concurrent));
+}
+exports.mergeStatic = mergeStatic;
+
+},{"../Observable":62,"../observable/ArrayObservable":202,"../util/isScheduler":399,"./mergeAll":299}],299:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Converts a higher-order Observable into a first-order Observable which
+ * concurrently delivers all values that are emitted on the inner Observables.
+ *
+ * <span class="informal">Flattens an Observable-of-Observables.</span>
+ *
+ * <img src="./img/mergeAll.png" width="100%">
+ *
+ * `mergeAll` subscribes to an Observable that emits Observables, also known as
+ * a higher-order Observable. Each time it observes one of these emitted inner
+ * Observables, it subscribes to that and delivers all the values from the
+ * inner Observable on the output Observable. The output Observable only
+ * completes once all inner Observables have completed. Any error delivered by
+ * a inner Observable will be immediately emitted on the output Observable.
+ *
+ * @example <caption>Spawn a new interval Observable for each click event, and blend their outputs as one Observable</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var higherOrder = clicks.map((ev) => Rx.Observable.interval(1000));
+ * var firstOrder = higherOrder.mergeAll();
+ * firstOrder.subscribe(x => console.log(x));
+ *
+ * @example <caption>Count from 0 to 9 every second for each click, but only allow 2 concurrent timers</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var higherOrder = clicks.map((ev) => Rx.Observable.interval(1000).take(10));
+ * var firstOrder = higherOrder.mergeAll(2);
+ * firstOrder.subscribe(x => console.log(x));
+ *
+ * @see {@link combineAll}
+ * @see {@link concatAll}
+ * @see {@link exhaust}
+ * @see {@link merge}
+ * @see {@link mergeMap}
+ * @see {@link mergeMapTo}
+ * @see {@link mergeScan}
+ * @see {@link switch}
+ * @see {@link zipAll}
+ *
+ * @param {number} [concurrent=Number.POSITIVE_INFINITY] Maximum number of inner
+ * Observables being subscribed to concurrently.
+ * @return {Observable} An Observable that emits values coming from all the
+ * inner Observables emitted by the source Observable.
+ * @method mergeAll
+ * @owner Observable
+ */
+function mergeAll(concurrent) {
+    if (concurrent === void 0) { concurrent = Number.POSITIVE_INFINITY; }
+    return this.lift(new MergeAllOperator(concurrent));
+}
+exports.mergeAll = mergeAll;
+var MergeAllOperator = (function () {
+    function MergeAllOperator(concurrent) {
+        this.concurrent = concurrent;
+    }
+    MergeAllOperator.prototype.call = function (observer, source) {
+        return source.subscribe(new MergeAllSubscriber(observer, this.concurrent));
+    };
+    return MergeAllOperator;
+}());
+exports.MergeAllOperator = MergeAllOperator;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var MergeAllSubscriber = (function (_super) {
+    __extends(MergeAllSubscriber, _super);
+    function MergeAllSubscriber(destination, concurrent) {
+        _super.call(this, destination);
+        this.concurrent = concurrent;
+        this.hasCompleted = false;
+        this.buffer = [];
+        this.active = 0;
+    }
+    MergeAllSubscriber.prototype._next = function (observable) {
+        if (this.active < this.concurrent) {
+            this.active++;
+            this.add(subscribeToResult_1.subscribeToResult(this, observable));
+        }
+        else {
+            this.buffer.push(observable);
+        }
+    };
+    MergeAllSubscriber.prototype._complete = function () {
+        this.hasCompleted = true;
+        if (this.active === 0 && this.buffer.length === 0) {
+            this.destination.complete();
+        }
+    };
+    MergeAllSubscriber.prototype.notifyComplete = function (innerSub) {
+        var buffer = this.buffer;
+        this.remove(innerSub);
+        this.active--;
+        if (buffer.length > 0) {
+            this._next(buffer.shift());
+        }
+        else if (this.active === 0 && this.hasCompleted) {
+            this.destination.complete();
+        }
+    };
+    return MergeAllSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+exports.MergeAllSubscriber = MergeAllSubscriber;
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],300:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var subscribeToResult_1 = require('../util/subscribeToResult');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+/* tslint:enable:max-line-length */
+/**
+ * Projects each source value to an Observable which is merged in the output
+ * Observable.
+ *
+ * <span class="informal">Maps each value to an Observable, then flattens all of
+ * these inner Observables using {@link mergeAll}.</span>
+ *
+ * <img src="./img/mergeMap.png" width="100%">
+ *
+ * Returns an Observable that emits items based on applying a function that you
+ * supply to each item emitted by the source Observable, where that function
+ * returns an Observable, and then merging those resulting Observables and
+ * emitting the results of this merger.
+ *
+ * @example <caption>Map and flatten each letter to an Observable ticking every 1 second</caption>
+ * var letters = Rx.Observable.of('a', 'b', 'c');
+ * var result = letters.mergeMap(x =>
+ *   Rx.Observable.interval(1000).map(i => x+i)
+ * );
+ * result.subscribe(x => console.log(x));
+ *
+ * // Results in the following:
+ * // a0
+ * // b0
+ * // c0
+ * // a1
+ * // b1
+ * // c1
+ * // continues to list a,b,c with respective ascending integers
+ *
+ * @see {@link concatMap}
+ * @see {@link exhaustMap}
+ * @see {@link merge}
+ * @see {@link mergeAll}
+ * @see {@link mergeMapTo}
+ * @see {@link mergeScan}
+ * @see {@link switchMap}
+ *
+ * @param {function(value: T, ?index: number): ObservableInput} project A function
+ * that, when applied to an item emitted by the source Observable, returns an
+ * Observable.
+ * @param {function(outerValue: T, innerValue: I, outerIndex: number, innerIndex: number): any} [resultSelector]
+ * A function to produce the value on the output Observable based on the values
+ * and the indices of the source (outer) emission and the inner Observable
+ * emission. The arguments passed to this function are:
+ * - `outerValue`: the value that came from the source
+ * - `innerValue`: the value that came from the projected Observable
+ * - `outerIndex`: the "index" of the value that came from the source
+ * - `innerIndex`: the "index" of the value from the projected Observable
+ * @param {number} [concurrent=Number.POSITIVE_INFINITY] Maximum number of input
+ * Observables being subscribed to concurrently.
+ * @return {Observable} An Observable that emits the result of applying the
+ * projection function (and the optional `resultSelector`) to each item emitted
+ * by the source Observable and merging the results of the Observables obtained
+ * from this transformation.
+ * @method mergeMap
+ * @owner Observable
+ */
+function mergeMap(project, resultSelector, concurrent) {
+    if (concurrent === void 0) { concurrent = Number.POSITIVE_INFINITY; }
+    if (typeof resultSelector === 'number') {
+        concurrent = resultSelector;
+        resultSelector = null;
+    }
+    return this.lift(new MergeMapOperator(project, resultSelector, concurrent));
+}
+exports.mergeMap = mergeMap;
+var MergeMapOperator = (function () {
+    function MergeMapOperator(project, resultSelector, concurrent) {
+        if (concurrent === void 0) { concurrent = Number.POSITIVE_INFINITY; }
+        this.project = project;
+        this.resultSelector = resultSelector;
+        this.concurrent = concurrent;
+    }
+    MergeMapOperator.prototype.call = function (observer, source) {
+        return source.subscribe(new MergeMapSubscriber(observer, this.project, this.resultSelector, this.concurrent));
+    };
+    return MergeMapOperator;
+}());
+exports.MergeMapOperator = MergeMapOperator;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var MergeMapSubscriber = (function (_super) {
+    __extends(MergeMapSubscriber, _super);
+    function MergeMapSubscriber(destination, project, resultSelector, concurrent) {
+        if (concurrent === void 0) { concurrent = Number.POSITIVE_INFINITY; }
+        _super.call(this, destination);
+        this.project = project;
+        this.resultSelector = resultSelector;
+        this.concurrent = concurrent;
+        this.hasCompleted = false;
+        this.buffer = [];
+        this.active = 0;
+        this.index = 0;
+    }
+    MergeMapSubscriber.prototype._next = function (value) {
+        if (this.active < this.concurrent) {
+            this._tryNext(value);
+        }
+        else {
+            this.buffer.push(value);
+        }
+    };
+    MergeMapSubscriber.prototype._tryNext = function (value) {
+        var result;
+        var index = this.index++;
+        try {
+            result = this.project(value, index);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        this.active++;
+        this._innerSub(result, value, index);
+    };
+    MergeMapSubscriber.prototype._innerSub = function (ish, value, index) {
+        this.add(subscribeToResult_1.subscribeToResult(this, ish, value, index));
+    };
+    MergeMapSubscriber.prototype._complete = function () {
+        this.hasCompleted = true;
+        if (this.active === 0 && this.buffer.length === 0) {
+            this.destination.complete();
+        }
+    };
+    MergeMapSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        if (this.resultSelector) {
+            this._notifyResultSelector(outerValue, innerValue, outerIndex, innerIndex);
+        }
+        else {
+            this.destination.next(innerValue);
+        }
+    };
+    MergeMapSubscriber.prototype._notifyResultSelector = function (outerValue, innerValue, outerIndex, innerIndex) {
+        var result;
+        try {
+            result = this.resultSelector(outerValue, innerValue, outerIndex, innerIndex);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        this.destination.next(result);
+    };
+    MergeMapSubscriber.prototype.notifyComplete = function (innerSub) {
+        var buffer = this.buffer;
+        this.remove(innerSub);
+        this.active--;
+        if (buffer.length > 0) {
+            this._next(buffer.shift());
+        }
+        else if (this.active === 0 && this.hasCompleted) {
+            this.destination.complete();
+        }
+    };
+    return MergeMapSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+exports.MergeMapSubscriber = MergeMapSubscriber;
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],301:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/* tslint:enable:max-line-length */
+/**
+ * Projects each source value to the same Observable which is merged multiple
+ * times in the output Observable.
+ *
+ * <span class="informal">It's like {@link mergeMap}, but maps each value always
+ * to the same inner Observable.</span>
+ *
+ * <img src="./img/mergeMapTo.png" width="100%">
+ *
+ * Maps each source value to the given Observable `innerObservable` regardless
+ * of the source value, and then merges those resulting Observables into one
+ * single Observable, which is the output Observable.
+ *
+ * @example <caption>For each click event, start an interval Observable ticking every 1 second</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.mergeMapTo(Rx.Observable.interval(1000));
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link concatMapTo}
+ * @see {@link merge}
+ * @see {@link mergeAll}
+ * @see {@link mergeMap}
+ * @see {@link mergeScan}
+ * @see {@link switchMapTo}
+ *
+ * @param {ObservableInput} innerObservable An Observable to replace each value from
+ * the source Observable.
+ * @param {function(outerValue: T, innerValue: I, outerIndex: number, innerIndex: number): any} [resultSelector]
+ * A function to produce the value on the output Observable based on the values
+ * and the indices of the source (outer) emission and the inner Observable
+ * emission. The arguments passed to this function are:
+ * - `outerValue`: the value that came from the source
+ * - `innerValue`: the value that came from the projected Observable
+ * - `outerIndex`: the "index" of the value that came from the source
+ * - `innerIndex`: the "index" of the value from the projected Observable
+ * @param {number} [concurrent=Number.POSITIVE_INFINITY] Maximum number of input
+ * Observables being subscribed to concurrently.
+ * @return {Observable} An Observable that emits items from the given
+ * `innerObservable` (and optionally transformed through `resultSelector`) every
+ * time a value is emitted on the source Observable.
+ * @method mergeMapTo
+ * @owner Observable
+ */
+function mergeMapTo(innerObservable, resultSelector, concurrent) {
+    if (concurrent === void 0) { concurrent = Number.POSITIVE_INFINITY; }
+    if (typeof resultSelector === 'number') {
+        concurrent = resultSelector;
+        resultSelector = null;
+    }
+    return this.lift(new MergeMapToOperator(innerObservable, resultSelector, concurrent));
+}
+exports.mergeMapTo = mergeMapTo;
+// TODO: Figure out correct signature here: an Operator<Observable<T>, R>
+//       needs to implement call(observer: Subscriber<R>): Subscriber<Observable<T>>
+var MergeMapToOperator = (function () {
+    function MergeMapToOperator(ish, resultSelector, concurrent) {
+        if (concurrent === void 0) { concurrent = Number.POSITIVE_INFINITY; }
+        this.ish = ish;
+        this.resultSelector = resultSelector;
+        this.concurrent = concurrent;
+    }
+    MergeMapToOperator.prototype.call = function (observer, source) {
+        return source.subscribe(new MergeMapToSubscriber(observer, this.ish, this.resultSelector, this.concurrent));
+    };
+    return MergeMapToOperator;
+}());
+exports.MergeMapToOperator = MergeMapToOperator;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var MergeMapToSubscriber = (function (_super) {
+    __extends(MergeMapToSubscriber, _super);
+    function MergeMapToSubscriber(destination, ish, resultSelector, concurrent) {
+        if (concurrent === void 0) { concurrent = Number.POSITIVE_INFINITY; }
+        _super.call(this, destination);
+        this.ish = ish;
+        this.resultSelector = resultSelector;
+        this.concurrent = concurrent;
+        this.hasCompleted = false;
+        this.buffer = [];
+        this.active = 0;
+        this.index = 0;
+    }
+    MergeMapToSubscriber.prototype._next = function (value) {
+        if (this.active < this.concurrent) {
+            var resultSelector = this.resultSelector;
+            var index = this.index++;
+            var ish = this.ish;
+            var destination = this.destination;
+            this.active++;
+            this._innerSub(ish, destination, resultSelector, value, index);
+        }
+        else {
+            this.buffer.push(value);
+        }
+    };
+    MergeMapToSubscriber.prototype._innerSub = function (ish, destination, resultSelector, value, index) {
+        this.add(subscribeToResult_1.subscribeToResult(this, ish, value, index));
+    };
+    MergeMapToSubscriber.prototype._complete = function () {
+        this.hasCompleted = true;
+        if (this.active === 0 && this.buffer.length === 0) {
+            this.destination.complete();
+        }
+    };
+    MergeMapToSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        var _a = this, resultSelector = _a.resultSelector, destination = _a.destination;
+        if (resultSelector) {
+            this.trySelectResult(outerValue, innerValue, outerIndex, innerIndex);
+        }
+        else {
+            destination.next(innerValue);
+        }
+    };
+    MergeMapToSubscriber.prototype.trySelectResult = function (outerValue, innerValue, outerIndex, innerIndex) {
+        var _a = this, resultSelector = _a.resultSelector, destination = _a.destination;
+        var result;
+        try {
+            result = resultSelector(outerValue, innerValue, outerIndex, innerIndex);
+        }
+        catch (err) {
+            destination.error(err);
+            return;
+        }
+        destination.next(result);
+    };
+    MergeMapToSubscriber.prototype.notifyError = function (err) {
+        this.destination.error(err);
+    };
+    MergeMapToSubscriber.prototype.notifyComplete = function (innerSub) {
+        var buffer = this.buffer;
+        this.remove(innerSub);
+        this.active--;
+        if (buffer.length > 0) {
+            this._next(buffer.shift());
+        }
+        else if (this.active === 0 && this.hasCompleted) {
+            this.destination.complete();
+        }
+    };
+    return MergeMapToSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+exports.MergeMapToSubscriber = MergeMapToSubscriber;
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],302:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var tryCatch_1 = require('../util/tryCatch');
+var errorObject_1 = require('../util/errorObject');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+/**
+ * Applies an accumulator function over the source Observable where the
+ * accumulator function itself returns an Observable, then each intermediate
+ * Observable returned is merged into the output Observable.
+ *
+ * <span class="informal">It's like {@link scan}, but the Observables returned
+ * by the accumulator are merged into the outer Observable.</span>
+ *
+ * @example <caption>Count the number of click events</caption>
+ * const click$ = Rx.Observable.fromEvent(document, 'click');
+ * const one$ = click$.mapTo(1);
+ * const seed = 0;
+ * const count$ = one$.mergeScan((acc, one) => Rx.Observable.of(acc + one), seed);
+ * count$.subscribe(x => console.log(x));
+ *
+ * // Results:
+ * 1
+ * 2
+ * 3
+ * 4
+ * // ...and so on for each click
+ *
+ * @param {function(acc: R, value: T): Observable<R>} accumulator
+ * The accumulator function called on each source value.
+ * @param seed The initial accumulation value.
+ * @param {number} [concurrent=Number.POSITIVE_INFINITY] Maximum number of
+ * input Observables being subscribed to concurrently.
+ * @return {Observable<R>} An observable of the accumulated values.
+ * @method mergeScan
+ * @owner Observable
+ */
+function mergeScan(accumulator, seed, concurrent) {
+    if (concurrent === void 0) { concurrent = Number.POSITIVE_INFINITY; }
+    return this.lift(new MergeScanOperator(accumulator, seed, concurrent));
+}
+exports.mergeScan = mergeScan;
+var MergeScanOperator = (function () {
+    function MergeScanOperator(accumulator, seed, concurrent) {
+        this.accumulator = accumulator;
+        this.seed = seed;
+        this.concurrent = concurrent;
+    }
+    MergeScanOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new MergeScanSubscriber(subscriber, this.accumulator, this.seed, this.concurrent));
+    };
+    return MergeScanOperator;
+}());
+exports.MergeScanOperator = MergeScanOperator;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var MergeScanSubscriber = (function (_super) {
+    __extends(MergeScanSubscriber, _super);
+    function MergeScanSubscriber(destination, accumulator, acc, concurrent) {
+        _super.call(this, destination);
+        this.accumulator = accumulator;
+        this.acc = acc;
+        this.concurrent = concurrent;
+        this.hasValue = false;
+        this.hasCompleted = false;
+        this.buffer = [];
+        this.active = 0;
+        this.index = 0;
+    }
+    MergeScanSubscriber.prototype._next = function (value) {
+        if (this.active < this.concurrent) {
+            var index = this.index++;
+            var ish = tryCatch_1.tryCatch(this.accumulator)(this.acc, value);
+            var destination = this.destination;
+            if (ish === errorObject_1.errorObject) {
+                destination.error(errorObject_1.errorObject.e);
+            }
+            else {
+                this.active++;
+                this._innerSub(ish, value, index);
+            }
+        }
+        else {
+            this.buffer.push(value);
+        }
+    };
+    MergeScanSubscriber.prototype._innerSub = function (ish, value, index) {
+        this.add(subscribeToResult_1.subscribeToResult(this, ish, value, index));
+    };
+    MergeScanSubscriber.prototype._complete = function () {
+        this.hasCompleted = true;
+        if (this.active === 0 && this.buffer.length === 0) {
+            if (this.hasValue === false) {
+                this.destination.next(this.acc);
+            }
+            this.destination.complete();
+        }
+    };
+    MergeScanSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        var destination = this.destination;
+        this.acc = innerValue;
+        this.hasValue = true;
+        destination.next(innerValue);
+    };
+    MergeScanSubscriber.prototype.notifyComplete = function (innerSub) {
+        var buffer = this.buffer;
+        this.remove(innerSub);
+        this.active--;
+        if (buffer.length > 0) {
+            this._next(buffer.shift());
+        }
+        else if (this.active === 0 && this.hasCompleted) {
+            if (this.hasValue === false) {
+                this.destination.next(this.acc);
+            }
+            this.destination.complete();
+        }
+    };
+    return MergeScanSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+exports.MergeScanSubscriber = MergeScanSubscriber;
+
+},{"../OuterSubscriber":64,"../util/errorObject":391,"../util/subscribeToResult":403,"../util/tryCatch":405}],303:[function(require,module,exports){
+"use strict";
+var reduce_1 = require('./reduce');
+/**
+ * The Min operator operates on an Observable that emits numbers (or items that can be compared with a provided function),
+ * and when source Observable completes it emits a single item: the item with the smallest value.
+ *
+ * <img src="./img/min.png" width="100%">
+ *
+ * @example <caption>Get the minimal value of a series of numbers</caption>
+ * Rx.Observable.of(5, 4, 7, 2, 8)
+ *   .min()
+ *   .subscribe(x => console.log(x)); // -> 2
+ *
+ * @example <caption>Use a comparer function to get the minimal item</caption>
+ * interface Person {
+ *   age: number,
+ *   name: string
+ * }
+ * Observable.of<Person>({age: 7, name: 'Foo'},
+ *                       {age: 5, name: 'Bar'},
+ *                       {age: 9, name: 'Beer'})
+ *           .min<Person>( (a: Person, b: Person) => a.age < b.age ? -1 : 1)
+ *           .subscribe((x: Person) => console.log(x.name)); // -> 'Bar'
+ * }
+ *
+ * @see {@link max}
+ *
+ * @param {Function} [comparer] - Optional comparer function that it will use instead of its default to compare the
+ * value of two items.
+ * @return {Observable<R>} An Observable that emits item with the smallest value.
+ * @method min
+ * @owner Observable
+ */
+function min(comparer) {
+    var min = (typeof comparer === 'function')
+        ? function (x, y) { return comparer(x, y) < 0 ? x : y; }
+        : function (x, y) { return x < y ? x : y; };
+    return this.lift(new reduce_1.ReduceOperator(min));
+}
+exports.min = min;
+
+},{"./reduce":315}],304:[function(require,module,exports){
+"use strict";
+var ConnectableObservable_1 = require('../observable/ConnectableObservable');
+/* tslint:enable:max-line-length */
+/**
+ * Returns an Observable that emits the results of invoking a specified selector on items
+ * emitted by a ConnectableObservable that shares a single subscription to the underlying stream.
+ *
+ * <img src="./img/multicast.png" width="100%">
+ *
+ * @param {Function|Subject} subjectOrSubjectFactory - Factory function to create an intermediate subject through
+ * which the source sequence's elements will be multicast to the selector function
+ * or Subject to push source elements into.
+ * @param {Function} [selector] - Optional selector function that can use the multicasted source stream
+ * as many times as needed, without causing multiple subscriptions to the source stream.
+ * Subscribers to the given source will receive all notifications of the source from the
+ * time of the subscription forward.
+ * @return {Observable} An Observable that emits the results of invoking the selector
+ * on the items emitted by a `ConnectableObservable` that shares a single subscription to
+ * the underlying stream.
+ * @method multicast
+ * @owner Observable
+ */
+function multicast(subjectOrSubjectFactory, selector) {
+    var subjectFactory;
+    if (typeof subjectOrSubjectFactory === 'function') {
+        subjectFactory = subjectOrSubjectFactory;
+    }
+    else {
+        subjectFactory = function subjectFactory() {
+            return subjectOrSubjectFactory;
+        };
+    }
+    if (typeof selector === 'function') {
+        return this.lift(new MulticastOperator(subjectFactory, selector));
+    }
+    var connectable = Object.create(this, ConnectableObservable_1.connectableObservableDescriptor);
+    connectable.source = this;
+    connectable.subjectFactory = subjectFactory;
+    return connectable;
+}
+exports.multicast = multicast;
+var MulticastOperator = (function () {
+    function MulticastOperator(subjectFactory, selector) {
+        this.subjectFactory = subjectFactory;
+        this.selector = selector;
+    }
+    MulticastOperator.prototype.call = function (subscriber, source) {
+        var selector = this.selector;
+        var subject = this.subjectFactory();
+        var subscription = selector(subject).subscribe(subscriber);
+        subscription.add(source.subscribe(subject));
+        return subscription;
+    };
+    return MulticastOperator;
+}());
+exports.MulticastOperator = MulticastOperator;
+
+},{"../observable/ConnectableObservable":205}],305:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var Notification_1 = require('../Notification');
+/**
+ *
+ * Re-emits all notifications from source Observable with specified scheduler.
+ *
+ * <span class="informal">Ensure a specific scheduler is used, from outside of an Observable.</span>
+ *
+ * `observeOn` is an operator that accepts a scheduler as a first parameter, which will be used to reschedule
+ * notifications emitted by the source Observable. It might be useful, if you do not have control over
+ * internal scheduler of a given Observable, but want to control when its values are emitted nevertheless.
+ *
+ * Returned Observable emits the same notifications (nexted values, complete and error events) as the source Observable,
+ * but rescheduled with provided scheduler. Note that this doesn't mean that source Observables internal
+ * scheduler will be replaced in any way. Original scheduler still will be used, but when the source Observable emits
+ * notification, it will be immediately scheduled again - this time with scheduler passed to `observeOn`.
+ * An anti-pattern would be calling `observeOn` on Observable that emits lots of values synchronously, to split
+ * that emissions into asynchronous chunks. For this to happen, scheduler would have to be passed into the source
+ * Observable directly (usually into the operator that creates it). `observeOn` simply delays notifications a
+ * little bit more, to ensure that they are emitted at expected moments.
+ *
+ * As a matter of fact, `observeOn` accepts second parameter, which specifies in milliseconds with what delay notifications
+ * will be emitted. The main difference between {@link delay} operator and `observeOn` is that `observeOn`
+ * will delay all notifications - including error notifications - while `delay` will pass through error
+ * from source Observable immediately when it is emitted. In general it is highly recommended to use `delay` operator
+ * for any kind of delaying of values in the stream, while using `observeOn` to specify which scheduler should be used
+ * for notification emissions in general.
+ *
+ * @example <caption>Ensure values in subscribe are called just before browser repaint.</caption>
+ * const intervals = Rx.Observable.interval(10); // Intervals are scheduled
+ *                                               // with async scheduler by default...
+ *
+ * intervals
+ * .observeOn(Rx.Scheduler.animationFrame)       // ...but we will observe on animationFrame
+ * .subscribe(val => {                           // scheduler to ensure smooth animation.
+ *   someDiv.style.height = val + 'px';
+ * });
+ *
+ * @see {@link delay}
+ *
+ * @param {IScheduler} scheduler Scheduler that will be used to reschedule notifications from source Observable.
+ * @param {number} [delay] Number of milliseconds that states with what delay every notification should be rescheduled.
+ * @return {Observable<T>} Observable that emits the same notifications as the source Observable,
+ * but with provided scheduler.
+ *
+ * @method observeOn
+ * @owner Observable
+ */
+function observeOn(scheduler, delay) {
+    if (delay === void 0) { delay = 0; }
+    return this.lift(new ObserveOnOperator(scheduler, delay));
+}
+exports.observeOn = observeOn;
+var ObserveOnOperator = (function () {
+    function ObserveOnOperator(scheduler, delay) {
+        if (delay === void 0) { delay = 0; }
+        this.scheduler = scheduler;
+        this.delay = delay;
+    }
+    ObserveOnOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new ObserveOnSubscriber(subscriber, this.scheduler, this.delay));
+    };
+    return ObserveOnOperator;
+}());
+exports.ObserveOnOperator = ObserveOnOperator;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var ObserveOnSubscriber = (function (_super) {
+    __extends(ObserveOnSubscriber, _super);
+    function ObserveOnSubscriber(destination, scheduler, delay) {
+        if (delay === void 0) { delay = 0; }
+        _super.call(this, destination);
+        this.scheduler = scheduler;
+        this.delay = delay;
+    }
+    ObserveOnSubscriber.dispatch = function (arg) {
+        var notification = arg.notification, destination = arg.destination;
+        notification.observe(destination);
+        this.unsubscribe();
+    };
+    ObserveOnSubscriber.prototype.scheduleMessage = function (notification) {
+        this.add(this.scheduler.schedule(ObserveOnSubscriber.dispatch, this.delay, new ObserveOnMessage(notification, this.destination)));
+    };
+    ObserveOnSubscriber.prototype._next = function (value) {
+        this.scheduleMessage(Notification_1.Notification.createNext(value));
+    };
+    ObserveOnSubscriber.prototype._error = function (err) {
+        this.scheduleMessage(Notification_1.Notification.createError(err));
+    };
+    ObserveOnSubscriber.prototype._complete = function () {
+        this.scheduleMessage(Notification_1.Notification.createComplete());
+    };
+    return ObserveOnSubscriber;
+}(Subscriber_1.Subscriber));
+exports.ObserveOnSubscriber = ObserveOnSubscriber;
+var ObserveOnMessage = (function () {
+    function ObserveOnMessage(notification, destination) {
+        this.notification = notification;
+        this.destination = destination;
+    }
+    return ObserveOnMessage;
+}());
+exports.ObserveOnMessage = ObserveOnMessage;
+
+},{"../Notification":61,"../Subscriber":70}],306:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var FromObservable_1 = require('../observable/FromObservable');
+var isArray_1 = require('../util/isArray');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/* tslint:enable:max-line-length */
+/**
+ * When any of the provided Observable emits an complete or error notification, it immediately subscribes to the next one
+ * that was passed.
+ *
+ * <span class="informal">Execute series of Observables no matter what, even if it means swallowing errors.</span>
+ *
+ * <img src="./img/onErrorResumeNext.png" width="100%">
+ *
+ * `onErrorResumeNext` is an operator that accepts a series of Observables, provided either directly as
+ * arguments or as an array. If no single Observable is provided, returned Observable will simply behave the same
+ * as the source.
+ *
+ * `onErrorResumeNext` returns an Observable that starts by subscribing and re-emitting values from the source Observable.
+ * When its stream of values ends - no matter if Observable completed or emitted an error - `onErrorResumeNext`
+ * will subscribe to the first Observable that was passed as an argument to the method. It will start re-emitting
+ * its values as well and - again - when that stream ends, `onErrorResumeNext` will proceed to subscribing yet another
+ * Observable in provided series, no matter if previous Observable completed or ended with an error. This will
+ * be happening until there is no more Observables left in the series, at which point returned Observable will
+ * complete - even if the last subscribed stream ended with an error.
+ *
+ * `onErrorResumeNext` can be therefore thought of as version of {@link concat} operator, which is more permissive
+ * when it comes to the errors emitted by its input Observables. While `concat` subscribes to the next Observable
+ * in series only if previous one successfully completed, `onErrorResumeNext` subscribes even if it ended with
+ * an error.
+ *
+ * Note that you do not get any access to errors emitted by the Observables. In particular do not
+ * expect these errors to appear in error callback passed to {@link subscribe}. If you want to take
+ * specific actions based on what error was emitted by an Observable, you should try out {@link catch} instead.
+ *
+ *
+ * @example <caption>Subscribe to the next Observable after map fails</caption>
+ * Rx.Observable.of(1, 2, 3, 0)
+ *   .map(x => {
+ *       if (x === 0) { throw Error(); }
+         return 10 / x;
+ *   })
+ *   .onErrorResumeNext(Rx.Observable.of(1, 2, 3))
+ *   .subscribe(
+ *     val => console.log(val),
+ *     err => console.log(err),          // Will never be called.
+ *     () => console.log('that\'s it!')
+ *   );
+ *
+ * // Logs:
+ * // 10
+ * // 5
+ * // 3.3333333333333335
+ * // 1
+ * // 2
+ * // 3
+ * // "that's it!"
+ *
+ * @see {@link concat}
+ * @see {@link catch}
+ *
+ * @param {...ObservableInput} observables Observables passed either directly or as an array.
+ * @return {Observable} An Observable that emits values from source Observable, but - if it errors - subscribes
+ * to the next passed Observable and so on, until it completes or runs out of Observables.
+ * @method onErrorResumeNext
+ * @owner Observable
+ */
+function onErrorResumeNext() {
+    var nextSources = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        nextSources[_i - 0] = arguments[_i];
+    }
+    if (nextSources.length === 1 && isArray_1.isArray(nextSources[0])) {
+        nextSources = nextSources[0];
+    }
+    return this.lift(new OnErrorResumeNextOperator(nextSources));
+}
+exports.onErrorResumeNext = onErrorResumeNext;
+/* tslint:enable:max-line-length */
+function onErrorResumeNextStatic() {
+    var nextSources = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        nextSources[_i - 0] = arguments[_i];
+    }
+    var source = null;
+    if (nextSources.length === 1 && isArray_1.isArray(nextSources[0])) {
+        nextSources = nextSources[0];
+    }
+    source = nextSources.shift();
+    return new FromObservable_1.FromObservable(source, null).lift(new OnErrorResumeNextOperator(nextSources));
+}
+exports.onErrorResumeNextStatic = onErrorResumeNextStatic;
+var OnErrorResumeNextOperator = (function () {
+    function OnErrorResumeNextOperator(nextSources) {
+        this.nextSources = nextSources;
+    }
+    OnErrorResumeNextOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new OnErrorResumeNextSubscriber(subscriber, this.nextSources));
+    };
+    return OnErrorResumeNextOperator;
+}());
+var OnErrorResumeNextSubscriber = (function (_super) {
+    __extends(OnErrorResumeNextSubscriber, _super);
+    function OnErrorResumeNextSubscriber(destination, nextSources) {
+        _super.call(this, destination);
+        this.destination = destination;
+        this.nextSources = nextSources;
+    }
+    OnErrorResumeNextSubscriber.prototype.notifyError = function (error, innerSub) {
+        this.subscribeToNextSource();
+    };
+    OnErrorResumeNextSubscriber.prototype.notifyComplete = function (innerSub) {
+        this.subscribeToNextSource();
+    };
+    OnErrorResumeNextSubscriber.prototype._error = function (err) {
+        this.subscribeToNextSource();
+    };
+    OnErrorResumeNextSubscriber.prototype._complete = function () {
+        this.subscribeToNextSource();
+    };
+    OnErrorResumeNextSubscriber.prototype.subscribeToNextSource = function () {
+        var next = this.nextSources.shift();
+        if (next) {
+            this.add(subscribeToResult_1.subscribeToResult(this, next));
+        }
+        else {
+            this.destination.complete();
+        }
+    };
+    return OnErrorResumeNextSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../observable/FromObservable":212,"../util/isArray":392,"../util/subscribeToResult":403}],307:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/**
+ * Groups pairs of consecutive emissions together and emits them as an array of
+ * two values.
+ *
+ * <span class="informal">Puts the current value and previous value together as
+ * an array, and emits that.</span>
+ *
+ * <img src="./img/pairwise.png" width="100%">
+ *
+ * The Nth emission from the source Observable will cause the output Observable
+ * to emit an array [(N-1)th, Nth] of the previous and the current value, as a
+ * pair. For this reason, `pairwise` emits on the second and subsequent
+ * emissions from the source Observable, but not on the first emission, because
+ * there is no previous value in that case.
+ *
+ * @example <caption>On every click (starting from the second), emit the relative distance to the previous click</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var pairs = clicks.pairwise();
+ * var distance = pairs.map(pair => {
+ *   var x0 = pair[0].clientX;
+ *   var y0 = pair[0].clientY;
+ *   var x1 = pair[1].clientX;
+ *   var y1 = pair[1].clientY;
+ *   return Math.sqrt(Math.pow(x0 - x1, 2) + Math.pow(y0 - y1, 2));
+ * });
+ * distance.subscribe(x => console.log(x));
+ *
+ * @see {@link buffer}
+ * @see {@link bufferCount}
+ *
+ * @return {Observable<Array<T>>} An Observable of pairs (as arrays) of
+ * consecutive values from the source Observable.
+ * @method pairwise
+ * @owner Observable
+ */
+function pairwise() {
+    return this.lift(new PairwiseOperator());
+}
+exports.pairwise = pairwise;
+var PairwiseOperator = (function () {
+    function PairwiseOperator() {
+    }
+    PairwiseOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new PairwiseSubscriber(subscriber));
+    };
+    return PairwiseOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var PairwiseSubscriber = (function (_super) {
+    __extends(PairwiseSubscriber, _super);
+    function PairwiseSubscriber(destination) {
+        _super.call(this, destination);
+        this.hasPrev = false;
+    }
+    PairwiseSubscriber.prototype._next = function (value) {
+        if (this.hasPrev) {
+            this.destination.next([this.prev, value]);
+        }
+        else {
+            this.hasPrev = true;
+        }
+        this.prev = value;
+    };
+    return PairwiseSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],308:[function(require,module,exports){
+"use strict";
+var not_1 = require('../util/not');
+var filter_1 = require('./filter');
+/**
+ * Splits the source Observable into two, one with values that satisfy a
+ * predicate, and another with values that don't satisfy the predicate.
+ *
+ * <span class="informal">It's like {@link filter}, but returns two Observables:
+ * one like the output of {@link filter}, and the other with values that did not
+ * pass the condition.</span>
+ *
+ * <img src="./img/partition.png" width="100%">
+ *
+ * `partition` outputs an array with two Observables that partition the values
+ * from the source Observable through the given `predicate` function. The first
+ * Observable in that array emits source values for which the predicate argument
+ * returns true. The second Observable emits source values for which the
+ * predicate returns false. The first behaves like {@link filter} and the second
+ * behaves like {@link filter} with the predicate negated.
+ *
+ * @example <caption>Partition click events into those on DIV elements and those elsewhere</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var parts = clicks.partition(ev => ev.target.tagName === 'DIV');
+ * var clicksOnDivs = parts[0];
+ * var clicksElsewhere = parts[1];
+ * clicksOnDivs.subscribe(x => console.log('DIV clicked: ', x));
+ * clicksElsewhere.subscribe(x => console.log('Other clicked: ', x));
+ *
+ * @see {@link filter}
+ *
+ * @param {function(value: T, index: number): boolean} predicate A function that
+ * evaluates each value emitted by the source Observable. If it returns `true`,
+ * the value is emitted on the first Observable in the returned array, if
+ * `false` the value is emitted on the second Observable in the array. The
+ * `index` parameter is the number `i` for the i-th source emission that has
+ * happened since the subscription, starting from the number `0`.
+ * @param {any} [thisArg] An optional argument to determine the value of `this`
+ * in the `predicate` function.
+ * @return {[Observable<T>, Observable<T>]} An array with two Observables: one
+ * with values that passed the predicate, and another with values that did not
+ * pass the predicate.
+ * @method partition
+ * @owner Observable
+ */
+function partition(predicate, thisArg) {
+    return [
+        filter_1.filter.call(this, predicate, thisArg),
+        filter_1.filter.call(this, not_1.not(predicate, thisArg))
+    ];
+}
+exports.partition = partition;
+
+},{"../util/not":401,"./filter":284}],309:[function(require,module,exports){
+"use strict";
+var map_1 = require('./map');
+/**
+ * Maps each source value (an object) to its specified nested property.
+ *
+ * <span class="informal">Like {@link map}, but meant only for picking one of
+ * the nested properties of every emitted object.</span>
+ *
+ * <img src="./img/pluck.png" width="100%">
+ *
+ * Given a list of strings describing a path to an object property, retrieves
+ * the value of a specified nested property from all values in the source
+ * Observable. If a property can't be resolved, it will return `undefined` for
+ * that value.
+ *
+ * @example <caption>Map every click to the tagName of the clicked target element</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var tagNames = clicks.pluck('target', 'tagName');
+ * tagNames.subscribe(x => console.log(x));
+ *
+ * @see {@link map}
+ *
+ * @param {...string} properties The nested properties to pluck from each source
+ * value (an object).
+ * @return {Observable} A new Observable of property values from the source values.
+ * @method pluck
+ * @owner Observable
+ */
+function pluck() {
+    var properties = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        properties[_i - 0] = arguments[_i];
+    }
+    var length = properties.length;
+    if (length === 0) {
+        throw new Error('list of properties cannot be empty.');
+    }
+    return map_1.map.call(this, plucker(properties, length));
+}
+exports.pluck = pluck;
+function plucker(props, length) {
+    var mapper = function (x) {
+        var currentProp = x;
+        for (var i = 0; i < length; i++) {
+            var p = currentProp[props[i]];
+            if (typeof p !== 'undefined') {
+                currentProp = p;
+            }
+            else {
+                return undefined;
+            }
+        }
+        return currentProp;
+    };
+    return mapper;
+}
+
+},{"./map":294}],310:[function(require,module,exports){
+"use strict";
+var Subject_1 = require('../Subject');
+var multicast_1 = require('./multicast');
+/* tslint:enable:max-line-length */
+/**
+ * Returns a ConnectableObservable, which is a variety of Observable that waits until its connect method is called
+ * before it begins emitting items to those Observers that have subscribed to it.
+ *
+ * <img src="./img/publish.png" width="100%">
+ *
+ * @param {Function} [selector] - Optional selector function which can use the multicasted source sequence as many times
+ * as needed, without causing multiple subscriptions to the source sequence.
+ * Subscribers to the given source will receive all notifications of the source from the time of the subscription on.
+ * @return A ConnectableObservable that upon connection causes the source Observable to emit items to its Observers.
+ * @method publish
+ * @owner Observable
+ */
+function publish(selector) {
+    return selector ? multicast_1.multicast.call(this, function () { return new Subject_1.Subject(); }, selector) :
+        multicast_1.multicast.call(this, new Subject_1.Subject());
+}
+exports.publish = publish;
+
+},{"../Subject":68,"./multicast":304}],311:[function(require,module,exports){
+"use strict";
+var BehaviorSubject_1 = require('../BehaviorSubject');
+var multicast_1 = require('./multicast');
+/**
+ * @param value
+ * @return {ConnectableObservable<T>}
+ * @method publishBehavior
+ * @owner Observable
+ */
+function publishBehavior(value) {
+    return multicast_1.multicast.call(this, new BehaviorSubject_1.BehaviorSubject(value));
+}
+exports.publishBehavior = publishBehavior;
+
+},{"../BehaviorSubject":59,"./multicast":304}],312:[function(require,module,exports){
+"use strict";
+var AsyncSubject_1 = require('../AsyncSubject');
+var multicast_1 = require('./multicast');
+/**
+ * @return {ConnectableObservable<T>}
+ * @method publishLast
+ * @owner Observable
+ */
+function publishLast() {
+    return multicast_1.multicast.call(this, new AsyncSubject_1.AsyncSubject());
+}
+exports.publishLast = publishLast;
+
+},{"../AsyncSubject":58,"./multicast":304}],313:[function(require,module,exports){
+"use strict";
+var ReplaySubject_1 = require('../ReplaySubject');
+var multicast_1 = require('./multicast');
+/**
+ * @param bufferSize
+ * @param windowTime
+ * @param scheduler
+ * @return {ConnectableObservable<T>}
+ * @method publishReplay
+ * @owner Observable
+ */
+function publishReplay(bufferSize, windowTime, scheduler) {
+    if (bufferSize === void 0) { bufferSize = Number.POSITIVE_INFINITY; }
+    if (windowTime === void 0) { windowTime = Number.POSITIVE_INFINITY; }
+    return multicast_1.multicast.call(this, new ReplaySubject_1.ReplaySubject(bufferSize, windowTime, scheduler));
+}
+exports.publishReplay = publishReplay;
+
+},{"../ReplaySubject":65,"./multicast":304}],314:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var isArray_1 = require('../util/isArray');
+var ArrayObservable_1 = require('../observable/ArrayObservable');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/* tslint:enable:max-line-length */
+/**
+ * Returns an Observable that mirrors the first source Observable to emit an item
+ * from the combination of this Observable and supplied Observables.
+ * @param {...Observables} ...observables Sources used to race for which Observable emits first.
+ * @return {Observable} An Observable that mirrors the output of the first Observable to emit an item.
+ * @method race
+ * @owner Observable
+ */
+function race() {
+    var observables = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        observables[_i - 0] = arguments[_i];
+    }
+    // if the only argument is an array, it was most likely called with
+    // `pair([obs1, obs2, ...])`
+    if (observables.length === 1 && isArray_1.isArray(observables[0])) {
+        observables = observables[0];
+    }
+    return this.lift.call(raceStatic.apply(void 0, [this].concat(observables)));
+}
+exports.race = race;
+function raceStatic() {
+    var observables = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        observables[_i - 0] = arguments[_i];
+    }
+    // if the only argument is an array, it was most likely called with
+    // `race([obs1, obs2, ...])`
+    if (observables.length === 1) {
+        if (isArray_1.isArray(observables[0])) {
+            observables = observables[0];
+        }
+        else {
+            return observables[0];
+        }
+    }
+    return new ArrayObservable_1.ArrayObservable(observables).lift(new RaceOperator());
+}
+exports.raceStatic = raceStatic;
+var RaceOperator = (function () {
+    function RaceOperator() {
+    }
+    RaceOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new RaceSubscriber(subscriber));
+    };
+    return RaceOperator;
+}());
+exports.RaceOperator = RaceOperator;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var RaceSubscriber = (function (_super) {
+    __extends(RaceSubscriber, _super);
+    function RaceSubscriber(destination) {
+        _super.call(this, destination);
+        this.hasFirst = false;
+        this.observables = [];
+        this.subscriptions = [];
+    }
+    RaceSubscriber.prototype._next = function (observable) {
+        this.observables.push(observable);
+    };
+    RaceSubscriber.prototype._complete = function () {
+        var observables = this.observables;
+        var len = observables.length;
+        if (len === 0) {
+            this.destination.complete();
+        }
+        else {
+            for (var i = 0; i < len && !this.hasFirst; i++) {
+                var observable = observables[i];
+                var subscription = subscribeToResult_1.subscribeToResult(this, observable, observable, i);
+                if (this.subscriptions) {
+                    this.subscriptions.push(subscription);
+                }
+                this.add(subscription);
+            }
+            this.observables = null;
+        }
+    };
+    RaceSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        if (!this.hasFirst) {
+            this.hasFirst = true;
+            for (var i = 0; i < this.subscriptions.length; i++) {
+                if (i !== outerIndex) {
+                    var subscription = this.subscriptions[i];
+                    subscription.unsubscribe();
+                    this.remove(subscription);
+                }
+            }
+            this.subscriptions = null;
+        }
+        this.destination.next(innerValue);
+    };
+    return RaceSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+exports.RaceSubscriber = RaceSubscriber;
+
+},{"../OuterSubscriber":64,"../observable/ArrayObservable":202,"../util/isArray":392,"../util/subscribeToResult":403}],315:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/* tslint:enable:max-line-length */
+/**
+ * Applies an accumulator function over the source Observable, and returns the
+ * accumulated result when the source completes, given an optional seed value.
+ *
+ * <span class="informal">Combines together all values emitted on the source,
+ * using an accumulator function that knows how to join a new source value into
+ * the accumulation from the past.</span>
+ *
+ * <img src="./img/reduce.png" width="100%">
+ *
+ * Like
+ * [Array.prototype.reduce()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/reduce),
+ * `reduce` applies an `accumulator` function against an accumulation and each
+ * value of the source Observable (from the past) to reduce it to a single
+ * value, emitted on the output Observable. Note that `reduce` will only emit
+ * one value, only when the source Observable completes. It is equivalent to
+ * applying operator {@link scan} followed by operator {@link last}.
+ *
+ * Returns an Observable that applies a specified `accumulator` function to each
+ * item emitted by the source Observable. If a `seed` value is specified, then
+ * that value will be used as the initial value for the accumulator. If no seed
+ * value is specified, the first item of the source is used as the seed.
+ *
+ * @example <caption>Count the number of click events that happened in 5 seconds</caption>
+ * var clicksInFiveSeconds = Rx.Observable.fromEvent(document, 'click')
+ *   .takeUntil(Rx.Observable.interval(5000));
+ * var ones = clicksInFiveSeconds.mapTo(1);
+ * var seed = 0;
+ * var count = ones.reduce((acc, one) => acc + one, seed);
+ * count.subscribe(x => console.log(x));
+ *
+ * @see {@link count}
+ * @see {@link expand}
+ * @see {@link mergeScan}
+ * @see {@link scan}
+ *
+ * @param {function(acc: R, value: T, index: number): R} accumulator The accumulator function
+ * called on each source value.
+ * @param {R} [seed] The initial accumulation value.
+ * @return {Observable<R>} An Observable that emits a single value that is the
+ * result of accumulating the values emitted by the source Observable.
+ * @method reduce
+ * @owner Observable
+ */
+function reduce(accumulator, seed) {
+    var hasSeed = false;
+    // providing a seed of `undefined` *should* be valid and trigger
+    // hasSeed! so don't use `seed !== undefined` checks!
+    // For this reason, we have to check it here at the original call site
+    // otherwise inside Operator/Subscriber we won't know if `undefined`
+    // means they didn't provide anything or if they literally provided `undefined`
+    if (arguments.length >= 2) {
+        hasSeed = true;
+    }
+    return this.lift(new ReduceOperator(accumulator, seed, hasSeed));
+}
+exports.reduce = reduce;
+var ReduceOperator = (function () {
+    function ReduceOperator(accumulator, seed, hasSeed) {
+        if (hasSeed === void 0) { hasSeed = false; }
+        this.accumulator = accumulator;
+        this.seed = seed;
+        this.hasSeed = hasSeed;
+    }
+    ReduceOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new ReduceSubscriber(subscriber, this.accumulator, this.seed, this.hasSeed));
+    };
+    return ReduceOperator;
+}());
+exports.ReduceOperator = ReduceOperator;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var ReduceSubscriber = (function (_super) {
+    __extends(ReduceSubscriber, _super);
+    function ReduceSubscriber(destination, accumulator, seed, hasSeed) {
+        _super.call(this, destination);
+        this.accumulator = accumulator;
+        this.hasSeed = hasSeed;
+        this.index = 0;
+        this.hasValue = false;
+        this.acc = seed;
+        if (!this.hasSeed) {
+            this.index++;
+        }
+    }
+    ReduceSubscriber.prototype._next = function (value) {
+        if (this.hasValue || (this.hasValue = this.hasSeed)) {
+            this._tryReduce(value);
+        }
+        else {
+            this.acc = value;
+            this.hasValue = true;
+        }
+    };
+    ReduceSubscriber.prototype._tryReduce = function (value) {
+        var result;
+        try {
+            result = this.accumulator(this.acc, value, this.index++);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        this.acc = result;
+    };
+    ReduceSubscriber.prototype._complete = function () {
+        if (this.hasValue || this.hasSeed) {
+            this.destination.next(this.acc);
+        }
+        this.destination.complete();
+    };
+    return ReduceSubscriber;
+}(Subscriber_1.Subscriber));
+exports.ReduceSubscriber = ReduceSubscriber;
+
+},{"../Subscriber":70}],316:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var EmptyObservable_1 = require('../observable/EmptyObservable');
+/**
+ * Returns an Observable that repeats the stream of items emitted by the source Observable at most count times.
+ *
+ * <img src="./img/repeat.png" width="100%">
+ *
+ * @param {number} [count] The number of times the source Observable items are repeated, a count of 0 will yield
+ * an empty Observable.
+ * @return {Observable} An Observable that repeats the stream of items emitted by the source Observable at most
+ * count times.
+ * @method repeat
+ * @owner Observable
+ */
+function repeat(count) {
+    if (count === void 0) { count = -1; }
+    if (count === 0) {
+        return new EmptyObservable_1.EmptyObservable();
+    }
+    else if (count < 0) {
+        return this.lift(new RepeatOperator(-1, this));
+    }
+    else {
+        return this.lift(new RepeatOperator(count - 1, this));
+    }
+}
+exports.repeat = repeat;
+var RepeatOperator = (function () {
+    function RepeatOperator(count, source) {
+        this.count = count;
+        this.source = source;
+    }
+    RepeatOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new RepeatSubscriber(subscriber, this.count, this.source));
+    };
+    return RepeatOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var RepeatSubscriber = (function (_super) {
+    __extends(RepeatSubscriber, _super);
+    function RepeatSubscriber(destination, count, source) {
+        _super.call(this, destination);
+        this.count = count;
+        this.source = source;
+    }
+    RepeatSubscriber.prototype.complete = function () {
+        if (!this.isStopped) {
+            var _a = this, source = _a.source, count = _a.count;
+            if (count === 0) {
+                return _super.prototype.complete.call(this);
+            }
+            else if (count > -1) {
+                this.count = count - 1;
+            }
+            source.subscribe(this._unsubscribeAndRecycle());
+        }
+    };
+    return RepeatSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../observable/EmptyObservable":207}],317:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subject_1 = require('../Subject');
+var tryCatch_1 = require('../util/tryCatch');
+var errorObject_1 = require('../util/errorObject');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Returns an Observable that mirrors the source Observable with the exception of a `complete`. If the source
+ * Observable calls `complete`, this method will emit to the Observable returned from `notifier`. If that Observable
+ * calls `complete` or `error`, then this method will call `complete` or `error` on the child subscription. Otherwise
+ * this method will resubscribe to the source Observable.
+ *
+ * <img src="./img/repeatWhen.png" width="100%">
+ *
+ * @param {function(notifications: Observable): Observable} notifier - Receives an Observable of notifications with
+ * which a user can `complete` or `error`, aborting the repetition.
+ * @return {Observable} The source Observable modified with repeat logic.
+ * @method repeatWhen
+ * @owner Observable
+ */
+function repeatWhen(notifier) {
+    return this.lift(new RepeatWhenOperator(notifier));
+}
+exports.repeatWhen = repeatWhen;
+var RepeatWhenOperator = (function () {
+    function RepeatWhenOperator(notifier) {
+        this.notifier = notifier;
+    }
+    RepeatWhenOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new RepeatWhenSubscriber(subscriber, this.notifier, source));
+    };
+    return RepeatWhenOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var RepeatWhenSubscriber = (function (_super) {
+    __extends(RepeatWhenSubscriber, _super);
+    function RepeatWhenSubscriber(destination, notifier, source) {
+        _super.call(this, destination);
+        this.notifier = notifier;
+        this.source = source;
+        this.sourceIsBeingSubscribedTo = true;
+    }
+    RepeatWhenSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.sourceIsBeingSubscribedTo = true;
+        this.source.subscribe(this);
+    };
+    RepeatWhenSubscriber.prototype.notifyComplete = function (innerSub) {
+        if (this.sourceIsBeingSubscribedTo === false) {
+            return _super.prototype.complete.call(this);
+        }
+    };
+    RepeatWhenSubscriber.prototype.complete = function () {
+        this.sourceIsBeingSubscribedTo = false;
+        if (!this.isStopped) {
+            if (!this.retries) {
+                this.subscribeToRetries();
+            }
+            else if (this.retriesSubscription.closed) {
+                return _super.prototype.complete.call(this);
+            }
+            this._unsubscribeAndRecycle();
+            this.notifications.next();
+        }
+    };
+    RepeatWhenSubscriber.prototype._unsubscribe = function () {
+        var _a = this, notifications = _a.notifications, retriesSubscription = _a.retriesSubscription;
+        if (notifications) {
+            notifications.unsubscribe();
+            this.notifications = null;
+        }
+        if (retriesSubscription) {
+            retriesSubscription.unsubscribe();
+            this.retriesSubscription = null;
+        }
+        this.retries = null;
+    };
+    RepeatWhenSubscriber.prototype._unsubscribeAndRecycle = function () {
+        var _a = this, notifications = _a.notifications, retries = _a.retries, retriesSubscription = _a.retriesSubscription;
+        this.notifications = null;
+        this.retries = null;
+        this.retriesSubscription = null;
+        _super.prototype._unsubscribeAndRecycle.call(this);
+        this.notifications = notifications;
+        this.retries = retries;
+        this.retriesSubscription = retriesSubscription;
+        return this;
+    };
+    RepeatWhenSubscriber.prototype.subscribeToRetries = function () {
+        this.notifications = new Subject_1.Subject();
+        var retries = tryCatch_1.tryCatch(this.notifier)(this.notifications);
+        if (retries === errorObject_1.errorObject) {
+            return _super.prototype.complete.call(this);
+        }
+        this.retries = retries;
+        this.retriesSubscription = subscribeToResult_1.subscribeToResult(this, retries);
+    };
+    return RepeatWhenSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../Subject":68,"../util/errorObject":391,"../util/subscribeToResult":403,"../util/tryCatch":405}],318:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/**
+ * Returns an Observable that mirrors the source Observable with the exception of an `error`. If the source Observable
+ * calls `error`, this method will resubscribe to the source Observable for a maximum of `count` resubscriptions (given
+ * as a number parameter) rather than propagating the `error` call.
+ *
+ * <img src="./img/retry.png" width="100%">
+ *
+ * Any and all items emitted by the source Observable will be emitted by the resulting Observable, even those emitted
+ * during failed subscriptions. For example, if an Observable fails at first but emits [1, 2] then succeeds the second
+ * time and emits: [1, 2, 3, 4, 5] then the complete stream of emissions and notifications
+ * would be: [1, 2, 1, 2, 3, 4, 5, `complete`].
+ * @param {number} count - Number of retry attempts before failing.
+ * @return {Observable} The source Observable modified with the retry logic.
+ * @method retry
+ * @owner Observable
+ */
+function retry(count) {
+    if (count === void 0) { count = -1; }
+    return this.lift(new RetryOperator(count, this));
+}
+exports.retry = retry;
+var RetryOperator = (function () {
+    function RetryOperator(count, source) {
+        this.count = count;
+        this.source = source;
+    }
+    RetryOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new RetrySubscriber(subscriber, this.count, this.source));
+    };
+    return RetryOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var RetrySubscriber = (function (_super) {
+    __extends(RetrySubscriber, _super);
+    function RetrySubscriber(destination, count, source) {
+        _super.call(this, destination);
+        this.count = count;
+        this.source = source;
+    }
+    RetrySubscriber.prototype.error = function (err) {
+        if (!this.isStopped) {
+            var _a = this, source = _a.source, count = _a.count;
+            if (count === 0) {
+                return _super.prototype.error.call(this, err);
+            }
+            else if (count > -1) {
+                this.count = count - 1;
+            }
+            source.subscribe(this._unsubscribeAndRecycle());
+        }
+    };
+    return RetrySubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],319:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -18536,7 +34174,3579 @@ var RetryWhenSubscriber = (function (_super) {
     return RetryWhenSubscriber;
 }(OuterSubscriber_1.OuterSubscriber));
 
-},{"../OuterSubscriber":44,"../Subject":46,"../util/errorObject":65,"../util/subscribeToResult":73,"../util/tryCatch":75}],56:[function(require,module,exports){
+},{"../OuterSubscriber":64,"../Subject":68,"../util/errorObject":391,"../util/subscribeToResult":403,"../util/tryCatch":405}],320:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Emits the most recently emitted value from the source Observable whenever
+ * another Observable, the `notifier`, emits.
+ *
+ * <span class="informal">It's like {@link sampleTime}, but samples whenever
+ * the `notifier` Observable emits something.</span>
+ *
+ * <img src="./img/sample.png" width="100%">
+ *
+ * Whenever the `notifier` Observable emits a value or completes, `sample`
+ * looks at the source Observable and emits whichever value it has most recently
+ * emitted since the previous sampling, unless the source has not emitted
+ * anything since the previous sampling. The `notifier` is subscribed to as soon
+ * as the output Observable is subscribed.
+ *
+ * @example <caption>On every click, sample the most recent "seconds" timer</caption>
+ * var seconds = Rx.Observable.interval(1000);
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = seconds.sample(clicks);
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link audit}
+ * @see {@link debounce}
+ * @see {@link sampleTime}
+ * @see {@link throttle}
+ *
+ * @param {Observable<any>} notifier The Observable to use for sampling the
+ * source Observable.
+ * @return {Observable<T>} An Observable that emits the results of sampling the
+ * values emitted by the source Observable whenever the notifier Observable
+ * emits value or completes.
+ * @method sample
+ * @owner Observable
+ */
+function sample(notifier) {
+    return this.lift(new SampleOperator(notifier));
+}
+exports.sample = sample;
+var SampleOperator = (function () {
+    function SampleOperator(notifier) {
+        this.notifier = notifier;
+    }
+    SampleOperator.prototype.call = function (subscriber, source) {
+        var sampleSubscriber = new SampleSubscriber(subscriber);
+        var subscription = source.subscribe(sampleSubscriber);
+        subscription.add(subscribeToResult_1.subscribeToResult(sampleSubscriber, this.notifier));
+        return subscription;
+    };
+    return SampleOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SampleSubscriber = (function (_super) {
+    __extends(SampleSubscriber, _super);
+    function SampleSubscriber() {
+        _super.apply(this, arguments);
+        this.hasValue = false;
+    }
+    SampleSubscriber.prototype._next = function (value) {
+        this.value = value;
+        this.hasValue = true;
+    };
+    SampleSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.emitValue();
+    };
+    SampleSubscriber.prototype.notifyComplete = function () {
+        this.emitValue();
+    };
+    SampleSubscriber.prototype.emitValue = function () {
+        if (this.hasValue) {
+            this.hasValue = false;
+            this.destination.next(this.value);
+        }
+    };
+    return SampleSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],321:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var async_1 = require('../scheduler/async');
+/**
+ * Emits the most recently emitted value from the source Observable within
+ * periodic time intervals.
+ *
+ * <span class="informal">Samples the source Observable at periodic time
+ * intervals, emitting what it samples.</span>
+ *
+ * <img src="./img/sampleTime.png" width="100%">
+ *
+ * `sampleTime` periodically looks at the source Observable and emits whichever
+ * value it has most recently emitted since the previous sampling, unless the
+ * source has not emitted anything since the previous sampling. The sampling
+ * happens periodically in time every `period` milliseconds (or the time unit
+ * defined by the optional `scheduler` argument). The sampling starts as soon as
+ * the output Observable is subscribed.
+ *
+ * @example <caption>Every second, emit the most recent click at most once</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.sampleTime(1000);
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link auditTime}
+ * @see {@link debounceTime}
+ * @see {@link delay}
+ * @see {@link sample}
+ * @see {@link throttleTime}
+ *
+ * @param {number} period The sampling period expressed in milliseconds or the
+ * time unit determined internally by the optional `scheduler`.
+ * @param {Scheduler} [scheduler=async] The {@link IScheduler} to use for
+ * managing the timers that handle the sampling.
+ * @return {Observable<T>} An Observable that emits the results of sampling the
+ * values emitted by the source Observable at the specified time interval.
+ * @method sampleTime
+ * @owner Observable
+ */
+function sampleTime(period, scheduler) {
+    if (scheduler === void 0) { scheduler = async_1.async; }
+    return this.lift(new SampleTimeOperator(period, scheduler));
+}
+exports.sampleTime = sampleTime;
+var SampleTimeOperator = (function () {
+    function SampleTimeOperator(period, scheduler) {
+        this.period = period;
+        this.scheduler = scheduler;
+    }
+    SampleTimeOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new SampleTimeSubscriber(subscriber, this.period, this.scheduler));
+    };
+    return SampleTimeOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SampleTimeSubscriber = (function (_super) {
+    __extends(SampleTimeSubscriber, _super);
+    function SampleTimeSubscriber(destination, period, scheduler) {
+        _super.call(this, destination);
+        this.period = period;
+        this.scheduler = scheduler;
+        this.hasValue = false;
+        this.add(scheduler.schedule(dispatchNotification, period, { subscriber: this, period: period }));
+    }
+    SampleTimeSubscriber.prototype._next = function (value) {
+        this.lastValue = value;
+        this.hasValue = true;
+    };
+    SampleTimeSubscriber.prototype.notifyNext = function () {
+        if (this.hasValue) {
+            this.hasValue = false;
+            this.destination.next(this.lastValue);
+        }
+    };
+    return SampleTimeSubscriber;
+}(Subscriber_1.Subscriber));
+function dispatchNotification(state) {
+    var subscriber = state.subscriber, period = state.period;
+    subscriber.notifyNext();
+    this.schedule(state, period);
+}
+
+},{"../Subscriber":70,"../scheduler/async":368}],322:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/* tslint:enable:max-line-length */
+/**
+ * Applies an accumulator function over the source Observable, and returns each
+ * intermediate result, with an optional seed value.
+ *
+ * <span class="informal">It's like {@link reduce}, but emits the current
+ * accumulation whenever the source emits a value.</span>
+ *
+ * <img src="./img/scan.png" width="100%">
+ *
+ * Combines together all values emitted on the source, using an accumulator
+ * function that knows how to join a new source value into the accumulation from
+ * the past. Is similar to {@link reduce}, but emits the intermediate
+ * accumulations.
+ *
+ * Returns an Observable that applies a specified `accumulator` function to each
+ * item emitted by the source Observable. If a `seed` value is specified, then
+ * that value will be used as the initial value for the accumulator. If no seed
+ * value is specified, the first item of the source is used as the seed.
+ *
+ * @example <caption>Count the number of click events</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var ones = clicks.mapTo(1);
+ * var seed = 0;
+ * var count = ones.scan((acc, one) => acc + one, seed);
+ * count.subscribe(x => console.log(x));
+ *
+ * @see {@link expand}
+ * @see {@link mergeScan}
+ * @see {@link reduce}
+ *
+ * @param {function(acc: R, value: T, index: number): R} accumulator
+ * The accumulator function called on each source value.
+ * @param {T|R} [seed] The initial accumulation value.
+ * @return {Observable<R>} An observable of the accumulated values.
+ * @method scan
+ * @owner Observable
+ */
+function scan(accumulator, seed) {
+    var hasSeed = false;
+    // providing a seed of `undefined` *should* be valid and trigger
+    // hasSeed! so don't use `seed !== undefined` checks!
+    // For this reason, we have to check it here at the original call site
+    // otherwise inside Operator/Subscriber we won't know if `undefined`
+    // means they didn't provide anything or if they literally provided `undefined`
+    if (arguments.length >= 2) {
+        hasSeed = true;
+    }
+    return this.lift(new ScanOperator(accumulator, seed, hasSeed));
+}
+exports.scan = scan;
+var ScanOperator = (function () {
+    function ScanOperator(accumulator, seed, hasSeed) {
+        if (hasSeed === void 0) { hasSeed = false; }
+        this.accumulator = accumulator;
+        this.seed = seed;
+        this.hasSeed = hasSeed;
+    }
+    ScanOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new ScanSubscriber(subscriber, this.accumulator, this.seed, this.hasSeed));
+    };
+    return ScanOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var ScanSubscriber = (function (_super) {
+    __extends(ScanSubscriber, _super);
+    function ScanSubscriber(destination, accumulator, _seed, hasSeed) {
+        _super.call(this, destination);
+        this.accumulator = accumulator;
+        this._seed = _seed;
+        this.hasSeed = hasSeed;
+        this.index = 0;
+    }
+    Object.defineProperty(ScanSubscriber.prototype, "seed", {
+        get: function () {
+            return this._seed;
+        },
+        set: function (value) {
+            this.hasSeed = true;
+            this._seed = value;
+        },
+        enumerable: true,
+        configurable: true
+    });
+    ScanSubscriber.prototype._next = function (value) {
+        if (!this.hasSeed) {
+            this.seed = value;
+            this.destination.next(value);
+        }
+        else {
+            return this._tryNext(value);
+        }
+    };
+    ScanSubscriber.prototype._tryNext = function (value) {
+        var index = this.index++;
+        var result;
+        try {
+            result = this.accumulator(this.seed, value, index);
+        }
+        catch (err) {
+            this.destination.error(err);
+        }
+        this.seed = result;
+        this.destination.next(result);
+    };
+    return ScanSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],323:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var tryCatch_1 = require('../util/tryCatch');
+var errorObject_1 = require('../util/errorObject');
+/**
+ * Compares all values of two observables in sequence using an optional comparor function
+ * and returns an observable of a single boolean value representing whether or not the two sequences
+ * are equal.
+ *
+ * <span class="informal">Checks to see of all values emitted by both observables are equal, in order.</span>
+ *
+ * <img src="./img/sequenceEqual.png" width="100%">
+ *
+ * `sequenceEqual` subscribes to two observables and buffers incoming values from each observable. Whenever either
+ * observable emits a value, the value is buffered and the buffers are shifted and compared from the bottom
+ * up; If any value pair doesn't match, the returned observable will emit `false` and complete. If one of the
+ * observables completes, the operator will wait for the other observable to complete; If the other
+ * observable emits before completing, the returned observable will emit `false` and complete. If one observable never
+ * completes or emits after the other complets, the returned observable will never complete.
+ *
+ * @example <caption>figure out if the Konami code matches</caption>
+ * var code = Rx.Observable.from([
+ *  "ArrowUp",
+ *  "ArrowUp",
+ *  "ArrowDown",
+ *  "ArrowDown",
+ *  "ArrowLeft",
+ *  "ArrowRight",
+ *  "ArrowLeft",
+ *  "ArrowRight",
+ *  "KeyB",
+ *  "KeyA",
+ *  "Enter" // no start key, clearly.
+ * ]);
+ *
+ * var keys = Rx.Observable.fromEvent(document, 'keyup')
+ *  .map(e => e.code);
+ * var matches = keys.bufferCount(11, 1)
+ *  .mergeMap(
+ *    last11 =>
+ *      Rx.Observable.from(last11)
+ *        .sequenceEqual(code)
+ *   );
+ * matches.subscribe(matched => console.log('Successful cheat at Contra? ', matched));
+ *
+ * @see {@link combineLatest}
+ * @see {@link zip}
+ * @see {@link withLatestFrom}
+ *
+ * @param {Observable} compareTo The observable sequence to compare the source sequence to.
+ * @param {function} [comparor] An optional function to compare each value pair
+ * @return {Observable} An Observable of a single boolean value representing whether or not
+ * the values emitted by both observables were equal in sequence.
+ * @method sequenceEqual
+ * @owner Observable
+ */
+function sequenceEqual(compareTo, comparor) {
+    return this.lift(new SequenceEqualOperator(compareTo, comparor));
+}
+exports.sequenceEqual = sequenceEqual;
+var SequenceEqualOperator = (function () {
+    function SequenceEqualOperator(compareTo, comparor) {
+        this.compareTo = compareTo;
+        this.comparor = comparor;
+    }
+    SequenceEqualOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new SequenceEqualSubscriber(subscriber, this.compareTo, this.comparor));
+    };
+    return SequenceEqualOperator;
+}());
+exports.SequenceEqualOperator = SequenceEqualOperator;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SequenceEqualSubscriber = (function (_super) {
+    __extends(SequenceEqualSubscriber, _super);
+    function SequenceEqualSubscriber(destination, compareTo, comparor) {
+        _super.call(this, destination);
+        this.compareTo = compareTo;
+        this.comparor = comparor;
+        this._a = [];
+        this._b = [];
+        this._oneComplete = false;
+        this.add(compareTo.subscribe(new SequenceEqualCompareToSubscriber(destination, this)));
+    }
+    SequenceEqualSubscriber.prototype._next = function (value) {
+        if (this._oneComplete && this._b.length === 0) {
+            this.emit(false);
+        }
+        else {
+            this._a.push(value);
+            this.checkValues();
+        }
+    };
+    SequenceEqualSubscriber.prototype._complete = function () {
+        if (this._oneComplete) {
+            this.emit(this._a.length === 0 && this._b.length === 0);
+        }
+        else {
+            this._oneComplete = true;
+        }
+    };
+    SequenceEqualSubscriber.prototype.checkValues = function () {
+        var _c = this, _a = _c._a, _b = _c._b, comparor = _c.comparor;
+        while (_a.length > 0 && _b.length > 0) {
+            var a = _a.shift();
+            var b = _b.shift();
+            var areEqual = false;
+            if (comparor) {
+                areEqual = tryCatch_1.tryCatch(comparor)(a, b);
+                if (areEqual === errorObject_1.errorObject) {
+                    this.destination.error(errorObject_1.errorObject.e);
+                }
+            }
+            else {
+                areEqual = a === b;
+            }
+            if (!areEqual) {
+                this.emit(false);
+            }
+        }
+    };
+    SequenceEqualSubscriber.prototype.emit = function (value) {
+        var destination = this.destination;
+        destination.next(value);
+        destination.complete();
+    };
+    SequenceEqualSubscriber.prototype.nextB = function (value) {
+        if (this._oneComplete && this._a.length === 0) {
+            this.emit(false);
+        }
+        else {
+            this._b.push(value);
+            this.checkValues();
+        }
+    };
+    return SequenceEqualSubscriber;
+}(Subscriber_1.Subscriber));
+exports.SequenceEqualSubscriber = SequenceEqualSubscriber;
+var SequenceEqualCompareToSubscriber = (function (_super) {
+    __extends(SequenceEqualCompareToSubscriber, _super);
+    function SequenceEqualCompareToSubscriber(destination, parent) {
+        _super.call(this, destination);
+        this.parent = parent;
+    }
+    SequenceEqualCompareToSubscriber.prototype._next = function (value) {
+        this.parent.nextB(value);
+    };
+    SequenceEqualCompareToSubscriber.prototype._error = function (err) {
+        this.parent.error(err);
+    };
+    SequenceEqualCompareToSubscriber.prototype._complete = function () {
+        this.parent._complete();
+    };
+    return SequenceEqualCompareToSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../util/errorObject":391,"../util/tryCatch":405}],324:[function(require,module,exports){
+"use strict";
+var multicast_1 = require('./multicast');
+var Subject_1 = require('../Subject');
+function shareSubjectFactory() {
+    return new Subject_1.Subject();
+}
+/**
+ * Returns a new Observable that multicasts (shares) the original Observable. As long as there is at least one
+ * Subscriber this Observable will be subscribed and emitting data. When all subscribers have unsubscribed it will
+ * unsubscribe from the source Observable. Because the Observable is multicasting it makes the stream `hot`.
+ * This is an alias for .publish().refCount().
+ *
+ * <img src="./img/share.png" width="100%">
+ *
+ * @return {Observable<T>} An Observable that upon connection causes the source Observable to emit items to its Observers.
+ * @method share
+ * @owner Observable
+ */
+function share() {
+    return multicast_1.multicast.call(this, shareSubjectFactory).refCount();
+}
+exports.share = share;
+;
+
+},{"../Subject":68,"./multicast":304}],325:[function(require,module,exports){
+"use strict";
+var multicast_1 = require('./multicast');
+var ReplaySubject_1 = require('../ReplaySubject');
+/**
+ * @method shareReplay
+ * @owner Observable
+ */
+function shareReplay(bufferSize, windowTime, scheduler) {
+    var subject;
+    var connectable = multicast_1.multicast.call(this, function shareReplaySubjectFactory() {
+        if (this._isComplete) {
+            return subject;
+        }
+        else {
+            return (subject = new ReplaySubject_1.ReplaySubject(bufferSize, windowTime, scheduler));
+        }
+    });
+    return connectable.refCount();
+}
+exports.shareReplay = shareReplay;
+;
+
+},{"../ReplaySubject":65,"./multicast":304}],326:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var EmptyError_1 = require('../util/EmptyError');
+/**
+ * Returns an Observable that emits the single item emitted by the source Observable that matches a specified
+ * predicate, if that Observable emits one such item. If the source Observable emits more than one such item or no
+ * such items, notify of an IllegalArgumentException or NoSuchElementException respectively.
+ *
+ * <img src="./img/single.png" width="100%">
+ *
+ * @throws {EmptyError} Delivers an EmptyError to the Observer's `error`
+ * callback if the Observable completes before any `next` notification was sent.
+ * @param {Function} predicate - A predicate function to evaluate items emitted by the source Observable.
+ * @return {Observable<T>} An Observable that emits the single item emitted by the source Observable that matches
+ * the predicate.
+ .
+ * @method single
+ * @owner Observable
+ */
+function single(predicate) {
+    return this.lift(new SingleOperator(predicate, this));
+}
+exports.single = single;
+var SingleOperator = (function () {
+    function SingleOperator(predicate, source) {
+        this.predicate = predicate;
+        this.source = source;
+    }
+    SingleOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new SingleSubscriber(subscriber, this.predicate, this.source));
+    };
+    return SingleOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SingleSubscriber = (function (_super) {
+    __extends(SingleSubscriber, _super);
+    function SingleSubscriber(destination, predicate, source) {
+        _super.call(this, destination);
+        this.predicate = predicate;
+        this.source = source;
+        this.seenValue = false;
+        this.index = 0;
+    }
+    SingleSubscriber.prototype.applySingleValue = function (value) {
+        if (this.seenValue) {
+            this.destination.error('Sequence contains more than one element');
+        }
+        else {
+            this.seenValue = true;
+            this.singleValue = value;
+        }
+    };
+    SingleSubscriber.prototype._next = function (value) {
+        var index = this.index++;
+        if (this.predicate) {
+            this.tryNext(value, index);
+        }
+        else {
+            this.applySingleValue(value);
+        }
+    };
+    SingleSubscriber.prototype.tryNext = function (value, index) {
+        try {
+            if (this.predicate(value, index, this.source)) {
+                this.applySingleValue(value);
+            }
+        }
+        catch (err) {
+            this.destination.error(err);
+        }
+    };
+    SingleSubscriber.prototype._complete = function () {
+        var destination = this.destination;
+        if (this.index > 0) {
+            destination.next(this.seenValue ? this.singleValue : undefined);
+            destination.complete();
+        }
+        else {
+            destination.error(new EmptyError_1.EmptyError);
+        }
+    };
+    return SingleSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../util/EmptyError":380}],327:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/**
+ * Returns an Observable that skips the first `count` items emitted by the source Observable.
+ *
+ * <img src="./img/skip.png" width="100%">
+ *
+ * @param {Number} count - The number of times, items emitted by source Observable should be skipped.
+ * @return {Observable} An Observable that skips values emitted by the source Observable.
+ *
+ * @method skip
+ * @owner Observable
+ */
+function skip(count) {
+    return this.lift(new SkipOperator(count));
+}
+exports.skip = skip;
+var SkipOperator = (function () {
+    function SkipOperator(total) {
+        this.total = total;
+    }
+    SkipOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new SkipSubscriber(subscriber, this.total));
+    };
+    return SkipOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SkipSubscriber = (function (_super) {
+    __extends(SkipSubscriber, _super);
+    function SkipSubscriber(destination, total) {
+        _super.call(this, destination);
+        this.total = total;
+        this.count = 0;
+    }
+    SkipSubscriber.prototype._next = function (x) {
+        if (++this.count > this.total) {
+            this.destination.next(x);
+        }
+    };
+    return SkipSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],328:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var ArgumentOutOfRangeError_1 = require('../util/ArgumentOutOfRangeError');
+/**
+ * Skip the last `count` values emitted by the source Observable.
+ *
+ * <img src="./img/skipLast.png" width="100%">
+ *
+ * `skipLast` returns an Observable that accumulates a queue with a length
+ * enough to store the first `count` values. As more values are received,
+ * values are taken from the front of the queue and produced on the result
+ * sequence. This causes values to be delayed.
+ *
+ * @example <caption>Skip the last 2 values of an Observable with many values</caption>
+ * var many = Rx.Observable.range(1, 5);
+ * var skipLastTwo = many.skipLast(2);
+ * skipLastTwo.subscribe(x => console.log(x));
+ *
+ * // Results in:
+ * // 1 2 3
+ *
+ * @see {@link skip}
+ * @see {@link skipUntil}
+ * @see {@link skipWhile}
+ * @see {@link take}
+ *
+ * @throws {ArgumentOutOfRangeError} When using `skipLast(i)`, it throws
+ * ArgumentOutOrRangeError if `i < 0`.
+ *
+ * @param {number} count Number of elements to skip from the end of the source Observable.
+ * @returns {Observable<T>} An Observable that skips the last count values
+ * emitted by the source Observable.
+ * @method skipLast
+ * @owner Observable
+ */
+function skipLast(count) {
+    return this.lift(new SkipLastOperator(count));
+}
+exports.skipLast = skipLast;
+var SkipLastOperator = (function () {
+    function SkipLastOperator(_skipCount) {
+        this._skipCount = _skipCount;
+        if (this._skipCount < 0) {
+            throw new ArgumentOutOfRangeError_1.ArgumentOutOfRangeError;
+        }
+    }
+    SkipLastOperator.prototype.call = function (subscriber, source) {
+        if (this._skipCount === 0) {
+            // If we don't want to skip any values then just subscribe
+            // to Subscriber without any further logic.
+            return source.subscribe(new Subscriber_1.Subscriber(subscriber));
+        }
+        else {
+            return source.subscribe(new SkipLastSubscriber(subscriber, this._skipCount));
+        }
+    };
+    return SkipLastOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SkipLastSubscriber = (function (_super) {
+    __extends(SkipLastSubscriber, _super);
+    function SkipLastSubscriber(destination, _skipCount) {
+        _super.call(this, destination);
+        this._skipCount = _skipCount;
+        this._count = 0;
+        this._ring = new Array(_skipCount);
+    }
+    SkipLastSubscriber.prototype._next = function (value) {
+        var skipCount = this._skipCount;
+        var count = this._count++;
+        if (count < skipCount) {
+            this._ring[count] = value;
+        }
+        else {
+            var currentIndex = count % skipCount;
+            var ring = this._ring;
+            var oldValue = ring[currentIndex];
+            ring[currentIndex] = value;
+            this.destination.next(oldValue);
+        }
+    };
+    return SkipLastSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../util/ArgumentOutOfRangeError":379}],329:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Returns an Observable that skips items emitted by the source Observable until a second Observable emits an item.
+ *
+ * <img src="./img/skipUntil.png" width="100%">
+ *
+ * @param {Observable} notifier - The second Observable that has to emit an item before the source Observable's elements begin to
+ * be mirrored by the resulting Observable.
+ * @return {Observable<T>} An Observable that skips items from the source Observable until the second Observable emits
+ * an item, then emits the remaining items.
+ * @method skipUntil
+ * @owner Observable
+ */
+function skipUntil(notifier) {
+    return this.lift(new SkipUntilOperator(notifier));
+}
+exports.skipUntil = skipUntil;
+var SkipUntilOperator = (function () {
+    function SkipUntilOperator(notifier) {
+        this.notifier = notifier;
+    }
+    SkipUntilOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new SkipUntilSubscriber(subscriber, this.notifier));
+    };
+    return SkipUntilOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SkipUntilSubscriber = (function (_super) {
+    __extends(SkipUntilSubscriber, _super);
+    function SkipUntilSubscriber(destination, notifier) {
+        _super.call(this, destination);
+        this.hasValue = false;
+        this.isInnerStopped = false;
+        this.add(subscribeToResult_1.subscribeToResult(this, notifier));
+    }
+    SkipUntilSubscriber.prototype._next = function (value) {
+        if (this.hasValue) {
+            _super.prototype._next.call(this, value);
+        }
+    };
+    SkipUntilSubscriber.prototype._complete = function () {
+        if (this.isInnerStopped) {
+            _super.prototype._complete.call(this);
+        }
+        else {
+            this.unsubscribe();
+        }
+    };
+    SkipUntilSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.hasValue = true;
+    };
+    SkipUntilSubscriber.prototype.notifyComplete = function () {
+        this.isInnerStopped = true;
+        if (this.isStopped) {
+            _super.prototype._complete.call(this);
+        }
+    };
+    return SkipUntilSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],330:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/**
+ * Returns an Observable that skips all items emitted by the source Observable as long as a specified condition holds
+ * true, but emits all further source items as soon as the condition becomes false.
+ *
+ * <img src="./img/skipWhile.png" width="100%">
+ *
+ * @param {Function} predicate - A function to test each item emitted from the source Observable.
+ * @return {Observable<T>} An Observable that begins emitting items emitted by the source Observable when the
+ * specified predicate becomes false.
+ * @method skipWhile
+ * @owner Observable
+ */
+function skipWhile(predicate) {
+    return this.lift(new SkipWhileOperator(predicate));
+}
+exports.skipWhile = skipWhile;
+var SkipWhileOperator = (function () {
+    function SkipWhileOperator(predicate) {
+        this.predicate = predicate;
+    }
+    SkipWhileOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new SkipWhileSubscriber(subscriber, this.predicate));
+    };
+    return SkipWhileOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SkipWhileSubscriber = (function (_super) {
+    __extends(SkipWhileSubscriber, _super);
+    function SkipWhileSubscriber(destination, predicate) {
+        _super.call(this, destination);
+        this.predicate = predicate;
+        this.skipping = true;
+        this.index = 0;
+    }
+    SkipWhileSubscriber.prototype._next = function (value) {
+        var destination = this.destination;
+        if (this.skipping) {
+            this.tryCallPredicate(value);
+        }
+        if (!this.skipping) {
+            destination.next(value);
+        }
+    };
+    SkipWhileSubscriber.prototype.tryCallPredicate = function (value) {
+        try {
+            var result = this.predicate(value, this.index++);
+            this.skipping = Boolean(result);
+        }
+        catch (err) {
+            this.destination.error(err);
+        }
+    };
+    return SkipWhileSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],331:[function(require,module,exports){
+"use strict";
+var ArrayObservable_1 = require('../observable/ArrayObservable');
+var ScalarObservable_1 = require('../observable/ScalarObservable');
+var EmptyObservable_1 = require('../observable/EmptyObservable');
+var concat_1 = require('./concat');
+var isScheduler_1 = require('../util/isScheduler');
+/* tslint:enable:max-line-length */
+/**
+ * Returns an Observable that emits the items you specify as arguments before it begins to emit
+ * items emitted by the source Observable.
+ *
+ * <img src="./img/startWith.png" width="100%">
+ *
+ * @param {...T} values - Items you want the modified Observable to emit first.
+ * @param {Scheduler} [scheduler] - A {@link IScheduler} to use for scheduling
+ * the emissions of the `next` notifications.
+ * @return {Observable} An Observable that emits the items in the specified Iterable and then emits the items
+ * emitted by the source Observable.
+ * @method startWith
+ * @owner Observable
+ */
+function startWith() {
+    var array = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        array[_i - 0] = arguments[_i];
+    }
+    var scheduler = array[array.length - 1];
+    if (isScheduler_1.isScheduler(scheduler)) {
+        array.pop();
+    }
+    else {
+        scheduler = null;
+    }
+    var len = array.length;
+    if (len === 1) {
+        return concat_1.concatStatic(new ScalarObservable_1.ScalarObservable(array[0], scheduler), this);
+    }
+    else if (len > 1) {
+        return concat_1.concatStatic(new ArrayObservable_1.ArrayObservable(array, scheduler), this);
+    }
+    else {
+        return concat_1.concatStatic(new EmptyObservable_1.EmptyObservable(scheduler), this);
+    }
+}
+exports.startWith = startWith;
+
+},{"../observable/ArrayObservable":202,"../observable/EmptyObservable":207,"../observable/ScalarObservable":221,"../util/isScheduler":399,"./concat":264}],332:[function(require,module,exports){
+"use strict";
+var SubscribeOnObservable_1 = require('../observable/SubscribeOnObservable');
+/**
+ * Asynchronously subscribes Observers to this Observable on the specified IScheduler.
+ *
+ * <img src="./img/subscribeOn.png" width="100%">
+ *
+ * @param {Scheduler} scheduler - The IScheduler to perform subscription actions on.
+ * @return {Observable<T>} The source Observable modified so that its subscriptions happen on the specified IScheduler.
+ .
+ * @method subscribeOn
+ * @owner Observable
+ */
+function subscribeOn(scheduler, delay) {
+    if (delay === void 0) { delay = 0; }
+    return this.lift(new SubscribeOnOperator(scheduler, delay));
+}
+exports.subscribeOn = subscribeOn;
+var SubscribeOnOperator = (function () {
+    function SubscribeOnOperator(scheduler, delay) {
+        this.scheduler = scheduler;
+        this.delay = delay;
+    }
+    SubscribeOnOperator.prototype.call = function (subscriber, source) {
+        return new SubscribeOnObservable_1.SubscribeOnObservable(source, this.delay, this.scheduler).subscribe(subscriber);
+    };
+    return SubscribeOnOperator;
+}());
+
+},{"../observable/SubscribeOnObservable":222}],333:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Converts a higher-order Observable into a first-order Observable by
+ * subscribing to only the most recently emitted of those inner Observables.
+ *
+ * <span class="informal">Flattens an Observable-of-Observables by dropping the
+ * previous inner Observable once a new one appears.</span>
+ *
+ * <img src="./img/switch.png" width="100%">
+ *
+ * `switch` subscribes to an Observable that emits Observables, also known as a
+ * higher-order Observable. Each time it observes one of these emitted inner
+ * Observables, the output Observable subscribes to the inner Observable and
+ * begins emitting the items emitted by that. So far, it behaves
+ * like {@link mergeAll}. However, when a new inner Observable is emitted,
+ * `switch` unsubscribes from the earlier-emitted inner Observable and
+ * subscribes to the new inner Observable and begins emitting items from it. It
+ * continues to behave like this for subsequent inner Observables.
+ *
+ * @example <caption>Rerun an interval Observable on every click event</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * // Each click event is mapped to an Observable that ticks every second
+ * var higherOrder = clicks.map((ev) => Rx.Observable.interval(1000));
+ * var switched = higherOrder.switch();
+ * // The outcome is that `switched` is essentially a timer that restarts
+ * // on every click. The interval Observables from older clicks do not merge
+ * // with the current interval Observable.
+ * switched.subscribe(x => console.log(x));
+ *
+ * @see {@link combineAll}
+ * @see {@link concatAll}
+ * @see {@link exhaust}
+ * @see {@link mergeAll}
+ * @see {@link switchMap}
+ * @see {@link switchMapTo}
+ * @see {@link zipAll}
+ *
+ * @return {Observable<T>} An Observable that emits the items emitted by the
+ * Observable most recently emitted by the source Observable.
+ * @method switch
+ * @name switch
+ * @owner Observable
+ */
+function _switch() {
+    return this.lift(new SwitchOperator());
+}
+exports._switch = _switch;
+var SwitchOperator = (function () {
+    function SwitchOperator() {
+    }
+    SwitchOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new SwitchSubscriber(subscriber));
+    };
+    return SwitchOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SwitchSubscriber = (function (_super) {
+    __extends(SwitchSubscriber, _super);
+    function SwitchSubscriber(destination) {
+        _super.call(this, destination);
+        this.active = 0;
+        this.hasCompleted = false;
+    }
+    SwitchSubscriber.prototype._next = function (value) {
+        this.unsubscribeInner();
+        this.active++;
+        this.add(this.innerSubscription = subscribeToResult_1.subscribeToResult(this, value));
+    };
+    SwitchSubscriber.prototype._complete = function () {
+        this.hasCompleted = true;
+        if (this.active === 0) {
+            this.destination.complete();
+        }
+    };
+    SwitchSubscriber.prototype.unsubscribeInner = function () {
+        this.active = this.active > 0 ? this.active - 1 : 0;
+        var innerSubscription = this.innerSubscription;
+        if (innerSubscription) {
+            innerSubscription.unsubscribe();
+            this.remove(innerSubscription);
+        }
+    };
+    SwitchSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.destination.next(innerValue);
+    };
+    SwitchSubscriber.prototype.notifyError = function (err) {
+        this.destination.error(err);
+    };
+    SwitchSubscriber.prototype.notifyComplete = function () {
+        this.unsubscribeInner();
+        if (this.hasCompleted && this.active === 0) {
+            this.destination.complete();
+        }
+    };
+    return SwitchSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],334:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/* tslint:enable:max-line-length */
+/**
+ * Projects each source value to an Observable which is merged in the output
+ * Observable, emitting values only from the most recently projected Observable.
+ *
+ * <span class="informal">Maps each value to an Observable, then flattens all of
+ * these inner Observables using {@link switch}.</span>
+ *
+ * <img src="./img/switchMap.png" width="100%">
+ *
+ * Returns an Observable that emits items based on applying a function that you
+ * supply to each item emitted by the source Observable, where that function
+ * returns an (so-called "inner") Observable. Each time it observes one of these
+ * inner Observables, the output Observable begins emitting the items emitted by
+ * that inner Observable. When a new inner Observable is emitted, `switchMap`
+ * stops emitting items from the earlier-emitted inner Observable and begins
+ * emitting items from the new one. It continues to behave like this for
+ * subsequent inner Observables.
+ *
+ * @example <caption>Rerun an interval Observable on every click event</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.switchMap((ev) => Rx.Observable.interval(1000));
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link concatMap}
+ * @see {@link exhaustMap}
+ * @see {@link mergeMap}
+ * @see {@link switch}
+ * @see {@link switchMapTo}
+ *
+ * @param {function(value: T, ?index: number): ObservableInput} project A function
+ * that, when applied to an item emitted by the source Observable, returns an
+ * Observable.
+ * @param {function(outerValue: T, innerValue: I, outerIndex: number, innerIndex: number): any} [resultSelector]
+ * A function to produce the value on the output Observable based on the values
+ * and the indices of the source (outer) emission and the inner Observable
+ * emission. The arguments passed to this function are:
+ * - `outerValue`: the value that came from the source
+ * - `innerValue`: the value that came from the projected Observable
+ * - `outerIndex`: the "index" of the value that came from the source
+ * - `innerIndex`: the "index" of the value from the projected Observable
+ * @return {Observable} An Observable that emits the result of applying the
+ * projection function (and the optional `resultSelector`) to each item emitted
+ * by the source Observable and taking only the values from the most recently
+ * projected inner Observable.
+ * @method switchMap
+ * @owner Observable
+ */
+function switchMap(project, resultSelector) {
+    return this.lift(new SwitchMapOperator(project, resultSelector));
+}
+exports.switchMap = switchMap;
+var SwitchMapOperator = (function () {
+    function SwitchMapOperator(project, resultSelector) {
+        this.project = project;
+        this.resultSelector = resultSelector;
+    }
+    SwitchMapOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new SwitchMapSubscriber(subscriber, this.project, this.resultSelector));
+    };
+    return SwitchMapOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SwitchMapSubscriber = (function (_super) {
+    __extends(SwitchMapSubscriber, _super);
+    function SwitchMapSubscriber(destination, project, resultSelector) {
+        _super.call(this, destination);
+        this.project = project;
+        this.resultSelector = resultSelector;
+        this.index = 0;
+    }
+    SwitchMapSubscriber.prototype._next = function (value) {
+        var result;
+        var index = this.index++;
+        try {
+            result = this.project(value, index);
+        }
+        catch (error) {
+            this.destination.error(error);
+            return;
+        }
+        this._innerSub(result, value, index);
+    };
+    SwitchMapSubscriber.prototype._innerSub = function (result, value, index) {
+        var innerSubscription = this.innerSubscription;
+        if (innerSubscription) {
+            innerSubscription.unsubscribe();
+        }
+        this.add(this.innerSubscription = subscribeToResult_1.subscribeToResult(this, result, value, index));
+    };
+    SwitchMapSubscriber.prototype._complete = function () {
+        var innerSubscription = this.innerSubscription;
+        if (!innerSubscription || innerSubscription.closed) {
+            _super.prototype._complete.call(this);
+        }
+    };
+    SwitchMapSubscriber.prototype._unsubscribe = function () {
+        this.innerSubscription = null;
+    };
+    SwitchMapSubscriber.prototype.notifyComplete = function (innerSub) {
+        this.remove(innerSub);
+        this.innerSubscription = null;
+        if (this.isStopped) {
+            _super.prototype._complete.call(this);
+        }
+    };
+    SwitchMapSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        if (this.resultSelector) {
+            this._tryNotifyNext(outerValue, innerValue, outerIndex, innerIndex);
+        }
+        else {
+            this.destination.next(innerValue);
+        }
+    };
+    SwitchMapSubscriber.prototype._tryNotifyNext = function (outerValue, innerValue, outerIndex, innerIndex) {
+        var result;
+        try {
+            result = this.resultSelector(outerValue, innerValue, outerIndex, innerIndex);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        this.destination.next(result);
+    };
+    return SwitchMapSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],335:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/* tslint:enable:max-line-length */
+/**
+ * Projects each source value to the same Observable which is flattened multiple
+ * times with {@link switch} in the output Observable.
+ *
+ * <span class="informal">It's like {@link switchMap}, but maps each value
+ * always to the same inner Observable.</span>
+ *
+ * <img src="./img/switchMapTo.png" width="100%">
+ *
+ * Maps each source value to the given Observable `innerObservable` regardless
+ * of the source value, and then flattens those resulting Observables into one
+ * single Observable, which is the output Observable. The output Observables
+ * emits values only from the most recently emitted instance of
+ * `innerObservable`.
+ *
+ * @example <caption>Rerun an interval Observable on every click event</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.switchMapTo(Rx.Observable.interval(1000));
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link concatMapTo}
+ * @see {@link switch}
+ * @see {@link switchMap}
+ * @see {@link mergeMapTo}
+ *
+ * @param {ObservableInput} innerObservable An Observable to replace each value from
+ * the source Observable.
+ * @param {function(outerValue: T, innerValue: I, outerIndex: number, innerIndex: number): any} [resultSelector]
+ * A function to produce the value on the output Observable based on the values
+ * and the indices of the source (outer) emission and the inner Observable
+ * emission. The arguments passed to this function are:
+ * - `outerValue`: the value that came from the source
+ * - `innerValue`: the value that came from the projected Observable
+ * - `outerIndex`: the "index" of the value that came from the source
+ * - `innerIndex`: the "index" of the value from the projected Observable
+ * @return {Observable} An Observable that emits items from the given
+ * `innerObservable` (and optionally transformed through `resultSelector`) every
+ * time a value is emitted on the source Observable, and taking only the values
+ * from the most recently projected inner Observable.
+ * @method switchMapTo
+ * @owner Observable
+ */
+function switchMapTo(innerObservable, resultSelector) {
+    return this.lift(new SwitchMapToOperator(innerObservable, resultSelector));
+}
+exports.switchMapTo = switchMapTo;
+var SwitchMapToOperator = (function () {
+    function SwitchMapToOperator(observable, resultSelector) {
+        this.observable = observable;
+        this.resultSelector = resultSelector;
+    }
+    SwitchMapToOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new SwitchMapToSubscriber(subscriber, this.observable, this.resultSelector));
+    };
+    return SwitchMapToOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SwitchMapToSubscriber = (function (_super) {
+    __extends(SwitchMapToSubscriber, _super);
+    function SwitchMapToSubscriber(destination, inner, resultSelector) {
+        _super.call(this, destination);
+        this.inner = inner;
+        this.resultSelector = resultSelector;
+        this.index = 0;
+    }
+    SwitchMapToSubscriber.prototype._next = function (value) {
+        var innerSubscription = this.innerSubscription;
+        if (innerSubscription) {
+            innerSubscription.unsubscribe();
+        }
+        this.add(this.innerSubscription = subscribeToResult_1.subscribeToResult(this, this.inner, value, this.index++));
+    };
+    SwitchMapToSubscriber.prototype._complete = function () {
+        var innerSubscription = this.innerSubscription;
+        if (!innerSubscription || innerSubscription.closed) {
+            _super.prototype._complete.call(this);
+        }
+    };
+    SwitchMapToSubscriber.prototype._unsubscribe = function () {
+        this.innerSubscription = null;
+    };
+    SwitchMapToSubscriber.prototype.notifyComplete = function (innerSub) {
+        this.remove(innerSub);
+        this.innerSubscription = null;
+        if (this.isStopped) {
+            _super.prototype._complete.call(this);
+        }
+    };
+    SwitchMapToSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        var _a = this, resultSelector = _a.resultSelector, destination = _a.destination;
+        if (resultSelector) {
+            this.tryResultSelector(outerValue, innerValue, outerIndex, innerIndex);
+        }
+        else {
+            destination.next(innerValue);
+        }
+    };
+    SwitchMapToSubscriber.prototype.tryResultSelector = function (outerValue, innerValue, outerIndex, innerIndex) {
+        var _a = this, resultSelector = _a.resultSelector, destination = _a.destination;
+        var result;
+        try {
+            result = resultSelector(outerValue, innerValue, outerIndex, innerIndex);
+        }
+        catch (err) {
+            destination.error(err);
+            return;
+        }
+        destination.next(result);
+    };
+    return SwitchMapToSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],336:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var ArgumentOutOfRangeError_1 = require('../util/ArgumentOutOfRangeError');
+var EmptyObservable_1 = require('../observable/EmptyObservable');
+/**
+ * Emits only the first `count` values emitted by the source Observable.
+ *
+ * <span class="informal">Takes the first `count` values from the source, then
+ * completes.</span>
+ *
+ * <img src="./img/take.png" width="100%">
+ *
+ * `take` returns an Observable that emits only the first `count` values emitted
+ * by the source Observable. If the source emits fewer than `count` values then
+ * all of its values are emitted. After that, it completes, regardless if the
+ * source completes.
+ *
+ * @example <caption>Take the first 5 seconds of an infinite 1-second interval Observable</caption>
+ * var interval = Rx.Observable.interval(1000);
+ * var five = interval.take(5);
+ * five.subscribe(x => console.log(x));
+ *
+ * @see {@link takeLast}
+ * @see {@link takeUntil}
+ * @see {@link takeWhile}
+ * @see {@link skip}
+ *
+ * @throws {ArgumentOutOfRangeError} When using `take(i)`, it delivers an
+ * ArgumentOutOrRangeError to the Observer's `error` callback if `i < 0`.
+ *
+ * @param {number} count The maximum number of `next` values to emit.
+ * @return {Observable<T>} An Observable that emits only the first `count`
+ * values emitted by the source Observable, or all of the values from the source
+ * if the source emits fewer than `count` values.
+ * @method take
+ * @owner Observable
+ */
+function take(count) {
+    if (count === 0) {
+        return new EmptyObservable_1.EmptyObservable();
+    }
+    else {
+        return this.lift(new TakeOperator(count));
+    }
+}
+exports.take = take;
+var TakeOperator = (function () {
+    function TakeOperator(total) {
+        this.total = total;
+        if (this.total < 0) {
+            throw new ArgumentOutOfRangeError_1.ArgumentOutOfRangeError;
+        }
+    }
+    TakeOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new TakeSubscriber(subscriber, this.total));
+    };
+    return TakeOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var TakeSubscriber = (function (_super) {
+    __extends(TakeSubscriber, _super);
+    function TakeSubscriber(destination, total) {
+        _super.call(this, destination);
+        this.total = total;
+        this.count = 0;
+    }
+    TakeSubscriber.prototype._next = function (value) {
+        var total = this.total;
+        var count = ++this.count;
+        if (count <= total) {
+            this.destination.next(value);
+            if (count === total) {
+                this.destination.complete();
+                this.unsubscribe();
+            }
+        }
+    };
+    return TakeSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../observable/EmptyObservable":207,"../util/ArgumentOutOfRangeError":379}],337:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var ArgumentOutOfRangeError_1 = require('../util/ArgumentOutOfRangeError');
+var EmptyObservable_1 = require('../observable/EmptyObservable');
+/**
+ * Emits only the last `count` values emitted by the source Observable.
+ *
+ * <span class="informal">Remembers the latest `count` values, then emits those
+ * only when the source completes.</span>
+ *
+ * <img src="./img/takeLast.png" width="100%">
+ *
+ * `takeLast` returns an Observable that emits at most the last `count` values
+ * emitted by the source Observable. If the source emits fewer than `count`
+ * values then all of its values are emitted. This operator must wait until the
+ * `complete` notification emission from the source in order to emit the `next`
+ * values on the output Observable, because otherwise it is impossible to know
+ * whether or not more values will be emitted on the source. For this reason,
+ * all values are emitted synchronously, followed by the complete notification.
+ *
+ * @example <caption>Take the last 3 values of an Observable with many values</caption>
+ * var many = Rx.Observable.range(1, 100);
+ * var lastThree = many.takeLast(3);
+ * lastThree.subscribe(x => console.log(x));
+ *
+ * @see {@link take}
+ * @see {@link takeUntil}
+ * @see {@link takeWhile}
+ * @see {@link skip}
+ *
+ * @throws {ArgumentOutOfRangeError} When using `takeLast(i)`, it delivers an
+ * ArgumentOutOrRangeError to the Observer's `error` callback if `i < 0`.
+ *
+ * @param {number} count The maximum number of values to emit from the end of
+ * the sequence of values emitted by the source Observable.
+ * @return {Observable<T>} An Observable that emits at most the last count
+ * values emitted by the source Observable.
+ * @method takeLast
+ * @owner Observable
+ */
+function takeLast(count) {
+    if (count === 0) {
+        return new EmptyObservable_1.EmptyObservable();
+    }
+    else {
+        return this.lift(new TakeLastOperator(count));
+    }
+}
+exports.takeLast = takeLast;
+var TakeLastOperator = (function () {
+    function TakeLastOperator(total) {
+        this.total = total;
+        if (this.total < 0) {
+            throw new ArgumentOutOfRangeError_1.ArgumentOutOfRangeError;
+        }
+    }
+    TakeLastOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new TakeLastSubscriber(subscriber, this.total));
+    };
+    return TakeLastOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var TakeLastSubscriber = (function (_super) {
+    __extends(TakeLastSubscriber, _super);
+    function TakeLastSubscriber(destination, total) {
+        _super.call(this, destination);
+        this.total = total;
+        this.ring = new Array();
+        this.count = 0;
+    }
+    TakeLastSubscriber.prototype._next = function (value) {
+        var ring = this.ring;
+        var total = this.total;
+        var count = this.count++;
+        if (ring.length < total) {
+            ring.push(value);
+        }
+        else {
+            var index = count % total;
+            ring[index] = value;
+        }
+    };
+    TakeLastSubscriber.prototype._complete = function () {
+        var destination = this.destination;
+        var count = this.count;
+        if (count > 0) {
+            var total = this.count >= this.total ? this.total : this.count;
+            var ring = this.ring;
+            for (var i = 0; i < total; i++) {
+                var idx = (count++) % total;
+                destination.next(ring[idx]);
+            }
+        }
+        destination.complete();
+    };
+    return TakeLastSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../observable/EmptyObservable":207,"../util/ArgumentOutOfRangeError":379}],338:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Emits the values emitted by the source Observable until a `notifier`
+ * Observable emits a value.
+ *
+ * <span class="informal">Lets values pass until a second Observable,
+ * `notifier`, emits something. Then, it completes.</span>
+ *
+ * <img src="./img/takeUntil.png" width="100%">
+ *
+ * `takeUntil` subscribes and begins mirroring the source Observable. It also
+ * monitors a second Observable, `notifier` that you provide. If the `notifier`
+ * emits a value or a complete notification, the output Observable stops
+ * mirroring the source Observable and completes.
+ *
+ * @example <caption>Tick every second until the first click happens</caption>
+ * var interval = Rx.Observable.interval(1000);
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = interval.takeUntil(clicks);
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link take}
+ * @see {@link takeLast}
+ * @see {@link takeWhile}
+ * @see {@link skip}
+ *
+ * @param {Observable} notifier The Observable whose first emitted value will
+ * cause the output Observable of `takeUntil` to stop emitting values from the
+ * source Observable.
+ * @return {Observable<T>} An Observable that emits the values from the source
+ * Observable until such time as `notifier` emits its first value.
+ * @method takeUntil
+ * @owner Observable
+ */
+function takeUntil(notifier) {
+    return this.lift(new TakeUntilOperator(notifier));
+}
+exports.takeUntil = takeUntil;
+var TakeUntilOperator = (function () {
+    function TakeUntilOperator(notifier) {
+        this.notifier = notifier;
+    }
+    TakeUntilOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new TakeUntilSubscriber(subscriber, this.notifier));
+    };
+    return TakeUntilOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var TakeUntilSubscriber = (function (_super) {
+    __extends(TakeUntilSubscriber, _super);
+    function TakeUntilSubscriber(destination, notifier) {
+        _super.call(this, destination);
+        this.notifier = notifier;
+        this.add(subscribeToResult_1.subscribeToResult(this, notifier));
+    }
+    TakeUntilSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.complete();
+    };
+    TakeUntilSubscriber.prototype.notifyComplete = function () {
+        // noop
+    };
+    return TakeUntilSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],339:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/**
+ * Emits values emitted by the source Observable so long as each value satisfies
+ * the given `predicate`, and then completes as soon as this `predicate` is not
+ * satisfied.
+ *
+ * <span class="informal">Takes values from the source only while they pass the
+ * condition given. When the first value does not satisfy, it completes.</span>
+ *
+ * <img src="./img/takeWhile.png" width="100%">
+ *
+ * `takeWhile` subscribes and begins mirroring the source Observable. Each value
+ * emitted on the source is given to the `predicate` function which returns a
+ * boolean, representing a condition to be satisfied by the source values. The
+ * output Observable emits the source values until such time as the `predicate`
+ * returns false, at which point `takeWhile` stops mirroring the source
+ * Observable and completes the output Observable.
+ *
+ * @example <caption>Emit click events only while the clientX property is greater than 200</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.takeWhile(ev => ev.clientX > 200);
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link take}
+ * @see {@link takeLast}
+ * @see {@link takeUntil}
+ * @see {@link skip}
+ *
+ * @param {function(value: T, index: number): boolean} predicate A function that
+ * evaluates a value emitted by the source Observable and returns a boolean.
+ * Also takes the (zero-based) index as the second argument.
+ * @return {Observable<T>} An Observable that emits the values from the source
+ * Observable so long as each value satisfies the condition defined by the
+ * `predicate`, then completes.
+ * @method takeWhile
+ * @owner Observable
+ */
+function takeWhile(predicate) {
+    return this.lift(new TakeWhileOperator(predicate));
+}
+exports.takeWhile = takeWhile;
+var TakeWhileOperator = (function () {
+    function TakeWhileOperator(predicate) {
+        this.predicate = predicate;
+    }
+    TakeWhileOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new TakeWhileSubscriber(subscriber, this.predicate));
+    };
+    return TakeWhileOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var TakeWhileSubscriber = (function (_super) {
+    __extends(TakeWhileSubscriber, _super);
+    function TakeWhileSubscriber(destination, predicate) {
+        _super.call(this, destination);
+        this.predicate = predicate;
+        this.index = 0;
+    }
+    TakeWhileSubscriber.prototype._next = function (value) {
+        var destination = this.destination;
+        var result;
+        try {
+            result = this.predicate(value, this.index++);
+        }
+        catch (err) {
+            destination.error(err);
+            return;
+        }
+        this.nextOrComplete(value, result);
+    };
+    TakeWhileSubscriber.prototype.nextOrComplete = function (value, predicateResult) {
+        var destination = this.destination;
+        if (Boolean(predicateResult)) {
+            destination.next(value);
+        }
+        else {
+            destination.complete();
+        }
+    };
+    return TakeWhileSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],340:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+exports.defaultThrottleConfig = {
+    leading: true,
+    trailing: false
+};
+/**
+ * Emits a value from the source Observable, then ignores subsequent source
+ * values for a duration determined by another Observable, then repeats this
+ * process.
+ *
+ * <span class="informal">It's like {@link throttleTime}, but the silencing
+ * duration is determined by a second Observable.</span>
+ *
+ * <img src="./img/throttle.png" width="100%">
+ *
+ * `throttle` emits the source Observable values on the output Observable
+ * when its internal timer is disabled, and ignores source values when the timer
+ * is enabled. Initially, the timer is disabled. As soon as the first source
+ * value arrives, it is forwarded to the output Observable, and then the timer
+ * is enabled by calling the `durationSelector` function with the source value,
+ * which returns the "duration" Observable. When the duration Observable emits a
+ * value or completes, the timer is disabled, and this process repeats for the
+ * next source value.
+ *
+ * @example <caption>Emit clicks at a rate of at most one click per second</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.throttle(ev => Rx.Observable.interval(1000));
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link audit}
+ * @see {@link debounce}
+ * @see {@link delayWhen}
+ * @see {@link sample}
+ * @see {@link throttleTime}
+ *
+ * @param {function(value: T): SubscribableOrPromise} durationSelector A function
+ * that receives a value from the source Observable, for computing the silencing
+ * duration for each source value, returned as an Observable or a Promise.
+ * @param {Object} config a configuration object to define `leading` and `trailing` behavior. Defaults
+ * to `{ leading: true, trailing: false }`.
+ * @return {Observable<T>} An Observable that performs the throttle operation to
+ * limit the rate of emissions from the source.
+ * @method throttle
+ * @owner Observable
+ */
+function throttle(durationSelector, config) {
+    if (config === void 0) { config = exports.defaultThrottleConfig; }
+    return this.lift(new ThrottleOperator(durationSelector, config.leading, config.trailing));
+}
+exports.throttle = throttle;
+var ThrottleOperator = (function () {
+    function ThrottleOperator(durationSelector, leading, trailing) {
+        this.durationSelector = durationSelector;
+        this.leading = leading;
+        this.trailing = trailing;
+    }
+    ThrottleOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new ThrottleSubscriber(subscriber, this.durationSelector, this.leading, this.trailing));
+    };
+    return ThrottleOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc
+ * @ignore
+ * @extends {Ignored}
+ */
+var ThrottleSubscriber = (function (_super) {
+    __extends(ThrottleSubscriber, _super);
+    function ThrottleSubscriber(destination, durationSelector, _leading, _trailing) {
+        _super.call(this, destination);
+        this.destination = destination;
+        this.durationSelector = durationSelector;
+        this._leading = _leading;
+        this._trailing = _trailing;
+        this._hasTrailingValue = false;
+    }
+    ThrottleSubscriber.prototype._next = function (value) {
+        if (this.throttled) {
+            if (this._trailing) {
+                this._hasTrailingValue = true;
+                this._trailingValue = value;
+            }
+        }
+        else {
+            var duration = this.tryDurationSelector(value);
+            if (duration) {
+                this.add(this.throttled = subscribeToResult_1.subscribeToResult(this, duration));
+            }
+            if (this._leading) {
+                this.destination.next(value);
+                if (this._trailing) {
+                    this._hasTrailingValue = true;
+                    this._trailingValue = value;
+                }
+            }
+        }
+    };
+    ThrottleSubscriber.prototype.tryDurationSelector = function (value) {
+        try {
+            return this.durationSelector(value);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return null;
+        }
+    };
+    ThrottleSubscriber.prototype._unsubscribe = function () {
+        var _a = this, throttled = _a.throttled, _trailingValue = _a._trailingValue, _hasTrailingValue = _a._hasTrailingValue, _trailing = _a._trailing;
+        this._trailingValue = null;
+        this._hasTrailingValue = false;
+        if (throttled) {
+            this.remove(throttled);
+            this.throttled = null;
+            throttled.unsubscribe();
+        }
+    };
+    ThrottleSubscriber.prototype._sendTrailing = function () {
+        var _a = this, destination = _a.destination, throttled = _a.throttled, _trailing = _a._trailing, _trailingValue = _a._trailingValue, _hasTrailingValue = _a._hasTrailingValue;
+        if (throttled && _trailing && _hasTrailingValue) {
+            destination.next(_trailingValue);
+            this._trailingValue = null;
+            this._hasTrailingValue = false;
+        }
+    };
+    ThrottleSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this._sendTrailing();
+        this._unsubscribe();
+    };
+    ThrottleSubscriber.prototype.notifyComplete = function () {
+        this._sendTrailing();
+        this._unsubscribe();
+    };
+    return ThrottleSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],341:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var async_1 = require('../scheduler/async');
+var throttle_1 = require('./throttle');
+/**
+ * Emits a value from the source Observable, then ignores subsequent source
+ * values for `duration` milliseconds, then repeats this process.
+ *
+ * <span class="informal">Lets a value pass, then ignores source values for the
+ * next `duration` milliseconds.</span>
+ *
+ * <img src="./img/throttleTime.png" width="100%">
+ *
+ * `throttleTime` emits the source Observable values on the output Observable
+ * when its internal timer is disabled, and ignores source values when the timer
+ * is enabled. Initially, the timer is disabled. As soon as the first source
+ * value arrives, it is forwarded to the output Observable, and then the timer
+ * is enabled. After `duration` milliseconds (or the time unit determined
+ * internally by the optional `scheduler`) has passed, the timer is disabled,
+ * and this process repeats for the next source value. Optionally takes a
+ * {@link IScheduler} for managing timers.
+ *
+ * @example <caption>Emit clicks at a rate of at most one click per second</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.throttleTime(1000);
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link auditTime}
+ * @see {@link debounceTime}
+ * @see {@link delay}
+ * @see {@link sampleTime}
+ * @see {@link throttle}
+ *
+ * @param {number} duration Time to wait before emitting another value after
+ * emitting the last value, measured in milliseconds or the time unit determined
+ * internally by the optional `scheduler`.
+ * @param {Scheduler} [scheduler=async] The {@link IScheduler} to use for
+ * managing the timers that handle the throttling.
+ * @return {Observable<T>} An Observable that performs the throttle operation to
+ * limit the rate of emissions from the source.
+ * @method throttleTime
+ * @owner Observable
+ */
+function throttleTime(duration, scheduler, config) {
+    if (scheduler === void 0) { scheduler = async_1.async; }
+    if (config === void 0) { config = throttle_1.defaultThrottleConfig; }
+    return this.lift(new ThrottleTimeOperator(duration, scheduler, config.leading, config.trailing));
+}
+exports.throttleTime = throttleTime;
+var ThrottleTimeOperator = (function () {
+    function ThrottleTimeOperator(duration, scheduler, leading, trailing) {
+        this.duration = duration;
+        this.scheduler = scheduler;
+        this.leading = leading;
+        this.trailing = trailing;
+    }
+    ThrottleTimeOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new ThrottleTimeSubscriber(subscriber, this.duration, this.scheduler, this.leading, this.trailing));
+    };
+    return ThrottleTimeOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var ThrottleTimeSubscriber = (function (_super) {
+    __extends(ThrottleTimeSubscriber, _super);
+    function ThrottleTimeSubscriber(destination, duration, scheduler, leading, trailing) {
+        _super.call(this, destination);
+        this.duration = duration;
+        this.scheduler = scheduler;
+        this.leading = leading;
+        this.trailing = trailing;
+        this._hasTrailingValue = false;
+        this._trailingValue = null;
+    }
+    ThrottleTimeSubscriber.prototype._next = function (value) {
+        if (this.throttled) {
+            if (this.trailing) {
+                this._trailingValue = value;
+                this._hasTrailingValue = true;
+            }
+        }
+        else {
+            this.add(this.throttled = this.scheduler.schedule(dispatchNext, this.duration, { subscriber: this }));
+            if (this.leading) {
+                this.destination.next(value);
+            }
+        }
+    };
+    ThrottleTimeSubscriber.prototype.clearThrottle = function () {
+        var throttled = this.throttled;
+        if (throttled) {
+            if (this.trailing && this._hasTrailingValue) {
+                this.destination.next(this._trailingValue);
+                this._trailingValue = null;
+                this._hasTrailingValue = false;
+            }
+            throttled.unsubscribe();
+            this.remove(throttled);
+            this.throttled = null;
+        }
+    };
+    return ThrottleTimeSubscriber;
+}(Subscriber_1.Subscriber));
+function dispatchNext(arg) {
+    var subscriber = arg.subscriber;
+    subscriber.clearThrottle();
+}
+
+},{"../Subscriber":70,"../scheduler/async":368,"./throttle":340}],342:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var async_1 = require('../scheduler/async');
+/**
+ * @param scheduler
+ * @return {Observable<TimeInterval<any>>|WebSocketSubject<T>|Observable<T>}
+ * @method timeInterval
+ * @owner Observable
+ */
+function timeInterval(scheduler) {
+    if (scheduler === void 0) { scheduler = async_1.async; }
+    return this.lift(new TimeIntervalOperator(scheduler));
+}
+exports.timeInterval = timeInterval;
+var TimeInterval = (function () {
+    function TimeInterval(value, interval) {
+        this.value = value;
+        this.interval = interval;
+    }
+    return TimeInterval;
+}());
+exports.TimeInterval = TimeInterval;
+;
+var TimeIntervalOperator = (function () {
+    function TimeIntervalOperator(scheduler) {
+        this.scheduler = scheduler;
+    }
+    TimeIntervalOperator.prototype.call = function (observer, source) {
+        return source.subscribe(new TimeIntervalSubscriber(observer, this.scheduler));
+    };
+    return TimeIntervalOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var TimeIntervalSubscriber = (function (_super) {
+    __extends(TimeIntervalSubscriber, _super);
+    function TimeIntervalSubscriber(destination, scheduler) {
+        _super.call(this, destination);
+        this.scheduler = scheduler;
+        this.lastTime = 0;
+        this.lastTime = scheduler.now();
+    }
+    TimeIntervalSubscriber.prototype._next = function (value) {
+        var now = this.scheduler.now();
+        var span = now - this.lastTime;
+        this.lastTime = now;
+        this.destination.next(new TimeInterval(value, span));
+    };
+    return TimeIntervalSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../scheduler/async":368}],343:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var async_1 = require('../scheduler/async');
+var isDate_1 = require('../util/isDate');
+var Subscriber_1 = require('../Subscriber');
+var TimeoutError_1 = require('../util/TimeoutError');
+/**
+ *
+ * Errors if Observable does not emit a value in given time span.
+ *
+ * <span class="informal">Timeouts on Observable that doesn't emit values fast enough.</span>
+ *
+ * <img src="./img/timeout.png" width="100%">
+ *
+ * `timeout` operator accepts as an argument either a number or a Date.
+ *
+ * If number was provided, it returns an Observable that behaves like a source
+ * Observable, unless there is a period of time where there is no value emitted.
+ * So if you provide `100` as argument and first value comes after 50ms from
+ * the moment of subscription, this value will be simply re-emitted by the resulting
+ * Observable. If however after that 100ms passes without a second value being emitted,
+ * stream will end with an error and source Observable will be unsubscribed.
+ * These checks are performed throughout whole lifecycle of Observable - from the moment
+ * it was subscribed to, until it completes or errors itself. Thus every value must be
+ * emitted within specified period since previous value.
+ *
+ * If provided argument was Date, returned Observable behaves differently. It throws
+ * if Observable did not complete before provided Date. This means that periods between
+ * emission of particular values do not matter in this case. If Observable did not complete
+ * before provided Date, source Observable will be unsubscribed. Other than that, resulting
+ * stream behaves just as source Observable.
+ *
+ * `timeout` accepts also a Scheduler as a second parameter. It is used to schedule moment (or moments)
+ * when returned Observable will check if source stream emitted value or completed.
+ *
+ * @example <caption>Check if ticks are emitted within certain timespan</caption>
+ * const seconds = Rx.Observable.interval(1000);
+ *
+ * seconds.timeout(1100) // Let's use bigger timespan to be safe,
+ *                       // since `interval` might fire a bit later then scheduled.
+ * .subscribe(
+ *     value => console.log(value), // Will emit numbers just as regular `interval` would.
+ *     err => console.log(err) // Will never be called.
+ * );
+ *
+ * seconds.timeout(900).subscribe(
+ *     value => console.log(value), // Will never be called.
+ *     err => console.log(err) // Will emit error before even first value is emitted,
+ *                             // since it did not arrive within 900ms period.
+ * );
+ *
+ * @example <caption>Use Date to check if Observable completed</caption>
+ * const seconds = Rx.Observable.interval(1000);
+ *
+ * seconds.timeout(new Date("December 17, 2020 03:24:00"))
+ * .subscribe(
+ *     value => console.log(value), // Will emit values as regular `interval` would
+ *                                  // until December 17, 2020 at 03:24:00.
+ *     err => console.log(err) // On December 17, 2020 at 03:24:00 it will emit an error,
+ *                             // since Observable did not complete by then.
+ * );
+ *
+ * @see {@link timeoutWith}
+ *
+ * @param {number|Date} due Number specifying period within which Observable must emit values
+ *                          or Date specifying before when Observable should complete
+ * @param {Scheduler} [scheduler] Scheduler controlling when timeout checks occur.
+ * @return {Observable<T>} Observable that mirrors behaviour of source, unless timeout checks fail.
+ * @method timeout
+ * @owner Observable
+ */
+function timeout(due, scheduler) {
+    if (scheduler === void 0) { scheduler = async_1.async; }
+    var absoluteTimeout = isDate_1.isDate(due);
+    var waitFor = absoluteTimeout ? (+due - scheduler.now()) : Math.abs(due);
+    return this.lift(new TimeoutOperator(waitFor, absoluteTimeout, scheduler, new TimeoutError_1.TimeoutError()));
+}
+exports.timeout = timeout;
+var TimeoutOperator = (function () {
+    function TimeoutOperator(waitFor, absoluteTimeout, scheduler, errorInstance) {
+        this.waitFor = waitFor;
+        this.absoluteTimeout = absoluteTimeout;
+        this.scheduler = scheduler;
+        this.errorInstance = errorInstance;
+    }
+    TimeoutOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new TimeoutSubscriber(subscriber, this.absoluteTimeout, this.waitFor, this.scheduler, this.errorInstance));
+    };
+    return TimeoutOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var TimeoutSubscriber = (function (_super) {
+    __extends(TimeoutSubscriber, _super);
+    function TimeoutSubscriber(destination, absoluteTimeout, waitFor, scheduler, errorInstance) {
+        _super.call(this, destination);
+        this.absoluteTimeout = absoluteTimeout;
+        this.waitFor = waitFor;
+        this.scheduler = scheduler;
+        this.errorInstance = errorInstance;
+        this.action = null;
+        this.scheduleTimeout();
+    }
+    TimeoutSubscriber.dispatchTimeout = function (subscriber) {
+        subscriber.error(subscriber.errorInstance);
+    };
+    TimeoutSubscriber.prototype.scheduleTimeout = function () {
+        var action = this.action;
+        if (action) {
+            // Recycle the action if we've already scheduled one. All the production
+            // Scheduler Actions mutate their state/delay time and return themeselves.
+            // VirtualActions are immutable, so they create and return a clone. In this
+            // case, we need to set the action reference to the most recent VirtualAction,
+            // to ensure that's the one we clone from next time.
+            this.action = action.schedule(this, this.waitFor);
+        }
+        else {
+            this.add(this.action = this.scheduler.schedule(TimeoutSubscriber.dispatchTimeout, this.waitFor, this));
+        }
+    };
+    TimeoutSubscriber.prototype._next = function (value) {
+        if (!this.absoluteTimeout) {
+            this.scheduleTimeout();
+        }
+        _super.prototype._next.call(this, value);
+    };
+    TimeoutSubscriber.prototype._unsubscribe = function () {
+        this.action = null;
+        this.scheduler = null;
+        this.errorInstance = null;
+    };
+    return TimeoutSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../scheduler/async":368,"../util/TimeoutError":387,"../util/isDate":394}],344:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var async_1 = require('../scheduler/async');
+var isDate_1 = require('../util/isDate');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/* tslint:enable:max-line-length */
+/**
+ * @param due
+ * @param withObservable
+ * @param scheduler
+ * @return {Observable<R>|WebSocketSubject<T>|Observable<T>}
+ * @method timeoutWith
+ * @owner Observable
+ */
+function timeoutWith(due, withObservable, scheduler) {
+    if (scheduler === void 0) { scheduler = async_1.async; }
+    var absoluteTimeout = isDate_1.isDate(due);
+    var waitFor = absoluteTimeout ? (+due - scheduler.now()) : Math.abs(due);
+    return this.lift(new TimeoutWithOperator(waitFor, absoluteTimeout, withObservable, scheduler));
+}
+exports.timeoutWith = timeoutWith;
+var TimeoutWithOperator = (function () {
+    function TimeoutWithOperator(waitFor, absoluteTimeout, withObservable, scheduler) {
+        this.waitFor = waitFor;
+        this.absoluteTimeout = absoluteTimeout;
+        this.withObservable = withObservable;
+        this.scheduler = scheduler;
+    }
+    TimeoutWithOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new TimeoutWithSubscriber(subscriber, this.absoluteTimeout, this.waitFor, this.withObservable, this.scheduler));
+    };
+    return TimeoutWithOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var TimeoutWithSubscriber = (function (_super) {
+    __extends(TimeoutWithSubscriber, _super);
+    function TimeoutWithSubscriber(destination, absoluteTimeout, waitFor, withObservable, scheduler) {
+        _super.call(this, destination);
+        this.absoluteTimeout = absoluteTimeout;
+        this.waitFor = waitFor;
+        this.withObservable = withObservable;
+        this.scheduler = scheduler;
+        this.action = null;
+        this.scheduleTimeout();
+    }
+    TimeoutWithSubscriber.dispatchTimeout = function (subscriber) {
+        var withObservable = subscriber.withObservable;
+        subscriber._unsubscribeAndRecycle();
+        subscriber.add(subscribeToResult_1.subscribeToResult(subscriber, withObservable));
+    };
+    TimeoutWithSubscriber.prototype.scheduleTimeout = function () {
+        var action = this.action;
+        if (action) {
+            // Recycle the action if we've already scheduled one. All the production
+            // Scheduler Actions mutate their state/delay time and return themeselves.
+            // VirtualActions are immutable, so they create and return a clone. In this
+            // case, we need to set the action reference to the most recent VirtualAction,
+            // to ensure that's the one we clone from next time.
+            this.action = action.schedule(this, this.waitFor);
+        }
+        else {
+            this.add(this.action = this.scheduler.schedule(TimeoutWithSubscriber.dispatchTimeout, this.waitFor, this));
+        }
+    };
+    TimeoutWithSubscriber.prototype._next = function (value) {
+        if (!this.absoluteTimeout) {
+            this.scheduleTimeout();
+        }
+        _super.prototype._next.call(this, value);
+    };
+    TimeoutWithSubscriber.prototype._unsubscribe = function () {
+        this.action = null;
+        this.scheduler = null;
+        this.withObservable = null;
+    };
+    return TimeoutWithSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../scheduler/async":368,"../util/isDate":394,"../util/subscribeToResult":403}],345:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var async_1 = require('../scheduler/async');
+/**
+ * @param scheduler
+ * @return {Observable<Timestamp<any>>|WebSocketSubject<T>|Observable<T>}
+ * @method timestamp
+ * @owner Observable
+ */
+function timestamp(scheduler) {
+    if (scheduler === void 0) { scheduler = async_1.async; }
+    return this.lift(new TimestampOperator(scheduler));
+}
+exports.timestamp = timestamp;
+var Timestamp = (function () {
+    function Timestamp(value, timestamp) {
+        this.value = value;
+        this.timestamp = timestamp;
+    }
+    return Timestamp;
+}());
+exports.Timestamp = Timestamp;
+;
+var TimestampOperator = (function () {
+    function TimestampOperator(scheduler) {
+        this.scheduler = scheduler;
+    }
+    TimestampOperator.prototype.call = function (observer, source) {
+        return source.subscribe(new TimestampSubscriber(observer, this.scheduler));
+    };
+    return TimestampOperator;
+}());
+var TimestampSubscriber = (function (_super) {
+    __extends(TimestampSubscriber, _super);
+    function TimestampSubscriber(destination, scheduler) {
+        _super.call(this, destination);
+        this.scheduler = scheduler;
+    }
+    TimestampSubscriber.prototype._next = function (value) {
+        var now = this.scheduler.now();
+        this.destination.next(new Timestamp(value, now));
+    };
+    return TimestampSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70,"../scheduler/async":368}],346:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+/**
+ * @return {Observable<any[]>|WebSocketSubject<T>|Observable<T>}
+ * @method toArray
+ * @owner Observable
+ */
+function toArray() {
+    return this.lift(new ToArrayOperator());
+}
+exports.toArray = toArray;
+var ToArrayOperator = (function () {
+    function ToArrayOperator() {
+    }
+    ToArrayOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new ToArraySubscriber(subscriber));
+    };
+    return ToArrayOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var ToArraySubscriber = (function (_super) {
+    __extends(ToArraySubscriber, _super);
+    function ToArraySubscriber(destination) {
+        _super.call(this, destination);
+        this.array = [];
+    }
+    ToArraySubscriber.prototype._next = function (x) {
+        this.array.push(x);
+    };
+    ToArraySubscriber.prototype._complete = function () {
+        this.destination.next(this.array);
+        this.destination.complete();
+    };
+    return ToArraySubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subscriber":70}],347:[function(require,module,exports){
+"use strict";
+var root_1 = require('../util/root');
+/* tslint:enable:max-line-length */
+/**
+ * Converts an Observable sequence to a ES2015 compliant promise.
+ *
+ * @example
+ * // Using normal ES2015
+ * let source = Rx.Observable
+ *   .of(42)
+ *   .toPromise();
+ *
+ * source.then((value) => console.log('Value: %s', value));
+ * // => Value: 42
+ *
+ * // Rejected Promise
+ * // Using normal ES2015
+ * let source = Rx.Observable
+ *   .throw(new Error('woops'))
+ *   .toPromise();
+ *
+ * source
+ *   .then((value) => console.log('Value: %s', value))
+ *   .catch((err) => console.log('Error: %s', err));
+ * // => Error: Error: woops
+ *
+ * // Setting via the config
+ * Rx.config.Promise = RSVP.Promise;
+ *
+ * let source = Rx.Observable
+ *   .of(42)
+ *   .toPromise();
+ *
+ * source.then((value) => console.log('Value: %s', value));
+ * // => Value: 42
+ *
+ * // Setting via the method
+ * let source = Rx.Observable
+ *   .of(42)
+ *   .toPromise(RSVP.Promise);
+ *
+ * source.then((value) => console.log('Value: %s', value));
+ * // => Value: 42
+ *
+ * @param {PromiseConstructor} [PromiseCtor] The constructor of the promise. If not provided,
+ * it will look for a constructor first in Rx.config.Promise then fall back to
+ * the native Promise constructor if available.
+ * @return {Promise<T>} An ES2015 compatible promise with the last value from
+ * the observable sequence.
+ * @method toPromise
+ * @owner Observable
+ */
+function toPromise(PromiseCtor) {
+    var _this = this;
+    if (!PromiseCtor) {
+        if (root_1.root.Rx && root_1.root.Rx.config && root_1.root.Rx.config.Promise) {
+            PromiseCtor = root_1.root.Rx.config.Promise;
+        }
+        else if (root_1.root.Promise) {
+            PromiseCtor = root_1.root.Promise;
+        }
+    }
+    if (!PromiseCtor) {
+        throw new Error('no Promise impl found');
+    }
+    return new PromiseCtor(function (resolve, reject) {
+        var value;
+        _this.subscribe(function (x) { return value = x; }, function (err) { return reject(err); }, function () { return resolve(value); });
+    });
+}
+exports.toPromise = toPromise;
+
+},{"../util/root":402}],348:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subject_1 = require('../Subject');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Branch out the source Observable values as a nested Observable whenever
+ * `windowBoundaries` emits.
+ *
+ * <span class="informal">It's like {@link buffer}, but emits a nested Observable
+ * instead of an array.</span>
+ *
+ * <img src="./img/window.png" width="100%">
+ *
+ * Returns an Observable that emits windows of items it collects from the source
+ * Observable. The output Observable emits connected, non-overlapping
+ * windows. It emits the current window and opens a new one whenever the
+ * Observable `windowBoundaries` emits an item. Because each window is an
+ * Observable, the output is a higher-order Observable.
+ *
+ * @example <caption>In every window of 1 second each, emit at most 2 click events</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var interval = Rx.Observable.interval(1000);
+ * var result = clicks.window(interval)
+ *   .map(win => win.take(2)) // each window has at most 2 emissions
+ *   .mergeAll(); // flatten the Observable-of-Observables
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link windowCount}
+ * @see {@link windowTime}
+ * @see {@link windowToggle}
+ * @see {@link windowWhen}
+ * @see {@link buffer}
+ *
+ * @param {Observable<any>} windowBoundaries An Observable that completes the
+ * previous window and starts a new window.
+ * @return {Observable<Observable<T>>} An Observable of windows, which are
+ * Observables emitting values of the source Observable.
+ * @method window
+ * @owner Observable
+ */
+function window(windowBoundaries) {
+    return this.lift(new WindowOperator(windowBoundaries));
+}
+exports.window = window;
+var WindowOperator = (function () {
+    function WindowOperator(windowBoundaries) {
+        this.windowBoundaries = windowBoundaries;
+    }
+    WindowOperator.prototype.call = function (subscriber, source) {
+        var windowSubscriber = new WindowSubscriber(subscriber);
+        var sourceSubscription = source.subscribe(windowSubscriber);
+        if (!sourceSubscription.closed) {
+            windowSubscriber.add(subscribeToResult_1.subscribeToResult(windowSubscriber, this.windowBoundaries));
+        }
+        return sourceSubscription;
+    };
+    return WindowOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var WindowSubscriber = (function (_super) {
+    __extends(WindowSubscriber, _super);
+    function WindowSubscriber(destination) {
+        _super.call(this, destination);
+        this.window = new Subject_1.Subject();
+        destination.next(this.window);
+    }
+    WindowSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.openWindow();
+    };
+    WindowSubscriber.prototype.notifyError = function (error, innerSub) {
+        this._error(error);
+    };
+    WindowSubscriber.prototype.notifyComplete = function (innerSub) {
+        this._complete();
+    };
+    WindowSubscriber.prototype._next = function (value) {
+        this.window.next(value);
+    };
+    WindowSubscriber.prototype._error = function (err) {
+        this.window.error(err);
+        this.destination.error(err);
+    };
+    WindowSubscriber.prototype._complete = function () {
+        this.window.complete();
+        this.destination.complete();
+    };
+    WindowSubscriber.prototype._unsubscribe = function () {
+        this.window = null;
+    };
+    WindowSubscriber.prototype.openWindow = function () {
+        var prevWindow = this.window;
+        if (prevWindow) {
+            prevWindow.complete();
+        }
+        var destination = this.destination;
+        var newWindow = this.window = new Subject_1.Subject();
+        destination.next(newWindow);
+    };
+    return WindowSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../Subject":68,"../util/subscribeToResult":403}],349:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscriber_1 = require('../Subscriber');
+var Subject_1 = require('../Subject');
+/**
+ * Branch out the source Observable values as a nested Observable with each
+ * nested Observable emitting at most `windowSize` values.
+ *
+ * <span class="informal">It's like {@link bufferCount}, but emits a nested
+ * Observable instead of an array.</span>
+ *
+ * <img src="./img/windowCount.png" width="100%">
+ *
+ * Returns an Observable that emits windows of items it collects from the source
+ * Observable. The output Observable emits windows every `startWindowEvery`
+ * items, each containing no more than `windowSize` items. When the source
+ * Observable completes or encounters an error, the output Observable emits
+ * the current window and propagates the notification from the source
+ * Observable. If `startWindowEvery` is not provided, then new windows are
+ * started immediately at the start of the source and when each window completes
+ * with size `windowSize`.
+ *
+ * @example <caption>Ignore every 3rd click event, starting from the first one</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.windowCount(3)
+ *   .map(win => win.skip(1)) // skip first of every 3 clicks
+ *   .mergeAll(); // flatten the Observable-of-Observables
+ * result.subscribe(x => console.log(x));
+ *
+ * @example <caption>Ignore every 3rd click event, starting from the third one</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks.windowCount(2, 3)
+ *   .mergeAll(); // flatten the Observable-of-Observables
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link window}
+ * @see {@link windowTime}
+ * @see {@link windowToggle}
+ * @see {@link windowWhen}
+ * @see {@link bufferCount}
+ *
+ * @param {number} windowSize The maximum number of values emitted by each
+ * window.
+ * @param {number} [startWindowEvery] Interval at which to start a new window.
+ * For example if `startWindowEvery` is `2`, then a new window will be started
+ * on every other value from the source. A new window is started at the
+ * beginning of the source by default.
+ * @return {Observable<Observable<T>>} An Observable of windows, which in turn
+ * are Observable of values.
+ * @method windowCount
+ * @owner Observable
+ */
+function windowCount(windowSize, startWindowEvery) {
+    if (startWindowEvery === void 0) { startWindowEvery = 0; }
+    return this.lift(new WindowCountOperator(windowSize, startWindowEvery));
+}
+exports.windowCount = windowCount;
+var WindowCountOperator = (function () {
+    function WindowCountOperator(windowSize, startWindowEvery) {
+        this.windowSize = windowSize;
+        this.startWindowEvery = startWindowEvery;
+    }
+    WindowCountOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new WindowCountSubscriber(subscriber, this.windowSize, this.startWindowEvery));
+    };
+    return WindowCountOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var WindowCountSubscriber = (function (_super) {
+    __extends(WindowCountSubscriber, _super);
+    function WindowCountSubscriber(destination, windowSize, startWindowEvery) {
+        _super.call(this, destination);
+        this.destination = destination;
+        this.windowSize = windowSize;
+        this.startWindowEvery = startWindowEvery;
+        this.windows = [new Subject_1.Subject()];
+        this.count = 0;
+        destination.next(this.windows[0]);
+    }
+    WindowCountSubscriber.prototype._next = function (value) {
+        var startWindowEvery = (this.startWindowEvery > 0) ? this.startWindowEvery : this.windowSize;
+        var destination = this.destination;
+        var windowSize = this.windowSize;
+        var windows = this.windows;
+        var len = windows.length;
+        for (var i = 0; i < len && !this.closed; i++) {
+            windows[i].next(value);
+        }
+        var c = this.count - windowSize + 1;
+        if (c >= 0 && c % startWindowEvery === 0 && !this.closed) {
+            windows.shift().complete();
+        }
+        if (++this.count % startWindowEvery === 0 && !this.closed) {
+            var window_1 = new Subject_1.Subject();
+            windows.push(window_1);
+            destination.next(window_1);
+        }
+    };
+    WindowCountSubscriber.prototype._error = function (err) {
+        var windows = this.windows;
+        if (windows) {
+            while (windows.length > 0 && !this.closed) {
+                windows.shift().error(err);
+            }
+        }
+        this.destination.error(err);
+    };
+    WindowCountSubscriber.prototype._complete = function () {
+        var windows = this.windows;
+        if (windows) {
+            while (windows.length > 0 && !this.closed) {
+                windows.shift().complete();
+            }
+        }
+        this.destination.complete();
+    };
+    WindowCountSubscriber.prototype._unsubscribe = function () {
+        this.count = 0;
+        this.windows = null;
+    };
+    return WindowCountSubscriber;
+}(Subscriber_1.Subscriber));
+
+},{"../Subject":68,"../Subscriber":70}],350:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subject_1 = require('../Subject');
+var async_1 = require('../scheduler/async');
+var Subscriber_1 = require('../Subscriber');
+var isNumeric_1 = require('../util/isNumeric');
+var isScheduler_1 = require('../util/isScheduler');
+function windowTime(windowTimeSpan) {
+    var scheduler = async_1.async;
+    var windowCreationInterval = null;
+    var maxWindowSize = Number.POSITIVE_INFINITY;
+    if (isScheduler_1.isScheduler(arguments[3])) {
+        scheduler = arguments[3];
+    }
+    if (isScheduler_1.isScheduler(arguments[2])) {
+        scheduler = arguments[2];
+    }
+    else if (isNumeric_1.isNumeric(arguments[2])) {
+        maxWindowSize = arguments[2];
+    }
+    if (isScheduler_1.isScheduler(arguments[1])) {
+        scheduler = arguments[1];
+    }
+    else if (isNumeric_1.isNumeric(arguments[1])) {
+        windowCreationInterval = arguments[1];
+    }
+    return this.lift(new WindowTimeOperator(windowTimeSpan, windowCreationInterval, maxWindowSize, scheduler));
+}
+exports.windowTime = windowTime;
+var WindowTimeOperator = (function () {
+    function WindowTimeOperator(windowTimeSpan, windowCreationInterval, maxWindowSize, scheduler) {
+        this.windowTimeSpan = windowTimeSpan;
+        this.windowCreationInterval = windowCreationInterval;
+        this.maxWindowSize = maxWindowSize;
+        this.scheduler = scheduler;
+    }
+    WindowTimeOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new WindowTimeSubscriber(subscriber, this.windowTimeSpan, this.windowCreationInterval, this.maxWindowSize, this.scheduler));
+    };
+    return WindowTimeOperator;
+}());
+var CountedSubject = (function (_super) {
+    __extends(CountedSubject, _super);
+    function CountedSubject() {
+        _super.apply(this, arguments);
+        this._numberOfNextedValues = 0;
+    }
+    CountedSubject.prototype.next = function (value) {
+        this._numberOfNextedValues++;
+        _super.prototype.next.call(this, value);
+    };
+    Object.defineProperty(CountedSubject.prototype, "numberOfNextedValues", {
+        get: function () {
+            return this._numberOfNextedValues;
+        },
+        enumerable: true,
+        configurable: true
+    });
+    return CountedSubject;
+}(Subject_1.Subject));
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var WindowTimeSubscriber = (function (_super) {
+    __extends(WindowTimeSubscriber, _super);
+    function WindowTimeSubscriber(destination, windowTimeSpan, windowCreationInterval, maxWindowSize, scheduler) {
+        _super.call(this, destination);
+        this.destination = destination;
+        this.windowTimeSpan = windowTimeSpan;
+        this.windowCreationInterval = windowCreationInterval;
+        this.maxWindowSize = maxWindowSize;
+        this.scheduler = scheduler;
+        this.windows = [];
+        var window = this.openWindow();
+        if (windowCreationInterval !== null && windowCreationInterval >= 0) {
+            var closeState = { subscriber: this, window: window, context: null };
+            var creationState = { windowTimeSpan: windowTimeSpan, windowCreationInterval: windowCreationInterval, subscriber: this, scheduler: scheduler };
+            this.add(scheduler.schedule(dispatchWindowClose, windowTimeSpan, closeState));
+            this.add(scheduler.schedule(dispatchWindowCreation, windowCreationInterval, creationState));
+        }
+        else {
+            var timeSpanOnlyState = { subscriber: this, window: window, windowTimeSpan: windowTimeSpan };
+            this.add(scheduler.schedule(dispatchWindowTimeSpanOnly, windowTimeSpan, timeSpanOnlyState));
+        }
+    }
+    WindowTimeSubscriber.prototype._next = function (value) {
+        var windows = this.windows;
+        var len = windows.length;
+        for (var i = 0; i < len; i++) {
+            var window_1 = windows[i];
+            if (!window_1.closed) {
+                window_1.next(value);
+                if (window_1.numberOfNextedValues >= this.maxWindowSize) {
+                    this.closeWindow(window_1);
+                }
+            }
+        }
+    };
+    WindowTimeSubscriber.prototype._error = function (err) {
+        var windows = this.windows;
+        while (windows.length > 0) {
+            windows.shift().error(err);
+        }
+        this.destination.error(err);
+    };
+    WindowTimeSubscriber.prototype._complete = function () {
+        var windows = this.windows;
+        while (windows.length > 0) {
+            var window_2 = windows.shift();
+            if (!window_2.closed) {
+                window_2.complete();
+            }
+        }
+        this.destination.complete();
+    };
+    WindowTimeSubscriber.prototype.openWindow = function () {
+        var window = new CountedSubject();
+        this.windows.push(window);
+        var destination = this.destination;
+        destination.next(window);
+        return window;
+    };
+    WindowTimeSubscriber.prototype.closeWindow = function (window) {
+        window.complete();
+        var windows = this.windows;
+        windows.splice(windows.indexOf(window), 1);
+    };
+    return WindowTimeSubscriber;
+}(Subscriber_1.Subscriber));
+function dispatchWindowTimeSpanOnly(state) {
+    var subscriber = state.subscriber, windowTimeSpan = state.windowTimeSpan, window = state.window;
+    if (window) {
+        subscriber.closeWindow(window);
+    }
+    state.window = subscriber.openWindow();
+    this.schedule(state, windowTimeSpan);
+}
+function dispatchWindowCreation(state) {
+    var windowTimeSpan = state.windowTimeSpan, subscriber = state.subscriber, scheduler = state.scheduler, windowCreationInterval = state.windowCreationInterval;
+    var window = subscriber.openWindow();
+    var action = this;
+    var context = { action: action, subscription: null };
+    var timeSpanState = { subscriber: subscriber, window: window, context: context };
+    context.subscription = scheduler.schedule(dispatchWindowClose, windowTimeSpan, timeSpanState);
+    action.add(context.subscription);
+    action.schedule(state, windowCreationInterval);
+}
+function dispatchWindowClose(state) {
+    var subscriber = state.subscriber, window = state.window, context = state.context;
+    if (context && context.action && context.subscription) {
+        context.action.remove(context.subscription);
+    }
+    subscriber.closeWindow(window);
+}
+
+},{"../Subject":68,"../Subscriber":70,"../scheduler/async":368,"../util/isNumeric":396,"../util/isScheduler":399}],351:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subject_1 = require('../Subject');
+var Subscription_1 = require('../Subscription');
+var tryCatch_1 = require('../util/tryCatch');
+var errorObject_1 = require('../util/errorObject');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Branch out the source Observable values as a nested Observable starting from
+ * an emission from `openings` and ending when the output of `closingSelector`
+ * emits.
+ *
+ * <span class="informal">It's like {@link bufferToggle}, but emits a nested
+ * Observable instead of an array.</span>
+ *
+ * <img src="./img/windowToggle.png" width="100%">
+ *
+ * Returns an Observable that emits windows of items it collects from the source
+ * Observable. The output Observable emits windows that contain those items
+ * emitted by the source Observable between the time when the `openings`
+ * Observable emits an item and when the Observable returned by
+ * `closingSelector` emits an item.
+ *
+ * @example <caption>Every other second, emit the click events from the next 500ms</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var openings = Rx.Observable.interval(1000);
+ * var result = clicks.windowToggle(openings, i =>
+ *   i % 2 ? Rx.Observable.interval(500) : Rx.Observable.empty()
+ * ).mergeAll();
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link window}
+ * @see {@link windowCount}
+ * @see {@link windowTime}
+ * @see {@link windowWhen}
+ * @see {@link bufferToggle}
+ *
+ * @param {Observable<O>} openings An observable of notifications to start new
+ * windows.
+ * @param {function(value: O): Observable} closingSelector A function that takes
+ * the value emitted by the `openings` observable and returns an Observable,
+ * which, when it emits (either `next` or `complete`), signals that the
+ * associated window should complete.
+ * @return {Observable<Observable<T>>} An observable of windows, which in turn
+ * are Observables.
+ * @method windowToggle
+ * @owner Observable
+ */
+function windowToggle(openings, closingSelector) {
+    return this.lift(new WindowToggleOperator(openings, closingSelector));
+}
+exports.windowToggle = windowToggle;
+var WindowToggleOperator = (function () {
+    function WindowToggleOperator(openings, closingSelector) {
+        this.openings = openings;
+        this.closingSelector = closingSelector;
+    }
+    WindowToggleOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new WindowToggleSubscriber(subscriber, this.openings, this.closingSelector));
+    };
+    return WindowToggleOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var WindowToggleSubscriber = (function (_super) {
+    __extends(WindowToggleSubscriber, _super);
+    function WindowToggleSubscriber(destination, openings, closingSelector) {
+        _super.call(this, destination);
+        this.openings = openings;
+        this.closingSelector = closingSelector;
+        this.contexts = [];
+        this.add(this.openSubscription = subscribeToResult_1.subscribeToResult(this, openings, openings));
+    }
+    WindowToggleSubscriber.prototype._next = function (value) {
+        var contexts = this.contexts;
+        if (contexts) {
+            var len = contexts.length;
+            for (var i = 0; i < len; i++) {
+                contexts[i].window.next(value);
+            }
+        }
+    };
+    WindowToggleSubscriber.prototype._error = function (err) {
+        var contexts = this.contexts;
+        this.contexts = null;
+        if (contexts) {
+            var len = contexts.length;
+            var index = -1;
+            while (++index < len) {
+                var context = contexts[index];
+                context.window.error(err);
+                context.subscription.unsubscribe();
+            }
+        }
+        _super.prototype._error.call(this, err);
+    };
+    WindowToggleSubscriber.prototype._complete = function () {
+        var contexts = this.contexts;
+        this.contexts = null;
+        if (contexts) {
+            var len = contexts.length;
+            var index = -1;
+            while (++index < len) {
+                var context = contexts[index];
+                context.window.complete();
+                context.subscription.unsubscribe();
+            }
+        }
+        _super.prototype._complete.call(this);
+    };
+    WindowToggleSubscriber.prototype._unsubscribe = function () {
+        var contexts = this.contexts;
+        this.contexts = null;
+        if (contexts) {
+            var len = contexts.length;
+            var index = -1;
+            while (++index < len) {
+                var context = contexts[index];
+                context.window.unsubscribe();
+                context.subscription.unsubscribe();
+            }
+        }
+    };
+    WindowToggleSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        if (outerValue === this.openings) {
+            var closingSelector = this.closingSelector;
+            var closingNotifier = tryCatch_1.tryCatch(closingSelector)(innerValue);
+            if (closingNotifier === errorObject_1.errorObject) {
+                return this.error(errorObject_1.errorObject.e);
+            }
+            else {
+                var window_1 = new Subject_1.Subject();
+                var subscription = new Subscription_1.Subscription();
+                var context = { window: window_1, subscription: subscription };
+                this.contexts.push(context);
+                var innerSubscription = subscribeToResult_1.subscribeToResult(this, closingNotifier, context);
+                if (innerSubscription.closed) {
+                    this.closeWindow(this.contexts.length - 1);
+                }
+                else {
+                    innerSubscription.context = context;
+                    subscription.add(innerSubscription);
+                }
+                this.destination.next(window_1);
+            }
+        }
+        else {
+            this.closeWindow(this.contexts.indexOf(outerValue));
+        }
+    };
+    WindowToggleSubscriber.prototype.notifyError = function (err) {
+        this.error(err);
+    };
+    WindowToggleSubscriber.prototype.notifyComplete = function (inner) {
+        if (inner !== this.openSubscription) {
+            this.closeWindow(this.contexts.indexOf(inner.context));
+        }
+    };
+    WindowToggleSubscriber.prototype.closeWindow = function (index) {
+        if (index === -1) {
+            return;
+        }
+        var contexts = this.contexts;
+        var context = contexts[index];
+        var window = context.window, subscription = context.subscription;
+        contexts.splice(index, 1);
+        window.complete();
+        subscription.unsubscribe();
+    };
+    return WindowToggleSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../Subject":68,"../Subscription":71,"../util/errorObject":391,"../util/subscribeToResult":403,"../util/tryCatch":405}],352:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subject_1 = require('../Subject');
+var tryCatch_1 = require('../util/tryCatch');
+var errorObject_1 = require('../util/errorObject');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/**
+ * Branch out the source Observable values as a nested Observable using a
+ * factory function of closing Observables to determine when to start a new
+ * window.
+ *
+ * <span class="informal">It's like {@link bufferWhen}, but emits a nested
+ * Observable instead of an array.</span>
+ *
+ * <img src="./img/windowWhen.png" width="100%">
+ *
+ * Returns an Observable that emits windows of items it collects from the source
+ * Observable. The output Observable emits connected, non-overlapping windows.
+ * It emits the current window and opens a new one whenever the Observable
+ * produced by the specified `closingSelector` function emits an item. The first
+ * window is opened immediately when subscribing to the output Observable.
+ *
+ * @example <caption>Emit only the first two clicks events in every window of [1-5] random seconds</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var result = clicks
+ *   .windowWhen(() => Rx.Observable.interval(1000 + Math.random() * 4000))
+ *   .map(win => win.take(2)) // each window has at most 2 emissions
+ *   .mergeAll(); // flatten the Observable-of-Observables
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link window}
+ * @see {@link windowCount}
+ * @see {@link windowTime}
+ * @see {@link windowToggle}
+ * @see {@link bufferWhen}
+ *
+ * @param {function(): Observable} closingSelector A function that takes no
+ * arguments and returns an Observable that signals (on either `next` or
+ * `complete`) when to close the previous window and start a new one.
+ * @return {Observable<Observable<T>>} An observable of windows, which in turn
+ * are Observables.
+ * @method windowWhen
+ * @owner Observable
+ */
+function windowWhen(closingSelector) {
+    return this.lift(new WindowOperator(closingSelector));
+}
+exports.windowWhen = windowWhen;
+var WindowOperator = (function () {
+    function WindowOperator(closingSelector) {
+        this.closingSelector = closingSelector;
+    }
+    WindowOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new WindowSubscriber(subscriber, this.closingSelector));
+    };
+    return WindowOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var WindowSubscriber = (function (_super) {
+    __extends(WindowSubscriber, _super);
+    function WindowSubscriber(destination, closingSelector) {
+        _super.call(this, destination);
+        this.destination = destination;
+        this.closingSelector = closingSelector;
+        this.openWindow();
+    }
+    WindowSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.openWindow(innerSub);
+    };
+    WindowSubscriber.prototype.notifyError = function (error, innerSub) {
+        this._error(error);
+    };
+    WindowSubscriber.prototype.notifyComplete = function (innerSub) {
+        this.openWindow(innerSub);
+    };
+    WindowSubscriber.prototype._next = function (value) {
+        this.window.next(value);
+    };
+    WindowSubscriber.prototype._error = function (err) {
+        this.window.error(err);
+        this.destination.error(err);
+        this.unsubscribeClosingNotification();
+    };
+    WindowSubscriber.prototype._complete = function () {
+        this.window.complete();
+        this.destination.complete();
+        this.unsubscribeClosingNotification();
+    };
+    WindowSubscriber.prototype.unsubscribeClosingNotification = function () {
+        if (this.closingNotification) {
+            this.closingNotification.unsubscribe();
+        }
+    };
+    WindowSubscriber.prototype.openWindow = function (innerSub) {
+        if (innerSub === void 0) { innerSub = null; }
+        if (innerSub) {
+            this.remove(innerSub);
+            innerSub.unsubscribe();
+        }
+        var prevWindow = this.window;
+        if (prevWindow) {
+            prevWindow.complete();
+        }
+        var window = this.window = new Subject_1.Subject();
+        this.destination.next(window);
+        var closingNotifier = tryCatch_1.tryCatch(this.closingSelector)();
+        if (closingNotifier === errorObject_1.errorObject) {
+            var err = errorObject_1.errorObject.e;
+            this.destination.error(err);
+            this.window.error(err);
+        }
+        else {
+            this.add(this.closingNotification = subscribeToResult_1.subscribeToResult(this, closingNotifier));
+        }
+    };
+    return WindowSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../Subject":68,"../util/errorObject":391,"../util/subscribeToResult":403,"../util/tryCatch":405}],353:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+/* tslint:enable:max-line-length */
+/**
+ * Combines the source Observable with other Observables to create an Observable
+ * whose values are calculated from the latest values of each, only when the
+ * source emits.
+ *
+ * <span class="informal">Whenever the source Observable emits a value, it
+ * computes a formula using that value plus the latest values from other input
+ * Observables, then emits the output of that formula.</span>
+ *
+ * <img src="./img/withLatestFrom.png" width="100%">
+ *
+ * `withLatestFrom` combines each value from the source Observable (the
+ * instance) with the latest values from the other input Observables only when
+ * the source emits a value, optionally using a `project` function to determine
+ * the value to be emitted on the output Observable. All input Observables must
+ * emit at least one value before the output Observable will emit a value.
+ *
+ * @example <caption>On every click event, emit an array with the latest timer event plus the click event</caption>
+ * var clicks = Rx.Observable.fromEvent(document, 'click');
+ * var timer = Rx.Observable.interval(1000);
+ * var result = clicks.withLatestFrom(timer);
+ * result.subscribe(x => console.log(x));
+ *
+ * @see {@link combineLatest}
+ *
+ * @param {ObservableInput} other An input Observable to combine with the source
+ * Observable. More than one input Observables may be given as argument.
+ * @param {Function} [project] Projection function for combining values
+ * together. Receives all values in order of the Observables passed, where the
+ * first parameter is a value from the source Observable. (e.g.
+ * `a.withLatestFrom(b, c, (a1, b1, c1) => a1 + b1 + c1)`). If this is not
+ * passed, arrays will be emitted on the output Observable.
+ * @return {Observable} An Observable of projected values from the most recent
+ * values from each input Observable, or an array of the most recent values from
+ * each input Observable.
+ * @method withLatestFrom
+ * @owner Observable
+ */
+function withLatestFrom() {
+    var args = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        args[_i - 0] = arguments[_i];
+    }
+    var project;
+    if (typeof args[args.length - 1] === 'function') {
+        project = args.pop();
+    }
+    var observables = args;
+    return this.lift(new WithLatestFromOperator(observables, project));
+}
+exports.withLatestFrom = withLatestFrom;
+var WithLatestFromOperator = (function () {
+    function WithLatestFromOperator(observables, project) {
+        this.observables = observables;
+        this.project = project;
+    }
+    WithLatestFromOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new WithLatestFromSubscriber(subscriber, this.observables, this.project));
+    };
+    return WithLatestFromOperator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var WithLatestFromSubscriber = (function (_super) {
+    __extends(WithLatestFromSubscriber, _super);
+    function WithLatestFromSubscriber(destination, observables, project) {
+        _super.call(this, destination);
+        this.observables = observables;
+        this.project = project;
+        this.toRespond = [];
+        var len = observables.length;
+        this.values = new Array(len);
+        for (var i = 0; i < len; i++) {
+            this.toRespond.push(i);
+        }
+        for (var i = 0; i < len; i++) {
+            var observable = observables[i];
+            this.add(subscribeToResult_1.subscribeToResult(this, observable, observable, i));
+        }
+    }
+    WithLatestFromSubscriber.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.values[outerIndex] = innerValue;
+        var toRespond = this.toRespond;
+        if (toRespond.length > 0) {
+            var found = toRespond.indexOf(outerIndex);
+            if (found !== -1) {
+                toRespond.splice(found, 1);
+            }
+        }
+    };
+    WithLatestFromSubscriber.prototype.notifyComplete = function () {
+        // noop
+    };
+    WithLatestFromSubscriber.prototype._next = function (value) {
+        if (this.toRespond.length === 0) {
+            var args = [value].concat(this.values);
+            if (this.project) {
+                this._tryProject(args);
+            }
+            else {
+                this.destination.next(args);
+            }
+        }
+    };
+    WithLatestFromSubscriber.prototype._tryProject = function (args) {
+        var result;
+        try {
+            result = this.project.apply(this, args);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        this.destination.next(result);
+    };
+    return WithLatestFromSubscriber;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../util/subscribeToResult":403}],354:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var ArrayObservable_1 = require('../observable/ArrayObservable');
+var isArray_1 = require('../util/isArray');
+var Subscriber_1 = require('../Subscriber');
+var OuterSubscriber_1 = require('../OuterSubscriber');
+var subscribeToResult_1 = require('../util/subscribeToResult');
+var iterator_1 = require('../symbol/iterator');
+/* tslint:enable:max-line-length */
+/**
+ * @param observables
+ * @return {Observable<R>}
+ * @method zip
+ * @owner Observable
+ */
+function zipProto() {
+    var observables = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        observables[_i - 0] = arguments[_i];
+    }
+    return this.lift.call(zipStatic.apply(void 0, [this].concat(observables)));
+}
+exports.zipProto = zipProto;
+/* tslint:enable:max-line-length */
+/**
+ * Combines multiple Observables to create an Observable whose values are calculated from the values, in order, of each
+ * of its input Observables.
+ *
+ * If the latest parameter is a function, this function is used to compute the created value from the input values.
+ * Otherwise, an array of the input values is returned.
+ *
+ * @example <caption>Combine age and name from different sources</caption>
+ *
+ * let age$ = Observable.of<number>(27, 25, 29);
+ * let name$ = Observable.of<string>('Foo', 'Bar', 'Beer');
+ * let isDev$ = Observable.of<boolean>(true, true, false);
+ *
+ * Observable
+ *     .zip(age$,
+ *          name$,
+ *          isDev$,
+ *          (age: number, name: string, isDev: boolean) => ({ age, name, isDev }))
+ *     .subscribe(x => console.log(x));
+ *
+ * // outputs
+ * // { age: 27, name: 'Foo', isDev: true }
+ * // { age: 25, name: 'Bar', isDev: true }
+ * // { age: 29, name: 'Beer', isDev: false }
+ *
+ * @param observables
+ * @return {Observable<R>}
+ * @static true
+ * @name zip
+ * @owner Observable
+ */
+function zipStatic() {
+    var observables = [];
+    for (var _i = 0; _i < arguments.length; _i++) {
+        observables[_i - 0] = arguments[_i];
+    }
+    var project = observables[observables.length - 1];
+    if (typeof project === 'function') {
+        observables.pop();
+    }
+    return new ArrayObservable_1.ArrayObservable(observables).lift(new ZipOperator(project));
+}
+exports.zipStatic = zipStatic;
+var ZipOperator = (function () {
+    function ZipOperator(project) {
+        this.project = project;
+    }
+    ZipOperator.prototype.call = function (subscriber, source) {
+        return source.subscribe(new ZipSubscriber(subscriber, this.project));
+    };
+    return ZipOperator;
+}());
+exports.ZipOperator = ZipOperator;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var ZipSubscriber = (function (_super) {
+    __extends(ZipSubscriber, _super);
+    function ZipSubscriber(destination, project, values) {
+        if (values === void 0) { values = Object.create(null); }
+        _super.call(this, destination);
+        this.iterators = [];
+        this.active = 0;
+        this.project = (typeof project === 'function') ? project : null;
+        this.values = values;
+    }
+    ZipSubscriber.prototype._next = function (value) {
+        var iterators = this.iterators;
+        if (isArray_1.isArray(value)) {
+            iterators.push(new StaticArrayIterator(value));
+        }
+        else if (typeof value[iterator_1.iterator] === 'function') {
+            iterators.push(new StaticIterator(value[iterator_1.iterator]()));
+        }
+        else {
+            iterators.push(new ZipBufferIterator(this.destination, this, value));
+        }
+    };
+    ZipSubscriber.prototype._complete = function () {
+        var iterators = this.iterators;
+        var len = iterators.length;
+        if (len === 0) {
+            this.destination.complete();
+            return;
+        }
+        this.active = len;
+        for (var i = 0; i < len; i++) {
+            var iterator = iterators[i];
+            if (iterator.stillUnsubscribed) {
+                this.add(iterator.subscribe(iterator, i));
+            }
+            else {
+                this.active--; // not an observable
+            }
+        }
+    };
+    ZipSubscriber.prototype.notifyInactive = function () {
+        this.active--;
+        if (this.active === 0) {
+            this.destination.complete();
+        }
+    };
+    ZipSubscriber.prototype.checkIterators = function () {
+        var iterators = this.iterators;
+        var len = iterators.length;
+        var destination = this.destination;
+        // abort if not all of them have values
+        for (var i = 0; i < len; i++) {
+            var iterator = iterators[i];
+            if (typeof iterator.hasValue === 'function' && !iterator.hasValue()) {
+                return;
+            }
+        }
+        var shouldComplete = false;
+        var args = [];
+        for (var i = 0; i < len; i++) {
+            var iterator = iterators[i];
+            var result = iterator.next();
+            // check to see if it's completed now that you've gotten
+            // the next value.
+            if (iterator.hasCompleted()) {
+                shouldComplete = true;
+            }
+            if (result.done) {
+                destination.complete();
+                return;
+            }
+            args.push(result.value);
+        }
+        if (this.project) {
+            this._tryProject(args);
+        }
+        else {
+            destination.next(args);
+        }
+        if (shouldComplete) {
+            destination.complete();
+        }
+    };
+    ZipSubscriber.prototype._tryProject = function (args) {
+        var result;
+        try {
+            result = this.project.apply(this, args);
+        }
+        catch (err) {
+            this.destination.error(err);
+            return;
+        }
+        this.destination.next(result);
+    };
+    return ZipSubscriber;
+}(Subscriber_1.Subscriber));
+exports.ZipSubscriber = ZipSubscriber;
+var StaticIterator = (function () {
+    function StaticIterator(iterator) {
+        this.iterator = iterator;
+        this.nextResult = iterator.next();
+    }
+    StaticIterator.prototype.hasValue = function () {
+        return true;
+    };
+    StaticIterator.prototype.next = function () {
+        var result = this.nextResult;
+        this.nextResult = this.iterator.next();
+        return result;
+    };
+    StaticIterator.prototype.hasCompleted = function () {
+        var nextResult = this.nextResult;
+        return nextResult && nextResult.done;
+    };
+    return StaticIterator;
+}());
+var StaticArrayIterator = (function () {
+    function StaticArrayIterator(array) {
+        this.array = array;
+        this.index = 0;
+        this.length = 0;
+        this.length = array.length;
+    }
+    StaticArrayIterator.prototype[iterator_1.iterator] = function () {
+        return this;
+    };
+    StaticArrayIterator.prototype.next = function (value) {
+        var i = this.index++;
+        var array = this.array;
+        return i < this.length ? { value: array[i], done: false } : { value: null, done: true };
+    };
+    StaticArrayIterator.prototype.hasValue = function () {
+        return this.array.length > this.index;
+    };
+    StaticArrayIterator.prototype.hasCompleted = function () {
+        return this.array.length === this.index;
+    };
+    return StaticArrayIterator;
+}());
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var ZipBufferIterator = (function (_super) {
+    __extends(ZipBufferIterator, _super);
+    function ZipBufferIterator(destination, parent, observable) {
+        _super.call(this, destination);
+        this.parent = parent;
+        this.observable = observable;
+        this.stillUnsubscribed = true;
+        this.buffer = [];
+        this.isComplete = false;
+    }
+    ZipBufferIterator.prototype[iterator_1.iterator] = function () {
+        return this;
+    };
+    // NOTE: there is actually a name collision here with Subscriber.next and Iterator.next
+    //    this is legit because `next()` will never be called by a subscription in this case.
+    ZipBufferIterator.prototype.next = function () {
+        var buffer = this.buffer;
+        if (buffer.length === 0 && this.isComplete) {
+            return { value: null, done: true };
+        }
+        else {
+            return { value: buffer.shift(), done: false };
+        }
+    };
+    ZipBufferIterator.prototype.hasValue = function () {
+        return this.buffer.length > 0;
+    };
+    ZipBufferIterator.prototype.hasCompleted = function () {
+        return this.buffer.length === 0 && this.isComplete;
+    };
+    ZipBufferIterator.prototype.notifyComplete = function () {
+        if (this.buffer.length > 0) {
+            this.isComplete = true;
+            this.parent.notifyInactive();
+        }
+        else {
+            this.destination.complete();
+        }
+    };
+    ZipBufferIterator.prototype.notifyNext = function (outerValue, innerValue, outerIndex, innerIndex, innerSub) {
+        this.buffer.push(innerValue);
+        this.parent.checkIterators();
+    };
+    ZipBufferIterator.prototype.subscribe = function (value, index) {
+        return subscribeToResult_1.subscribeToResult(this, this.observable, this, index);
+    };
+    return ZipBufferIterator;
+}(OuterSubscriber_1.OuterSubscriber));
+
+},{"../OuterSubscriber":64,"../Subscriber":70,"../observable/ArrayObservable":202,"../symbol/iterator":370,"../util/isArray":392,"../util/subscribeToResult":403}],355:[function(require,module,exports){
+"use strict";
+var zip_1 = require('./zip');
+/**
+ * @param project
+ * @return {Observable<R>|WebSocketSubject<T>|Observable<T>}
+ * @method zipAll
+ * @owner Observable
+ */
+function zipAll(project) {
+    return this.lift(new zip_1.ZipOperator(project));
+}
+exports.zipAll = zipAll;
+
+},{"./zip":354}],356:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -18581,7 +37791,195 @@ var Action = (function (_super) {
 }(Subscription_1.Subscription));
 exports.Action = Action;
 
-},{"../Subscription":49}],57:[function(require,module,exports){
+},{"../Subscription":71}],357:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var AsyncAction_1 = require('./AsyncAction');
+var AnimationFrame_1 = require('../util/AnimationFrame');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var AnimationFrameAction = (function (_super) {
+    __extends(AnimationFrameAction, _super);
+    function AnimationFrameAction(scheduler, work) {
+        _super.call(this, scheduler, work);
+        this.scheduler = scheduler;
+        this.work = work;
+    }
+    AnimationFrameAction.prototype.requestAsyncId = function (scheduler, id, delay) {
+        if (delay === void 0) { delay = 0; }
+        // If delay is greater than 0, request as an async action.
+        if (delay !== null && delay > 0) {
+            return _super.prototype.requestAsyncId.call(this, scheduler, id, delay);
+        }
+        // Push the action to the end of the scheduler queue.
+        scheduler.actions.push(this);
+        // If an animation frame has already been requested, don't request another
+        // one. If an animation frame hasn't been requested yet, request one. Return
+        // the current animation frame request id.
+        return scheduler.scheduled || (scheduler.scheduled = AnimationFrame_1.AnimationFrame.requestAnimationFrame(scheduler.flush.bind(scheduler, null)));
+    };
+    AnimationFrameAction.prototype.recycleAsyncId = function (scheduler, id, delay) {
+        if (delay === void 0) { delay = 0; }
+        // If delay exists and is greater than 0, or if the delay is null (the
+        // action wasn't rescheduled) but was originally scheduled as an async
+        // action, then recycle as an async action.
+        if ((delay !== null && delay > 0) || (delay === null && this.delay > 0)) {
+            return _super.prototype.recycleAsyncId.call(this, scheduler, id, delay);
+        }
+        // If the scheduler queue is empty, cancel the requested animation frame and
+        // set the scheduled flag to undefined so the next AnimationFrameAction will
+        // request its own.
+        if (scheduler.actions.length === 0) {
+            AnimationFrame_1.AnimationFrame.cancelAnimationFrame(id);
+            scheduler.scheduled = undefined;
+        }
+        // Return undefined so the action knows to request a new async id if it's rescheduled.
+        return undefined;
+    };
+    return AnimationFrameAction;
+}(AsyncAction_1.AsyncAction));
+exports.AnimationFrameAction = AnimationFrameAction;
+
+},{"../util/AnimationFrame":378,"./AsyncAction":361}],358:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var AsyncScheduler_1 = require('./AsyncScheduler');
+var AnimationFrameScheduler = (function (_super) {
+    __extends(AnimationFrameScheduler, _super);
+    function AnimationFrameScheduler() {
+        _super.apply(this, arguments);
+    }
+    AnimationFrameScheduler.prototype.flush = function (action) {
+        this.active = true;
+        this.scheduled = undefined;
+        var actions = this.actions;
+        var error;
+        var index = -1;
+        var count = actions.length;
+        action = action || actions.shift();
+        do {
+            if (error = action.execute(action.state, action.delay)) {
+                break;
+            }
+        } while (++index < count && (action = actions.shift()));
+        this.active = false;
+        if (error) {
+            while (++index < count && (action = actions.shift())) {
+                action.unsubscribe();
+            }
+            throw error;
+        }
+    };
+    return AnimationFrameScheduler;
+}(AsyncScheduler_1.AsyncScheduler));
+exports.AnimationFrameScheduler = AnimationFrameScheduler;
+
+},{"./AsyncScheduler":362}],359:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Immediate_1 = require('../util/Immediate');
+var AsyncAction_1 = require('./AsyncAction');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var AsapAction = (function (_super) {
+    __extends(AsapAction, _super);
+    function AsapAction(scheduler, work) {
+        _super.call(this, scheduler, work);
+        this.scheduler = scheduler;
+        this.work = work;
+    }
+    AsapAction.prototype.requestAsyncId = function (scheduler, id, delay) {
+        if (delay === void 0) { delay = 0; }
+        // If delay is greater than 0, request as an async action.
+        if (delay !== null && delay > 0) {
+            return _super.prototype.requestAsyncId.call(this, scheduler, id, delay);
+        }
+        // Push the action to the end of the scheduler queue.
+        scheduler.actions.push(this);
+        // If a microtask has already been scheduled, don't schedule another
+        // one. If a microtask hasn't been scheduled yet, schedule one now. Return
+        // the current scheduled microtask id.
+        return scheduler.scheduled || (scheduler.scheduled = Immediate_1.Immediate.setImmediate(scheduler.flush.bind(scheduler, null)));
+    };
+    AsapAction.prototype.recycleAsyncId = function (scheduler, id, delay) {
+        if (delay === void 0) { delay = 0; }
+        // If delay exists and is greater than 0, or if the delay is null (the
+        // action wasn't rescheduled) but was originally scheduled as an async
+        // action, then recycle as an async action.
+        if ((delay !== null && delay > 0) || (delay === null && this.delay > 0)) {
+            return _super.prototype.recycleAsyncId.call(this, scheduler, id, delay);
+        }
+        // If the scheduler queue is empty, cancel the requested microtask and
+        // set the scheduled flag to undefined so the next AsapAction will schedule
+        // its own.
+        if (scheduler.actions.length === 0) {
+            Immediate_1.Immediate.clearImmediate(id);
+            scheduler.scheduled = undefined;
+        }
+        // Return undefined so the action knows to request a new async id if it's rescheduled.
+        return undefined;
+    };
+    return AsapAction;
+}(AsyncAction_1.AsyncAction));
+exports.AsapAction = AsapAction;
+
+},{"../util/Immediate":382,"./AsyncAction":361}],360:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var AsyncScheduler_1 = require('./AsyncScheduler');
+var AsapScheduler = (function (_super) {
+    __extends(AsapScheduler, _super);
+    function AsapScheduler() {
+        _super.apply(this, arguments);
+    }
+    AsapScheduler.prototype.flush = function (action) {
+        this.active = true;
+        this.scheduled = undefined;
+        var actions = this.actions;
+        var error;
+        var index = -1;
+        var count = actions.length;
+        action = action || actions.shift();
+        do {
+            if (error = action.execute(action.state, action.delay)) {
+                break;
+            }
+        } while (++index < count && (action = actions.shift()));
+        this.active = false;
+        if (error) {
+            while (++index < count && (action = actions.shift())) {
+                action.unsubscribe();
+            }
+            throw error;
+        }
+    };
+    return AsapScheduler;
+}(AsyncScheduler_1.AsyncScheduler));
+exports.AsapScheduler = AsapScheduler;
+
+},{"./AsyncScheduler":362}],361:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -18724,7 +38122,7 @@ var AsyncAction = (function (_super) {
 }(Action_1.Action));
 exports.AsyncAction = AsyncAction;
 
-},{"../util/root":72,"./Action":56}],58:[function(require,module,exports){
+},{"../util/root":402,"./Action":356}],362:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -18776,7 +38174,264 @@ var AsyncScheduler = (function (_super) {
 }(Scheduler_1.Scheduler));
 exports.AsyncScheduler = AsyncScheduler;
 
-},{"../Scheduler":45}],59:[function(require,module,exports){
+},{"../Scheduler":67}],363:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var AsyncAction_1 = require('./AsyncAction');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var QueueAction = (function (_super) {
+    __extends(QueueAction, _super);
+    function QueueAction(scheduler, work) {
+        _super.call(this, scheduler, work);
+        this.scheduler = scheduler;
+        this.work = work;
+    }
+    QueueAction.prototype.schedule = function (state, delay) {
+        if (delay === void 0) { delay = 0; }
+        if (delay > 0) {
+            return _super.prototype.schedule.call(this, state, delay);
+        }
+        this.delay = delay;
+        this.state = state;
+        this.scheduler.flush(this);
+        return this;
+    };
+    QueueAction.prototype.execute = function (state, delay) {
+        return (delay > 0 || this.closed) ?
+            _super.prototype.execute.call(this, state, delay) :
+            this._execute(state, delay);
+    };
+    QueueAction.prototype.requestAsyncId = function (scheduler, id, delay) {
+        if (delay === void 0) { delay = 0; }
+        // If delay exists and is greater than 0, or if the delay is null (the
+        // action wasn't rescheduled) but was originally scheduled as an async
+        // action, then recycle as an async action.
+        if ((delay !== null && delay > 0) || (delay === null && this.delay > 0)) {
+            return _super.prototype.requestAsyncId.call(this, scheduler, id, delay);
+        }
+        // Otherwise flush the scheduler starting with this action.
+        return scheduler.flush(this);
+    };
+    return QueueAction;
+}(AsyncAction_1.AsyncAction));
+exports.QueueAction = QueueAction;
+
+},{"./AsyncAction":361}],364:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var AsyncScheduler_1 = require('./AsyncScheduler');
+var QueueScheduler = (function (_super) {
+    __extends(QueueScheduler, _super);
+    function QueueScheduler() {
+        _super.apply(this, arguments);
+    }
+    return QueueScheduler;
+}(AsyncScheduler_1.AsyncScheduler));
+exports.QueueScheduler = QueueScheduler;
+
+},{"./AsyncScheduler":362}],365:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var AsyncAction_1 = require('./AsyncAction');
+var AsyncScheduler_1 = require('./AsyncScheduler');
+var VirtualTimeScheduler = (function (_super) {
+    __extends(VirtualTimeScheduler, _super);
+    function VirtualTimeScheduler(SchedulerAction, maxFrames) {
+        var _this = this;
+        if (SchedulerAction === void 0) { SchedulerAction = VirtualAction; }
+        if (maxFrames === void 0) { maxFrames = Number.POSITIVE_INFINITY; }
+        _super.call(this, SchedulerAction, function () { return _this.frame; });
+        this.maxFrames = maxFrames;
+        this.frame = 0;
+        this.index = -1;
+    }
+    /**
+     * Prompt the Scheduler to execute all of its queued actions, therefore
+     * clearing its queue.
+     * @return {void}
+     */
+    VirtualTimeScheduler.prototype.flush = function () {
+        var _a = this, actions = _a.actions, maxFrames = _a.maxFrames;
+        var error, action;
+        while ((action = actions.shift()) && (this.frame = action.delay) <= maxFrames) {
+            if (error = action.execute(action.state, action.delay)) {
+                break;
+            }
+        }
+        if (error) {
+            while (action = actions.shift()) {
+                action.unsubscribe();
+            }
+            throw error;
+        }
+    };
+    VirtualTimeScheduler.frameTimeFactor = 10;
+    return VirtualTimeScheduler;
+}(AsyncScheduler_1.AsyncScheduler));
+exports.VirtualTimeScheduler = VirtualTimeScheduler;
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var VirtualAction = (function (_super) {
+    __extends(VirtualAction, _super);
+    function VirtualAction(scheduler, work, index) {
+        if (index === void 0) { index = scheduler.index += 1; }
+        _super.call(this, scheduler, work);
+        this.scheduler = scheduler;
+        this.work = work;
+        this.index = index;
+        this.active = true;
+        this.index = scheduler.index = index;
+    }
+    VirtualAction.prototype.schedule = function (state, delay) {
+        if (delay === void 0) { delay = 0; }
+        if (!this.id) {
+            return _super.prototype.schedule.call(this, state, delay);
+        }
+        this.active = false;
+        // If an action is rescheduled, we save allocations by mutating its state,
+        // pushing it to the end of the scheduler queue, and recycling the action.
+        // But since the VirtualTimeScheduler is used for testing, VirtualActions
+        // must be immutable so they can be inspected later.
+        var action = new VirtualAction(this.scheduler, this.work);
+        this.add(action);
+        return action.schedule(state, delay);
+    };
+    VirtualAction.prototype.requestAsyncId = function (scheduler, id, delay) {
+        if (delay === void 0) { delay = 0; }
+        this.delay = scheduler.frame + delay;
+        var actions = scheduler.actions;
+        actions.push(this);
+        actions.sort(VirtualAction.sortActions);
+        return true;
+    };
+    VirtualAction.prototype.recycleAsyncId = function (scheduler, id, delay) {
+        if (delay === void 0) { delay = 0; }
+        return undefined;
+    };
+    VirtualAction.prototype._execute = function (state, delay) {
+        if (this.active === true) {
+            return _super.prototype._execute.call(this, state, delay);
+        }
+    };
+    VirtualAction.sortActions = function (a, b) {
+        if (a.delay === b.delay) {
+            if (a.index === b.index) {
+                return 0;
+            }
+            else if (a.index > b.index) {
+                return 1;
+            }
+            else {
+                return -1;
+            }
+        }
+        else if (a.delay > b.delay) {
+            return 1;
+        }
+        else {
+            return -1;
+        }
+    };
+    return VirtualAction;
+}(AsyncAction_1.AsyncAction));
+exports.VirtualAction = VirtualAction;
+
+},{"./AsyncAction":361,"./AsyncScheduler":362}],366:[function(require,module,exports){
+"use strict";
+var AnimationFrameAction_1 = require('./AnimationFrameAction');
+var AnimationFrameScheduler_1 = require('./AnimationFrameScheduler');
+/**
+ *
+ * Animation Frame Scheduler
+ *
+ * <span class="informal">Perform task when `window.requestAnimationFrame` would fire</span>
+ *
+ * When `animationFrame` scheduler is used with delay, it will fall back to {@link async} scheduler
+ * behaviour.
+ *
+ * Without delay, `animationFrame` scheduler can be used to create smooth browser animations.
+ * It makes sure scheduled task will happen just before next browser content repaint,
+ * thus performing animations as efficiently as possible.
+ *
+ * @example <caption>Schedule div height animation</caption>
+ * const div = document.querySelector('.some-div');
+ *
+ * Rx.Scheduler.schedule(function(height) {
+ *   div.style.height = height + "px";
+ *
+ *   this.schedule(height + 1);  // `this` references currently executing Action,
+ *                               // which we reschedule with new state
+ * }, 0, 0);
+ *
+ * // You will see .some-div element growing in height
+ *
+ *
+ * @static true
+ * @name animationFrame
+ * @owner Scheduler
+ */
+exports.animationFrame = new AnimationFrameScheduler_1.AnimationFrameScheduler(AnimationFrameAction_1.AnimationFrameAction);
+
+},{"./AnimationFrameAction":357,"./AnimationFrameScheduler":358}],367:[function(require,module,exports){
+"use strict";
+var AsapAction_1 = require('./AsapAction');
+var AsapScheduler_1 = require('./AsapScheduler');
+/**
+ *
+ * Asap Scheduler
+ *
+ * <span class="informal">Perform task as fast as it can be performed asynchronously</span>
+ *
+ * `asap` scheduler behaves the same as {@link async} scheduler when you use it to delay task
+ * in time. If however you set delay to `0`, `asap` will wait for current synchronously executing
+ * code to end and then it will try to execute given task as fast as possible.
+ *
+ * `asap` scheduler will do its best to minimize time between end of currently executing code
+ * and start of scheduled task. This makes it best candidate for performing so called "deferring".
+ * Traditionally this was achieved by calling `setTimeout(deferredTask, 0)`, but that technique involves
+ * some (although minimal) unwanted delay.
+ *
+ * Note that using `asap` scheduler does not necessarily mean that your task will be first to process
+ * after currently executing code. In particular, if some task was also scheduled with `asap` before,
+ * that task will execute first. That being said, if you need to schedule task asynchronously, but
+ * as soon as possible, `asap` scheduler is your best bet.
+ *
+ * @example <caption>Compare async and asap scheduler</caption>
+ *
+ * Rx.Scheduler.async.schedule(() => console.log('async')); // scheduling 'async' first...
+ * Rx.Scheduler.asap.schedule(() => console.log('asap'));
+ *
+ * // Logs:
+ * // "asap"
+ * // "async"
+ * // ... but 'asap' goes first!
+ *
+ * @static true
+ * @name asap
+ * @owner Scheduler
+ */
+exports.asap = new AsapScheduler_1.AsapScheduler(AsapAction_1.AsapAction);
+
+},{"./AsapAction":359,"./AsapScheduler":360}],368:[function(require,module,exports){
 "use strict";
 var AsyncAction_1 = require('./AsyncAction');
 var AsyncScheduler_1 = require('./AsyncScheduler');
@@ -18824,7 +38479,74 @@ var AsyncScheduler_1 = require('./AsyncScheduler');
  */
 exports.async = new AsyncScheduler_1.AsyncScheduler(AsyncAction_1.AsyncAction);
 
-},{"./AsyncAction":57,"./AsyncScheduler":58}],60:[function(require,module,exports){
+},{"./AsyncAction":361,"./AsyncScheduler":362}],369:[function(require,module,exports){
+"use strict";
+var QueueAction_1 = require('./QueueAction');
+var QueueScheduler_1 = require('./QueueScheduler');
+/**
+ *
+ * Queue Scheduler
+ *
+ * <span class="informal">Put every next task on a queue, instead of executing it immediately</span>
+ *
+ * `queue` scheduler, when used with delay, behaves the same as {@link async} scheduler.
+ *
+ * When used without delay, it schedules given task synchronously - executes it right when
+ * it is scheduled. However when called recursively, that is when inside the scheduled task,
+ * another task is scheduled with queue scheduler, instead of executing immediately as well,
+ * that task will be put on a queue and wait for current one to finish.
+ *
+ * This means that when you execute task with `queue` scheduler, you are sure it will end
+ * before any other task scheduled with that scheduler will start.
+ *
+ * @examples <caption>Schedule recursively first, then do something</caption>
+ *
+ * Rx.Scheduler.queue.schedule(() => {
+ *   Rx.Scheduler.queue.schedule(() => console.log('second')); // will not happen now, but will be put on a queue
+ *
+ *   console.log('first');
+ * });
+ *
+ * // Logs:
+ * // "first"
+ * // "second"
+ *
+ *
+ * @example <caption>Reschedule itself recursively</caption>
+ *
+ * Rx.Scheduler.queue.schedule(function(state) {
+ *   if (state !== 0) {
+ *     console.log('before', state);
+ *     this.schedule(state - 1); // `this` references currently executing Action,
+ *                               // which we reschedule with new state
+ *     console.log('after', state);
+ *   }
+ * }, 0, 3);
+ *
+ * // In scheduler that runs recursively, you would expect:
+ * // "before", 3
+ * // "before", 2
+ * // "before", 1
+ * // "after", 1
+ * // "after", 2
+ * // "after", 3
+ *
+ * // But with queue it logs:
+ * // "before", 3
+ * // "after", 3
+ * // "before", 2
+ * // "after", 2
+ * // "before", 1
+ * // "after", 1
+ *
+ *
+ * @static true
+ * @name queue
+ * @owner Scheduler
+ */
+exports.queue = new QueueScheduler_1.QueueScheduler(QueueAction_1.QueueAction);
+
+},{"./QueueAction":363,"./QueueScheduler":364}],370:[function(require,module,exports){
 "use strict";
 var root_1 = require('../util/root');
 function symbolIteratorPonyfill(root) {
@@ -18863,7 +38585,7 @@ exports.iterator = symbolIteratorPonyfill(root_1.root);
  */
 exports.$$iterator = exports.iterator;
 
-},{"../util/root":72}],61:[function(require,module,exports){
+},{"../util/root":402}],371:[function(require,module,exports){
 "use strict";
 var root_1 = require('../util/root');
 function getSymbolObservable(context) {
@@ -18890,7 +38612,7 @@ exports.observable = getSymbolObservable(root_1.root);
  */
 exports.$$observable = exports.observable;
 
-},{"../util/root":72}],62:[function(require,module,exports){
+},{"../util/root":402}],372:[function(require,module,exports){
 "use strict";
 var root_1 = require('../util/root');
 var Symbol = root_1.root.Symbol;
@@ -18901,7 +38623,748 @@ exports.rxSubscriber = (typeof Symbol === 'function' && typeof Symbol.for === 'f
  */
 exports.$$rxSubscriber = exports.rxSubscriber;
 
-},{"../util/root":72}],63:[function(require,module,exports){
+},{"../util/root":402}],373:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var Subscription_1 = require('../Subscription');
+var SubscriptionLoggable_1 = require('./SubscriptionLoggable');
+var applyMixins_1 = require('../util/applyMixins');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var ColdObservable = (function (_super) {
+    __extends(ColdObservable, _super);
+    function ColdObservable(messages, scheduler) {
+        _super.call(this, function (subscriber) {
+            var observable = this;
+            var index = observable.logSubscribedFrame();
+            subscriber.add(new Subscription_1.Subscription(function () {
+                observable.logUnsubscribedFrame(index);
+            }));
+            observable.scheduleMessages(subscriber);
+            return subscriber;
+        });
+        this.messages = messages;
+        this.subscriptions = [];
+        this.scheduler = scheduler;
+    }
+    ColdObservable.prototype.scheduleMessages = function (subscriber) {
+        var messagesLength = this.messages.length;
+        for (var i = 0; i < messagesLength; i++) {
+            var message = this.messages[i];
+            subscriber.add(this.scheduler.schedule(function (_a) {
+                var message = _a.message, subscriber = _a.subscriber;
+                message.notification.observe(subscriber);
+            }, message.frame, { message: message, subscriber: subscriber }));
+        }
+    };
+    return ColdObservable;
+}(Observable_1.Observable));
+exports.ColdObservable = ColdObservable;
+applyMixins_1.applyMixins(ColdObservable, [SubscriptionLoggable_1.SubscriptionLoggable]);
+
+},{"../Observable":62,"../Subscription":71,"../util/applyMixins":389,"./SubscriptionLoggable":376}],374:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subject_1 = require('../Subject');
+var Subscription_1 = require('../Subscription');
+var SubscriptionLoggable_1 = require('./SubscriptionLoggable');
+var applyMixins_1 = require('../util/applyMixins');
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var HotObservable = (function (_super) {
+    __extends(HotObservable, _super);
+    function HotObservable(messages, scheduler) {
+        _super.call(this);
+        this.messages = messages;
+        this.subscriptions = [];
+        this.scheduler = scheduler;
+    }
+    HotObservable.prototype._subscribe = function (subscriber) {
+        var subject = this;
+        var index = subject.logSubscribedFrame();
+        subscriber.add(new Subscription_1.Subscription(function () {
+            subject.logUnsubscribedFrame(index);
+        }));
+        return _super.prototype._subscribe.call(this, subscriber);
+    };
+    HotObservable.prototype.setup = function () {
+        var subject = this;
+        var messagesLength = subject.messages.length;
+        /* tslint:disable:no-var-keyword */
+        for (var i = 0; i < messagesLength; i++) {
+            (function () {
+                var message = subject.messages[i];
+                /* tslint:enable */
+                subject.scheduler.schedule(function () { message.notification.observe(subject); }, message.frame);
+            })();
+        }
+    };
+    return HotObservable;
+}(Subject_1.Subject));
+exports.HotObservable = HotObservable;
+applyMixins_1.applyMixins(HotObservable, [SubscriptionLoggable_1.SubscriptionLoggable]);
+
+},{"../Subject":68,"../Subscription":71,"../util/applyMixins":389,"./SubscriptionLoggable":376}],375:[function(require,module,exports){
+"use strict";
+var SubscriptionLog = (function () {
+    function SubscriptionLog(subscribedFrame, unsubscribedFrame) {
+        if (unsubscribedFrame === void 0) { unsubscribedFrame = Number.POSITIVE_INFINITY; }
+        this.subscribedFrame = subscribedFrame;
+        this.unsubscribedFrame = unsubscribedFrame;
+    }
+    return SubscriptionLog;
+}());
+exports.SubscriptionLog = SubscriptionLog;
+
+},{}],376:[function(require,module,exports){
+"use strict";
+var SubscriptionLog_1 = require('./SubscriptionLog');
+var SubscriptionLoggable = (function () {
+    function SubscriptionLoggable() {
+        this.subscriptions = [];
+    }
+    SubscriptionLoggable.prototype.logSubscribedFrame = function () {
+        this.subscriptions.push(new SubscriptionLog_1.SubscriptionLog(this.scheduler.now()));
+        return this.subscriptions.length - 1;
+    };
+    SubscriptionLoggable.prototype.logUnsubscribedFrame = function (index) {
+        var subscriptionLogs = this.subscriptions;
+        var oldSubscriptionLog = subscriptionLogs[index];
+        subscriptionLogs[index] = new SubscriptionLog_1.SubscriptionLog(oldSubscriptionLog.subscribedFrame, this.scheduler.now());
+    };
+    return SubscriptionLoggable;
+}());
+exports.SubscriptionLoggable = SubscriptionLoggable;
+
+},{"./SubscriptionLog":375}],377:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Observable_1 = require('../Observable');
+var Notification_1 = require('../Notification');
+var ColdObservable_1 = require('./ColdObservable');
+var HotObservable_1 = require('./HotObservable');
+var SubscriptionLog_1 = require('./SubscriptionLog');
+var VirtualTimeScheduler_1 = require('../scheduler/VirtualTimeScheduler');
+var defaultMaxFrame = 750;
+var TestScheduler = (function (_super) {
+    __extends(TestScheduler, _super);
+    function TestScheduler(assertDeepEqual) {
+        _super.call(this, VirtualTimeScheduler_1.VirtualAction, defaultMaxFrame);
+        this.assertDeepEqual = assertDeepEqual;
+        this.hotObservables = [];
+        this.coldObservables = [];
+        this.flushTests = [];
+    }
+    TestScheduler.prototype.createTime = function (marbles) {
+        var indexOf = marbles.indexOf('|');
+        if (indexOf === -1) {
+            throw new Error('marble diagram for time should have a completion marker "|"');
+        }
+        return indexOf * TestScheduler.frameTimeFactor;
+    };
+    TestScheduler.prototype.createColdObservable = function (marbles, values, error) {
+        if (marbles.indexOf('^') !== -1) {
+            throw new Error('cold observable cannot have subscription offset "^"');
+        }
+        if (marbles.indexOf('!') !== -1) {
+            throw new Error('cold observable cannot have unsubscription marker "!"');
+        }
+        var messages = TestScheduler.parseMarbles(marbles, values, error);
+        var cold = new ColdObservable_1.ColdObservable(messages, this);
+        this.coldObservables.push(cold);
+        return cold;
+    };
+    TestScheduler.prototype.createHotObservable = function (marbles, values, error) {
+        if (marbles.indexOf('!') !== -1) {
+            throw new Error('hot observable cannot have unsubscription marker "!"');
+        }
+        var messages = TestScheduler.parseMarbles(marbles, values, error);
+        var subject = new HotObservable_1.HotObservable(messages, this);
+        this.hotObservables.push(subject);
+        return subject;
+    };
+    TestScheduler.prototype.materializeInnerObservable = function (observable, outerFrame) {
+        var _this = this;
+        var messages = [];
+        observable.subscribe(function (value) {
+            messages.push({ frame: _this.frame - outerFrame, notification: Notification_1.Notification.createNext(value) });
+        }, function (err) {
+            messages.push({ frame: _this.frame - outerFrame, notification: Notification_1.Notification.createError(err) });
+        }, function () {
+            messages.push({ frame: _this.frame - outerFrame, notification: Notification_1.Notification.createComplete() });
+        });
+        return messages;
+    };
+    TestScheduler.prototype.expectObservable = function (observable, unsubscriptionMarbles) {
+        var _this = this;
+        if (unsubscriptionMarbles === void 0) { unsubscriptionMarbles = null; }
+        var actual = [];
+        var flushTest = { actual: actual, ready: false };
+        var unsubscriptionFrame = TestScheduler
+            .parseMarblesAsSubscriptions(unsubscriptionMarbles).unsubscribedFrame;
+        var subscription;
+        this.schedule(function () {
+            subscription = observable.subscribe(function (x) {
+                var value = x;
+                // Support Observable-of-Observables
+                if (x instanceof Observable_1.Observable) {
+                    value = _this.materializeInnerObservable(value, _this.frame);
+                }
+                actual.push({ frame: _this.frame, notification: Notification_1.Notification.createNext(value) });
+            }, function (err) {
+                actual.push({ frame: _this.frame, notification: Notification_1.Notification.createError(err) });
+            }, function () {
+                actual.push({ frame: _this.frame, notification: Notification_1.Notification.createComplete() });
+            });
+        }, 0);
+        if (unsubscriptionFrame !== Number.POSITIVE_INFINITY) {
+            this.schedule(function () { return subscription.unsubscribe(); }, unsubscriptionFrame);
+        }
+        this.flushTests.push(flushTest);
+        return {
+            toBe: function (marbles, values, errorValue) {
+                flushTest.ready = true;
+                flushTest.expected = TestScheduler.parseMarbles(marbles, values, errorValue, true);
+            }
+        };
+    };
+    TestScheduler.prototype.expectSubscriptions = function (actualSubscriptionLogs) {
+        var flushTest = { actual: actualSubscriptionLogs, ready: false };
+        this.flushTests.push(flushTest);
+        return {
+            toBe: function (marbles) {
+                var marblesArray = (typeof marbles === 'string') ? [marbles] : marbles;
+                flushTest.ready = true;
+                flushTest.expected = marblesArray.map(function (marbles) {
+                    return TestScheduler.parseMarblesAsSubscriptions(marbles);
+                });
+            }
+        };
+    };
+    TestScheduler.prototype.flush = function () {
+        var hotObservables = this.hotObservables;
+        while (hotObservables.length > 0) {
+            hotObservables.shift().setup();
+        }
+        _super.prototype.flush.call(this);
+        var readyFlushTests = this.flushTests.filter(function (test) { return test.ready; });
+        while (readyFlushTests.length > 0) {
+            var test = readyFlushTests.shift();
+            this.assertDeepEqual(test.actual, test.expected);
+        }
+    };
+    TestScheduler.parseMarblesAsSubscriptions = function (marbles) {
+        if (typeof marbles !== 'string') {
+            return new SubscriptionLog_1.SubscriptionLog(Number.POSITIVE_INFINITY);
+        }
+        var len = marbles.length;
+        var groupStart = -1;
+        var subscriptionFrame = Number.POSITIVE_INFINITY;
+        var unsubscriptionFrame = Number.POSITIVE_INFINITY;
+        for (var i = 0; i < len; i++) {
+            var frame = i * this.frameTimeFactor;
+            var c = marbles[i];
+            switch (c) {
+                case '-':
+                case ' ':
+                    break;
+                case '(':
+                    groupStart = frame;
+                    break;
+                case ')':
+                    groupStart = -1;
+                    break;
+                case '^':
+                    if (subscriptionFrame !== Number.POSITIVE_INFINITY) {
+                        throw new Error('found a second subscription point \'^\' in a ' +
+                            'subscription marble diagram. There can only be one.');
+                    }
+                    subscriptionFrame = groupStart > -1 ? groupStart : frame;
+                    break;
+                case '!':
+                    if (unsubscriptionFrame !== Number.POSITIVE_INFINITY) {
+                        throw new Error('found a second subscription point \'^\' in a ' +
+                            'subscription marble diagram. There can only be one.');
+                    }
+                    unsubscriptionFrame = groupStart > -1 ? groupStart : frame;
+                    break;
+                default:
+                    throw new Error('there can only be \'^\' and \'!\' markers in a ' +
+                        'subscription marble diagram. Found instead \'' + c + '\'.');
+            }
+        }
+        if (unsubscriptionFrame < 0) {
+            return new SubscriptionLog_1.SubscriptionLog(subscriptionFrame);
+        }
+        else {
+            return new SubscriptionLog_1.SubscriptionLog(subscriptionFrame, unsubscriptionFrame);
+        }
+    };
+    TestScheduler.parseMarbles = function (marbles, values, errorValue, materializeInnerObservables) {
+        if (materializeInnerObservables === void 0) { materializeInnerObservables = false; }
+        if (marbles.indexOf('!') !== -1) {
+            throw new Error('conventional marble diagrams cannot have the ' +
+                'unsubscription marker "!"');
+        }
+        var len = marbles.length;
+        var testMessages = [];
+        var subIndex = marbles.indexOf('^');
+        var frameOffset = subIndex === -1 ? 0 : (subIndex * -this.frameTimeFactor);
+        var getValue = typeof values !== 'object' ?
+            function (x) { return x; } :
+            function (x) {
+                // Support Observable-of-Observables
+                if (materializeInnerObservables && values[x] instanceof ColdObservable_1.ColdObservable) {
+                    return values[x].messages;
+                }
+                return values[x];
+            };
+        var groupStart = -1;
+        for (var i = 0; i < len; i++) {
+            var frame = i * this.frameTimeFactor + frameOffset;
+            var notification = void 0;
+            var c = marbles[i];
+            switch (c) {
+                case '-':
+                case ' ':
+                    break;
+                case '(':
+                    groupStart = frame;
+                    break;
+                case ')':
+                    groupStart = -1;
+                    break;
+                case '|':
+                    notification = Notification_1.Notification.createComplete();
+                    break;
+                case '^':
+                    break;
+                case '#':
+                    notification = Notification_1.Notification.createError(errorValue || 'error');
+                    break;
+                default:
+                    notification = Notification_1.Notification.createNext(getValue(c));
+                    break;
+            }
+            if (notification) {
+                testMessages.push({ frame: groupStart > -1 ? groupStart : frame, notification: notification });
+            }
+        }
+        return testMessages;
+    };
+    return TestScheduler;
+}(VirtualTimeScheduler_1.VirtualTimeScheduler));
+exports.TestScheduler = TestScheduler;
+
+},{"../Notification":61,"../Observable":62,"../scheduler/VirtualTimeScheduler":365,"./ColdObservable":373,"./HotObservable":374,"./SubscriptionLog":375}],378:[function(require,module,exports){
+"use strict";
+var root_1 = require('./root');
+var RequestAnimationFrameDefinition = (function () {
+    function RequestAnimationFrameDefinition(root) {
+        if (root.requestAnimationFrame) {
+            this.cancelAnimationFrame = root.cancelAnimationFrame.bind(root);
+            this.requestAnimationFrame = root.requestAnimationFrame.bind(root);
+        }
+        else if (root.mozRequestAnimationFrame) {
+            this.cancelAnimationFrame = root.mozCancelAnimationFrame.bind(root);
+            this.requestAnimationFrame = root.mozRequestAnimationFrame.bind(root);
+        }
+        else if (root.webkitRequestAnimationFrame) {
+            this.cancelAnimationFrame = root.webkitCancelAnimationFrame.bind(root);
+            this.requestAnimationFrame = root.webkitRequestAnimationFrame.bind(root);
+        }
+        else if (root.msRequestAnimationFrame) {
+            this.cancelAnimationFrame = root.msCancelAnimationFrame.bind(root);
+            this.requestAnimationFrame = root.msRequestAnimationFrame.bind(root);
+        }
+        else if (root.oRequestAnimationFrame) {
+            this.cancelAnimationFrame = root.oCancelAnimationFrame.bind(root);
+            this.requestAnimationFrame = root.oRequestAnimationFrame.bind(root);
+        }
+        else {
+            this.cancelAnimationFrame = root.clearTimeout.bind(root);
+            this.requestAnimationFrame = function (cb) { return root.setTimeout(cb, 1000 / 60); };
+        }
+    }
+    return RequestAnimationFrameDefinition;
+}());
+exports.RequestAnimationFrameDefinition = RequestAnimationFrameDefinition;
+exports.AnimationFrame = new RequestAnimationFrameDefinition(root_1.root);
+
+},{"./root":402}],379:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+/**
+ * An error thrown when an element was queried at a certain index of an
+ * Observable, but no such index or position exists in that sequence.
+ *
+ * @see {@link elementAt}
+ * @see {@link take}
+ * @see {@link takeLast}
+ *
+ * @class ArgumentOutOfRangeError
+ */
+var ArgumentOutOfRangeError = (function (_super) {
+    __extends(ArgumentOutOfRangeError, _super);
+    function ArgumentOutOfRangeError() {
+        var err = _super.call(this, 'argument out of range');
+        this.name = err.name = 'ArgumentOutOfRangeError';
+        this.stack = err.stack;
+        this.message = err.message;
+    }
+    return ArgumentOutOfRangeError;
+}(Error));
+exports.ArgumentOutOfRangeError = ArgumentOutOfRangeError;
+
+},{}],380:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+/**
+ * An error thrown when an Observable or a sequence was queried but has no
+ * elements.
+ *
+ * @see {@link first}
+ * @see {@link last}
+ * @see {@link single}
+ *
+ * @class EmptyError
+ */
+var EmptyError = (function (_super) {
+    __extends(EmptyError, _super);
+    function EmptyError() {
+        var err = _super.call(this, 'no elements in sequence');
+        this.name = err.name = 'EmptyError';
+        this.stack = err.stack;
+        this.message = err.message;
+    }
+    return EmptyError;
+}(Error));
+exports.EmptyError = EmptyError;
+
+},{}],381:[function(require,module,exports){
+"use strict";
+var FastMap = (function () {
+    function FastMap() {
+        this.values = {};
+    }
+    FastMap.prototype.delete = function (key) {
+        this.values[key] = null;
+        return true;
+    };
+    FastMap.prototype.set = function (key, value) {
+        this.values[key] = value;
+        return this;
+    };
+    FastMap.prototype.get = function (key) {
+        return this.values[key];
+    };
+    FastMap.prototype.forEach = function (cb, thisArg) {
+        var values = this.values;
+        for (var key in values) {
+            if (values.hasOwnProperty(key) && values[key] !== null) {
+                cb.call(thisArg, values[key], key);
+            }
+        }
+    };
+    FastMap.prototype.clear = function () {
+        this.values = {};
+    };
+    return FastMap;
+}());
+exports.FastMap = FastMap;
+
+},{}],382:[function(require,module,exports){
+/**
+Some credit for this helper goes to http://github.com/YuzuJS/setImmediate
+*/
+"use strict";
+var root_1 = require('./root');
+var ImmediateDefinition = (function () {
+    function ImmediateDefinition(root) {
+        this.root = root;
+        if (root.setImmediate && typeof root.setImmediate === 'function') {
+            this.setImmediate = root.setImmediate.bind(root);
+            this.clearImmediate = root.clearImmediate.bind(root);
+        }
+        else {
+            this.nextHandle = 1;
+            this.tasksByHandle = {};
+            this.currentlyRunningATask = false;
+            // Don't get fooled by e.g. browserify environments.
+            if (this.canUseProcessNextTick()) {
+                // For Node.js before 0.9
+                this.setImmediate = this.createProcessNextTickSetImmediate();
+            }
+            else if (this.canUsePostMessage()) {
+                // For non-IE10 modern browsers
+                this.setImmediate = this.createPostMessageSetImmediate();
+            }
+            else if (this.canUseMessageChannel()) {
+                // For web workers, where supported
+                this.setImmediate = this.createMessageChannelSetImmediate();
+            }
+            else if (this.canUseReadyStateChange()) {
+                // For IE 6–8
+                this.setImmediate = this.createReadyStateChangeSetImmediate();
+            }
+            else {
+                // For older browsers
+                this.setImmediate = this.createSetTimeoutSetImmediate();
+            }
+            var ci = function clearImmediate(handle) {
+                delete clearImmediate.instance.tasksByHandle[handle];
+            };
+            ci.instance = this;
+            this.clearImmediate = ci;
+        }
+    }
+    ImmediateDefinition.prototype.identify = function (o) {
+        return this.root.Object.prototype.toString.call(o);
+    };
+    ImmediateDefinition.prototype.canUseProcessNextTick = function () {
+        return this.identify(this.root.process) === '[object process]';
+    };
+    ImmediateDefinition.prototype.canUseMessageChannel = function () {
+        return Boolean(this.root.MessageChannel);
+    };
+    ImmediateDefinition.prototype.canUseReadyStateChange = function () {
+        var document = this.root.document;
+        return Boolean(document && 'onreadystatechange' in document.createElement('script'));
+    };
+    ImmediateDefinition.prototype.canUsePostMessage = function () {
+        var root = this.root;
+        // The test against `importScripts` prevents this implementation from being installed inside a web worker,
+        // where `root.postMessage` means something completely different and can't be used for this purpose.
+        if (root.postMessage && !root.importScripts) {
+            var postMessageIsAsynchronous_1 = true;
+            var oldOnMessage = root.onmessage;
+            root.onmessage = function () {
+                postMessageIsAsynchronous_1 = false;
+            };
+            root.postMessage('', '*');
+            root.onmessage = oldOnMessage;
+            return postMessageIsAsynchronous_1;
+        }
+        return false;
+    };
+    // This function accepts the same arguments as setImmediate, but
+    // returns a function that requires no arguments.
+    ImmediateDefinition.prototype.partiallyApplied = function (handler) {
+        var args = [];
+        for (var _i = 1; _i < arguments.length; _i++) {
+            args[_i - 1] = arguments[_i];
+        }
+        var fn = function result() {
+            var _a = result, handler = _a.handler, args = _a.args;
+            if (typeof handler === 'function') {
+                handler.apply(undefined, args);
+            }
+            else {
+                (new Function('' + handler))();
+            }
+        };
+        fn.handler = handler;
+        fn.args = args;
+        return fn;
+    };
+    ImmediateDefinition.prototype.addFromSetImmediateArguments = function (args) {
+        this.tasksByHandle[this.nextHandle] = this.partiallyApplied.apply(undefined, args);
+        return this.nextHandle++;
+    };
+    ImmediateDefinition.prototype.createProcessNextTickSetImmediate = function () {
+        var fn = function setImmediate() {
+            var instance = setImmediate.instance;
+            var handle = instance.addFromSetImmediateArguments(arguments);
+            instance.root.process.nextTick(instance.partiallyApplied(instance.runIfPresent, handle));
+            return handle;
+        };
+        fn.instance = this;
+        return fn;
+    };
+    ImmediateDefinition.prototype.createPostMessageSetImmediate = function () {
+        // Installs an event handler on `global` for the `message` event: see
+        // * https://developer.mozilla.org/en/DOM/window.postMessage
+        // * http://www.whatwg.org/specs/web-apps/current-work/multipage/comms.html#crossDocumentMessages
+        var root = this.root;
+        var messagePrefix = 'setImmediate$' + root.Math.random() + '$';
+        var onGlobalMessage = function globalMessageHandler(event) {
+            var instance = globalMessageHandler.instance;
+            if (event.source === root &&
+                typeof event.data === 'string' &&
+                event.data.indexOf(messagePrefix) === 0) {
+                instance.runIfPresent(+event.data.slice(messagePrefix.length));
+            }
+        };
+        onGlobalMessage.instance = this;
+        root.addEventListener('message', onGlobalMessage, false);
+        var fn = function setImmediate() {
+            var _a = setImmediate, messagePrefix = _a.messagePrefix, instance = _a.instance;
+            var handle = instance.addFromSetImmediateArguments(arguments);
+            instance.root.postMessage(messagePrefix + handle, '*');
+            return handle;
+        };
+        fn.instance = this;
+        fn.messagePrefix = messagePrefix;
+        return fn;
+    };
+    ImmediateDefinition.prototype.runIfPresent = function (handle) {
+        // From the spec: 'Wait until any invocations of this algorithm started before this one have completed.'
+        // So if we're currently running a task, we'll need to delay this invocation.
+        if (this.currentlyRunningATask) {
+            // Delay by doing a setTimeout. setImmediate was tried instead, but in Firefox 7 it generated a
+            // 'too much recursion' error.
+            this.root.setTimeout(this.partiallyApplied(this.runIfPresent, handle), 0);
+        }
+        else {
+            var task = this.tasksByHandle[handle];
+            if (task) {
+                this.currentlyRunningATask = true;
+                try {
+                    task();
+                }
+                finally {
+                    this.clearImmediate(handle);
+                    this.currentlyRunningATask = false;
+                }
+            }
+        }
+    };
+    ImmediateDefinition.prototype.createMessageChannelSetImmediate = function () {
+        var _this = this;
+        var channel = new this.root.MessageChannel();
+        channel.port1.onmessage = function (event) {
+            var handle = event.data;
+            _this.runIfPresent(handle);
+        };
+        var fn = function setImmediate() {
+            var _a = setImmediate, channel = _a.channel, instance = _a.instance;
+            var handle = instance.addFromSetImmediateArguments(arguments);
+            channel.port2.postMessage(handle);
+            return handle;
+        };
+        fn.channel = channel;
+        fn.instance = this;
+        return fn;
+    };
+    ImmediateDefinition.prototype.createReadyStateChangeSetImmediate = function () {
+        var fn = function setImmediate() {
+            var instance = setImmediate.instance;
+            var root = instance.root;
+            var doc = root.document;
+            var html = doc.documentElement;
+            var handle = instance.addFromSetImmediateArguments(arguments);
+            // Create a <script> element; its readystatechange event will be fired asynchronously once it is inserted
+            // into the document. Do so, thus queuing up the task. Remember to clean up once it's been called.
+            var script = doc.createElement('script');
+            script.onreadystatechange = function () {
+                instance.runIfPresent(handle);
+                script.onreadystatechange = null;
+                html.removeChild(script);
+                script = null;
+            };
+            html.appendChild(script);
+            return handle;
+        };
+        fn.instance = this;
+        return fn;
+    };
+    ImmediateDefinition.prototype.createSetTimeoutSetImmediate = function () {
+        var fn = function setImmediate() {
+            var instance = setImmediate.instance;
+            var handle = instance.addFromSetImmediateArguments(arguments);
+            instance.root.setTimeout(instance.partiallyApplied(instance.runIfPresent, handle), 0);
+            return handle;
+        };
+        fn.instance = this;
+        return fn;
+    };
+    return ImmediateDefinition;
+}());
+exports.ImmediateDefinition = ImmediateDefinition;
+exports.Immediate = new ImmediateDefinition(root_1.root);
+
+},{"./root":402}],383:[function(require,module,exports){
+"use strict";
+var root_1 = require('./root');
+var MapPolyfill_1 = require('./MapPolyfill');
+exports.Map = root_1.root.Map || (function () { return MapPolyfill_1.MapPolyfill; })();
+
+},{"./MapPolyfill":384,"./root":402}],384:[function(require,module,exports){
+"use strict";
+var MapPolyfill = (function () {
+    function MapPolyfill() {
+        this.size = 0;
+        this._values = [];
+        this._keys = [];
+    }
+    MapPolyfill.prototype.get = function (key) {
+        var i = this._keys.indexOf(key);
+        return i === -1 ? undefined : this._values[i];
+    };
+    MapPolyfill.prototype.set = function (key, value) {
+        var i = this._keys.indexOf(key);
+        if (i === -1) {
+            this._keys.push(key);
+            this._values.push(value);
+            this.size++;
+        }
+        else {
+            this._values[i] = value;
+        }
+        return this;
+    };
+    MapPolyfill.prototype.delete = function (key) {
+        var i = this._keys.indexOf(key);
+        if (i === -1) {
+            return false;
+        }
+        this._values.splice(i, 1);
+        this._keys.splice(i, 1);
+        this.size--;
+        return true;
+    };
+    MapPolyfill.prototype.clear = function () {
+        this._keys.length = 0;
+        this._values.length = 0;
+        this.size = 0;
+    };
+    MapPolyfill.prototype.forEach = function (cb, thisArg) {
+        for (var i = 0; i < this.size; i++) {
+            cb.call(thisArg, this._values[i], this._keys[i]);
+        }
+    };
+    return MapPolyfill;
+}());
+exports.MapPolyfill = MapPolyfill;
+
+},{}],385:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -18929,7 +39392,67 @@ var ObjectUnsubscribedError = (function (_super) {
 }(Error));
 exports.ObjectUnsubscribedError = ObjectUnsubscribedError;
 
-},{}],64:[function(require,module,exports){
+},{}],386:[function(require,module,exports){
+"use strict";
+var root_1 = require('./root');
+function minimalSetImpl() {
+    // THIS IS NOT a full impl of Set, this is just the minimum
+    // bits of functionality we need for this library.
+    return (function () {
+        function MinimalSet() {
+            this._values = [];
+        }
+        MinimalSet.prototype.add = function (value) {
+            if (!this.has(value)) {
+                this._values.push(value);
+            }
+        };
+        MinimalSet.prototype.has = function (value) {
+            return this._values.indexOf(value) !== -1;
+        };
+        Object.defineProperty(MinimalSet.prototype, "size", {
+            get: function () {
+                return this._values.length;
+            },
+            enumerable: true,
+            configurable: true
+        });
+        MinimalSet.prototype.clear = function () {
+            this._values.length = 0;
+        };
+        return MinimalSet;
+    }());
+}
+exports.minimalSetImpl = minimalSetImpl;
+exports.Set = root_1.root.Set || minimalSetImpl();
+
+},{"./root":402}],387:[function(require,module,exports){
+"use strict";
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+/**
+ * An error thrown when duetime elapses.
+ *
+ * @see {@link timeout}
+ *
+ * @class TimeoutError
+ */
+var TimeoutError = (function (_super) {
+    __extends(TimeoutError, _super);
+    function TimeoutError() {
+        var err = _super.call(this, 'Timeout has occurred');
+        this.name = err.name = 'TimeoutError';
+        this.stack = err.stack;
+        this.message = err.message;
+    }
+    return TimeoutError;
+}(Error));
+exports.TimeoutError = TimeoutError;
+
+},{}],388:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
@@ -18955,48 +39478,127 @@ var UnsubscriptionError = (function (_super) {
 }(Error));
 exports.UnsubscriptionError = UnsubscriptionError;
 
-},{}],65:[function(require,module,exports){
+},{}],389:[function(require,module,exports){
+"use strict";
+function applyMixins(derivedCtor, baseCtors) {
+    for (var i = 0, len = baseCtors.length; i < len; i++) {
+        var baseCtor = baseCtors[i];
+        var propertyKeys = Object.getOwnPropertyNames(baseCtor.prototype);
+        for (var j = 0, len2 = propertyKeys.length; j < len2; j++) {
+            var name_1 = propertyKeys[j];
+            derivedCtor.prototype[name_1] = baseCtor.prototype[name_1];
+        }
+    }
+}
+exports.applyMixins = applyMixins;
+
+},{}],390:[function(require,module,exports){
+"use strict";
+var root_1 = require('./root');
+function assignImpl(target) {
+    var sources = [];
+    for (var _i = 1; _i < arguments.length; _i++) {
+        sources[_i - 1] = arguments[_i];
+    }
+    var len = sources.length;
+    for (var i = 0; i < len; i++) {
+        var source = sources[i];
+        for (var k in source) {
+            if (source.hasOwnProperty(k)) {
+                target[k] = source[k];
+            }
+        }
+    }
+    return target;
+}
+exports.assignImpl = assignImpl;
+;
+function getAssign(root) {
+    return root.Object.assign || assignImpl;
+}
+exports.getAssign = getAssign;
+exports.assign = getAssign(root_1.root);
+
+},{"./root":402}],391:[function(require,module,exports){
 "use strict";
 // typeof any so that it we don't have to cast when comparing a result to the error object
 exports.errorObject = { e: {} };
 
-},{}],66:[function(require,module,exports){
+},{}],392:[function(require,module,exports){
 "use strict";
 exports.isArray = Array.isArray || (function (x) { return x && typeof x.length === 'number'; });
 
-},{}],67:[function(require,module,exports){
+},{}],393:[function(require,module,exports){
 "use strict";
 exports.isArrayLike = (function (x) { return x && typeof x.length === 'number'; });
 
-},{}],68:[function(require,module,exports){
+},{}],394:[function(require,module,exports){
 "use strict";
 function isDate(value) {
     return value instanceof Date && !isNaN(+value);
 }
 exports.isDate = isDate;
 
-},{}],69:[function(require,module,exports){
+},{}],395:[function(require,module,exports){
 "use strict";
 function isFunction(x) {
     return typeof x === 'function';
 }
 exports.isFunction = isFunction;
 
-},{}],70:[function(require,module,exports){
+},{}],396:[function(require,module,exports){
+"use strict";
+var isArray_1 = require('../util/isArray');
+function isNumeric(val) {
+    // parseFloat NaNs numeric-cast false positives (null|true|false|"")
+    // ...but misinterprets leading-number strings, particularly hex literals ("0x...")
+    // subtraction forces infinities to NaN
+    // adding 1 corrects loss of precision from parseFloat (#15100)
+    return !isArray_1.isArray(val) && (val - parseFloat(val) + 1) >= 0;
+}
+exports.isNumeric = isNumeric;
+;
+
+},{"../util/isArray":392}],397:[function(require,module,exports){
 "use strict";
 function isObject(x) {
     return x != null && typeof x === 'object';
 }
 exports.isObject = isObject;
 
-},{}],71:[function(require,module,exports){
+},{}],398:[function(require,module,exports){
 "use strict";
 function isPromise(value) {
     return value && typeof value.subscribe !== 'function' && typeof value.then === 'function';
 }
 exports.isPromise = isPromise;
 
-},{}],72:[function(require,module,exports){
+},{}],399:[function(require,module,exports){
+"use strict";
+function isScheduler(value) {
+    return value && typeof value.schedule === 'function';
+}
+exports.isScheduler = isScheduler;
+
+},{}],400:[function(require,module,exports){
+"use strict";
+/* tslint:disable:no-empty */
+function noop() { }
+exports.noop = noop;
+
+},{}],401:[function(require,module,exports){
+"use strict";
+function not(pred, thisArg) {
+    function notPred() {
+        return !(notPred.pred.apply(notPred.thisArg, arguments));
+    }
+    notPred.pred = pred;
+    notPred.thisArg = thisArg;
+    return notPred;
+}
+exports.not = not;
+
+},{}],402:[function(require,module,exports){
 (function (global){
 "use strict";
 // CommonJS / Node have global context exposed as "global" variable.
@@ -19018,7 +39620,7 @@ exports.root = _root;
 })();
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],73:[function(require,module,exports){
+},{}],403:[function(require,module,exports){
 "use strict";
 var root_1 = require('./root');
 var isArrayLike_1 = require('./isArrayLike');
@@ -19097,7 +39699,7 @@ function subscribeToResult(outerSubscriber, result, outerValue, outerIndex) {
 }
 exports.subscribeToResult = subscribeToResult;
 
-},{"../InnerSubscriber":40,"../Observable":42,"../symbol/iterator":60,"../symbol/observable":61,"./isArrayLike":67,"./isObject":70,"./isPromise":71,"./root":72}],74:[function(require,module,exports){
+},{"../InnerSubscriber":60,"../Observable":62,"../symbol/iterator":370,"../symbol/observable":371,"./isArrayLike":393,"./isObject":397,"./isPromise":398,"./root":402}],404:[function(require,module,exports){
 "use strict";
 var Subscriber_1 = require('../Subscriber');
 var rxSubscriber_1 = require('../symbol/rxSubscriber');
@@ -19118,7 +39720,7 @@ function toSubscriber(nextOrObserver, error, complete) {
 }
 exports.toSubscriber = toSubscriber;
 
-},{"../Observer":43,"../Subscriber":48,"../symbol/rxSubscriber":62}],75:[function(require,module,exports){
+},{"../Observer":63,"../Subscriber":70,"../symbol/rxSubscriber":372}],405:[function(require,module,exports){
 "use strict";
 var errorObject_1 = require('./errorObject');
 var tryCatchTarget;
@@ -19138,5 +39740,5 @@ function tryCatch(fn) {
 exports.tryCatch = tryCatch;
 ;
 
-},{"./errorObject":65}]},{},[2])(2)
+},{"./errorObject":391}]},{},[2])(2)
 });

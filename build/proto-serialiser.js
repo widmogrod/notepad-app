@@ -39,21 +39,27 @@ function serialiseOperationsList(ops) {
 }
 function serialiseOperation(op) {
     if (op instanceof text_1.Selection) {
-        return new pb.Selection({
-            origin: op.origin,
-            at: op.at,
-            length: op.length,
+        return new pb.Operation({
+            selection: new pb.Selection({
+                origin: op.origin,
+                at: op.at,
+                length: op.length,
+            }),
         });
     }
     if (op instanceof text_1.Insert) {
-        return new pb.Insert({
-            at: op.at,
-            value: op.value,
+        return new pb.Operation({
+            insert: new pb.Insert({
+                at: op.at,
+                value: op.value,
+            }),
         });
     }
-    return new pb.Delete({
-        at: op.at,
-        length: op.length,
+    return new pb.Operation({
+        'delete': new pb.Delete({
+            at: op.at,
+            length: op.length,
+        }),
     });
 }
 function deserialiseOperations(oo) {
@@ -64,6 +70,7 @@ function deserialiseOperations(oo) {
 }
 exports.deserialiseOperations = deserialiseOperations;
 function deserialiesOrder(o) {
+    console.log(o);
     if (o.vectorClock) {
         return deserialiseVectorClock(o.vectorClock);
     }

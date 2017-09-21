@@ -12,7 +12,9 @@ app.use(express.static('public'));
 
 import {createFromOrderer} from 'js-crdt/build/text';
 import {createVectorClock} from 'js-crdt/build/order';
-import {serialiseOperations, deserialiseOperations} from './serialiser';
+// import {serialiseOperations, deserialiseOperations} from './serialiser';
+import {serialiseOperations, deserialiseOperations} from './proto-serialiser';
+import * as pb from './protobuf/events';
 
 let database = createFromOrderer(createVectorClock('server'));
 
@@ -25,7 +27,8 @@ wss.on('connection', function connection(ws) {
 
   ws.on('message', function incoming(data) {
     // Update database state
-    const object = JSON.parse(data);
+    // const object = JSON.parse(data);
+    const object = pb.OrderedOperations.decode(new Uint8Array(data));
     const partial = deserialiseOperations(object);
 
     database = database.next();

@@ -11,18 +11,21 @@ app.use(express.static('dist'));
 app.use(express.static('public'));
 const text_1 = require("js-crdt/build/text");
 const order_1 = require("js-crdt/build/order");
-const serialiser_1 = require("./serialiser");
+// import {serialiseOperations, deserialiseOperations} from './serialiser';
+const proto_serialiser_1 = require("./proto-serialiser");
+const pb = require("./protobuf/events");
 let database = text_1.createFromOrderer(order_1.createVectorClock('server'));
 const wss = new WebSocket.Server({ server });
 wss.on('connection', function connection(ws) {
     // Restore database state
     database.reduce((_, orderedOperations) => {
-        return ws.send(JSON.stringify(serialiser_1.serialiseOperations(orderedOperations)));
+        return ws.send(JSON.stringify(proto_serialiser_1.serialiseOperations(orderedOperations)));
     }, null);
     ws.on('message', function incoming(data) {
         // Update database state
-        const object = JSON.parse(data);
-        const partial = serialiser_1.deserialiseOperations(object);
+        // const object = JSON.parse(data);
+        const object = pb.OrderedOperations.decode(new Uint8Array(data));
+        const partial = proto_serialiser_1.deserialiseOperations(object);
         database = database.next();
         database.mergeOperations(partial);
         // Broadcast to everyone else.
