@@ -70,7 +70,6 @@ function deserialiseOperations(oo) {
 }
 exports.deserialiseOperations = deserialiseOperations;
 function deserialiesOrder(o) {
-    console.log(o);
     if (o.vectorClock) {
         return deserialiseVectorClock(o.vectorClock);
     }

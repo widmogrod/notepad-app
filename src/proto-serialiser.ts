@@ -77,7 +77,6 @@ export function deserialiseOperations(oo: pb.IOrderedOperations): OrderedOperati
 }
 
 export function deserialiesOrder(o: pb.IOrder): Orderer<any> {
-  console.log(o)
   if (o.vectorClock) {
     return deserialiseVectorClock(o.vectorClock);
   }

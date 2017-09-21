@@ -14,7 +14,8 @@
     "fix": "eslint src --fix",
     "preprotobuf": "pbjs -t static-module -w commonjs -o src/protobuf/events.js src/protobuf/events.proto",
     "protobuf": "pbts -o src/protobuf/events.d.ts src/protobuf/events.js",
-    "start": "tsc && node build/server.js"
+    "start": "node build/server.js",
+    "start-dev": "tsc && node build/server.js"
   },
   "author": "widmogrod@gmail.com",
   "license": "ISC",
