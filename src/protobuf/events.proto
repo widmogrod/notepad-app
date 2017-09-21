@@ -1,13 +1,13 @@
 syntax = "proto3";
 
-message Version {
-  string name = 1;
+message Id {
+  string node = 1;
   uint32 version = 2;
 }
 
 message VectorClock {
-  string node = 1;
-  repeated Version vector = 2;
+  Id id = 1;
+  repeated Id vector = 2;
 }
 
 message Insert {

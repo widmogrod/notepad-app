@@ -9,24 +9,24 @@ var $Reader = $protobuf.Reader, $Writer = $protobuf.Writer, $util = $protobuf.ut
 // Exported root namespace
 var $root = $protobuf.roots["default"] || ($protobuf.roots["default"] = {});
 
-$root.Version = (function() {
+$root.Id = (function() {
 
     /**
-     * Properties of a Version.
-     * @exports IVersion
-     * @interface IVersion
-     * @property {string} [name] Version name
-     * @property {number} [version] Version version
+     * Properties of an Id.
+     * @exports IId
+     * @interface IId
+     * @property {string} [node] Id node
+     * @property {number} [version] Id version
      */
 
     /**
-     * Constructs a new Version.
-     * @exports Version
-     * @classdesc Represents a Version.
+     * Constructs a new Id.
+     * @exports Id
+     * @classdesc Represents an Id.
      * @constructor
-     * @param {IVersion=} [properties] Properties to set
+     * @param {IId=} [properties] Properties to set
      */
-    function Version(properties) {
+    function Id(properties) {
         if (properties)
             for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                 if (properties[keys[i]] != null)
@@ -34,85 +34,85 @@ $root.Version = (function() {
     }
 
     /**
-     * Version name.
-     * @member {string}name
-     * @memberof Version
+     * Id node.
+     * @member {string}node
+     * @memberof Id
      * @instance
      */
-    Version.prototype.name = "";
+    Id.prototype.node = "";
 
     /**
-     * Version version.
+     * Id version.
      * @member {number}version
-     * @memberof Version
+     * @memberof Id
      * @instance
      */
-    Version.prototype.version = 0;
+    Id.prototype.version = 0;
 
     /**
-     * Creates a new Version instance using the specified properties.
+     * Creates a new Id instance using the specified properties.
      * @function create
-     * @memberof Version
+     * @memberof Id
      * @static
-     * @param {IVersion=} [properties] Properties to set
-     * @returns {Version} Version instance
+     * @param {IId=} [properties] Properties to set
+     * @returns {Id} Id instance
      */
-    Version.create = function create(properties) {
-        return new Version(properties);
+    Id.create = function create(properties) {
+        return new Id(properties);
     };
 
     /**
-     * Encodes the specified Version message. Does not implicitly {@link Version.verify|verify} messages.
+     * Encodes the specified Id message. Does not implicitly {@link Id.verify|verify} messages.
      * @function encode
-     * @memberof Version
+     * @memberof Id
      * @static
-     * @param {IVersion} message Version message or plain object to encode
+     * @param {IId} message Id message or plain object to encode
      * @param {$protobuf.Writer} [writer] Writer to encode to
      * @returns {$protobuf.Writer} Writer
      */
-    Version.encode = function encode(message, writer) {
+    Id.encode = function encode(message, writer) {
         if (!writer)
             writer = $Writer.create();
-        if (message.name != null && message.hasOwnProperty("name"))
-            writer.uint32(/* id 1, wireType 2 =*/10).string(message.name);
+        if (message.node != null && message.hasOwnProperty("node"))
+            writer.uint32(/* id 1, wireType 2 =*/10).string(message.node);
         if (message.version != null && message.hasOwnProperty("version"))
             writer.uint32(/* id 2, wireType 0 =*/16).uint32(message.version);
         return writer;
     };
 
     /**
-     * Encodes the specified Version message, length delimited. Does not implicitly {@link Version.verify|verify} messages.
+     * Encodes the specified Id message, length delimited. Does not implicitly {@link Id.verify|verify} messages.
      * @function encodeDelimited
-     * @memberof Version
+     * @memberof Id
      * @static
-     * @param {IVersion} message Version message or plain object to encode
+     * @param {IId} message Id message or plain object to encode
      * @param {$protobuf.Writer} [writer] Writer to encode to
      * @returns {$protobuf.Writer} Writer
      */
-    Version.encodeDelimited = function encodeDelimited(message, writer) {
+    Id.encodeDelimited = function encodeDelimited(message, writer) {
         return this.encode(message, writer).ldelim();
     };
 
     /**
-     * Decodes a Version message from the specified reader or buffer.
+     * Decodes an Id message from the specified reader or buffer.
      * @function decode
-     * @memberof Version
+     * @memberof Id
      * @static
      * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
      * @param {number} [length] Message length if known beforehand
-     * @returns {Version} Version
+     * @returns {Id} Id
      * @throws {Error} If the payload is not a reader or valid buffer
      * @throws {$protobuf.util.ProtocolError} If required fields are missing
      */
-    Version.decode = function decode(reader, length) {
+    Id.decode = function decode(reader, length) {
         if (!(reader instanceof $Reader))
             reader = $Reader.create(reader);
-        var end = length === undefined ? reader.len : reader.pos + length, message = new $root.Version();
+        var end = length === undefined ? reader.len : reader.pos + length, message = new $root.Id();
         while (reader.pos < end) {
             var tag = reader.uint32();
             switch (tag >>> 3) {
             case 1:
-                message.name = reader.string();
+                message.node = reader.string();
                 break;
             case 2:
                 message.version = reader.uint32();
@@ -126,35 +126,35 @@ $root.Version = (function() {
     };
 
     /**
-     * Decodes a Version message from the specified reader or buffer, length delimited.
+     * Decodes an Id message from the specified reader or buffer, length delimited.
      * @function decodeDelimited
-     * @memberof Version
+     * @memberof Id
      * @static
      * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-     * @returns {Version} Version
+     * @returns {Id} Id
      * @throws {Error} If the payload is not a reader or valid buffer
      * @throws {$protobuf.util.ProtocolError} If required fields are missing
      */
-    Version.decodeDelimited = function decodeDelimited(reader) {
+    Id.decodeDelimited = function decodeDelimited(reader) {
         if (!(reader instanceof $Reader))
             reader = new $Reader(reader);
         return this.decode(reader, reader.uint32());
     };
 
     /**
-     * Verifies a Version message.
+     * Verifies an Id message.
      * @function verify
-     * @memberof Version
+     * @memberof Id
      * @static
      * @param {Object.<string,*>} message Plain object to verify
      * @returns {string|null} `null` if valid, otherwise the reason why it is not
      */
-    Version.verify = function verify(message) {
+    Id.verify = function verify(message) {
         if (typeof message !== "object" || message === null)
             return "object expected";
-        if (message.name != null && message.hasOwnProperty("name"))
-            if (!$util.isString(message.name))
-                return "name: string expected";
+        if (message.node != null && message.hasOwnProperty("node"))
+            if (!$util.isString(message.node))
+                return "node: string expected";
         if (message.version != null && message.hasOwnProperty("version"))
             if (!$util.isInteger(message.version))
                 return "version: integer expected";
@@ -162,60 +162,60 @@ $root.Version = (function() {
     };
 
     /**
-     * Creates a Version message from a plain object. Also converts values to their respective internal types.
+     * Creates an Id message from a plain object. Also converts values to their respective internal types.
      * @function fromObject
-     * @memberof Version
+     * @memberof Id
      * @static
      * @param {Object.<string,*>} object Plain object
-     * @returns {Version} Version
+     * @returns {Id} Id
      */
-    Version.fromObject = function fromObject(object) {
-        if (object instanceof $root.Version)
+    Id.fromObject = function fromObject(object) {
+        if (object instanceof $root.Id)
             return object;
-        var message = new $root.Version();
-        if (object.name != null)
-            message.name = String(object.name);
+        var message = new $root.Id();
+        if (object.node != null)
+            message.node = String(object.node);
         if (object.version != null)
             message.version = object.version >>> 0;
         return message;
     };
 
     /**
-     * Creates a plain object from a Version message. Also converts values to other types if specified.
+     * Creates a plain object from an Id message. Also converts values to other types if specified.
      * @function toObject
-     * @memberof Version
+     * @memberof Id
      * @static
-     * @param {Version} message Version
+     * @param {Id} message Id
      * @param {$protobuf.IConversionOptions} [options] Conversion options
      * @returns {Object.<string,*>} Plain object
      */
-    Version.toObject = function toObject(message, options) {
+    Id.toObject = function toObject(message, options) {
         if (!options)
             options = {};
         var object = {};
         if (options.defaults) {
-            object.name = "";
+            object.node = "";
             object.version = 0;
         }
-        if (message.name != null && message.hasOwnProperty("name"))
-            object.name = message.name;
+        if (message.node != null && message.hasOwnProperty("node"))
+            object.node = message.node;
         if (message.version != null && message.hasOwnProperty("version"))
             object.version = message.version;
         return object;
     };
 
     /**
-     * Converts this Version to JSON.
+     * Converts this Id to JSON.
      * @function toJSON
-     * @memberof Version
+     * @memberof Id
      * @instance
      * @returns {Object.<string,*>} JSON object
      */
-    Version.prototype.toJSON = function toJSON() {
+    Id.prototype.toJSON = function toJSON() {
         return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
     };
 
-    return Version;
+    return Id;
 })();
 
 $root.VectorClock = (function() {
@@ -224,8 +224,8 @@ $root.VectorClock = (function() {
      * Properties of a VectorClock.
      * @exports IVectorClock
      * @interface IVectorClock
-     * @property {string} [node] VectorClock node
-     * @property {Array.<IVersion>} [vector] VectorClock vector
+     * @property {IId} [id] VectorClock id
+     * @property {Array.<IId>} [vector] VectorClock vector
      */
 
     /**
@@ -244,16 +244,16 @@ $root.VectorClock = (function() {
     }
 
     /**
-     * VectorClock node.
-     * @member {string}node
+     * VectorClock id.
+     * @member {(IId|null|undefined)}id
      * @memberof VectorClock
      * @instance
      */
-    VectorClock.prototype.node = "";
+    VectorClock.prototype.id = null;
 
     /**
      * VectorClock vector.
-     * @member {Array.<IVersion>}vector
+     * @member {Array.<IId>}vector
      * @memberof VectorClock
      * @instance
      */
@@ -283,11 +283,11 @@ $root.VectorClock = (function() {
     VectorClock.encode = function encode(message, writer) {
         if (!writer)
             writer = $Writer.create();
-        if (message.node != null && message.hasOwnProperty("node"))
-            writer.uint32(/* id 1, wireType 2 =*/10).string(message.node);
+        if (message.id != null && message.hasOwnProperty("id"))
+            $root.Id.encode(message.id, writer.uint32(/* id 1, wireType 2 =*/10).fork()).ldelim();
         if (message.vector != null && message.vector.length)
             for (var i = 0; i < message.vector.length; ++i)
-                $root.Version.encode(message.vector[i], writer.uint32(/* id 2, wireType 2 =*/18).fork()).ldelim();
+                $root.Id.encode(message.vector[i], writer.uint32(/* id 2, wireType 2 =*/18).fork()).ldelim();
         return writer;
     };
 
@@ -323,12 +323,12 @@ $root.VectorClock = (function() {
             var tag = reader.uint32();
             switch (tag >>> 3) {
             case 1:
-                message.node = reader.string();
+                message.id = $root.Id.decode(reader, reader.uint32());
                 break;
             case 2:
                 if (!(message.vector && message.vector.length))
                     message.vector = [];
-                message.vector.push($root.Version.decode(reader, reader.uint32()));
+                message.vector.push($root.Id.decode(reader, reader.uint32()));
                 break;
             default:
                 reader.skipType(tag & 7);
@@ -365,14 +365,16 @@ $root.VectorClock = (function() {
     VectorClock.verify = function verify(message) {
         if (typeof message !== "object" || message === null)
             return "object expected";
-        if (message.node != null && message.hasOwnProperty("node"))
-            if (!$util.isString(message.node))
-                return "node: string expected";
+        if (message.id != null && message.hasOwnProperty("id")) {
+            var error = $root.Id.verify(message.id);
+            if (error)
+                return "id." + error;
+        }
         if (message.vector != null && message.hasOwnProperty("vector")) {
             if (!Array.isArray(message.vector))
                 return "vector: array expected";
             for (var i = 0; i < message.vector.length; ++i) {
-                var error = $root.Version.verify(message.vector[i]);
+                error = $root.Id.verify(message.vector[i]);
                 if (error)
                     return "vector." + error;
             }
@@ -392,8 +394,11 @@ $root.VectorClock = (function() {
         if (object instanceof $root.VectorClock)
             return object;
         var message = new $root.VectorClock();
-        if (object.node != null)
-            message.node = String(object.node);
+        if (object.id != null) {
+            if (typeof object.id !== "object")
+                throw TypeError(".VectorClock.id: object expected");
+            message.id = $root.Id.fromObject(object.id);
+        }
         if (object.vector) {
             if (!Array.isArray(object.vector))
                 throw TypeError(".VectorClock.vector: array expected");
@@ -401,7 +406,7 @@ $root.VectorClock = (function() {
             for (var i = 0; i < object.vector.length; ++i) {
                 if (typeof object.vector[i] !== "object")
                     throw TypeError(".VectorClock.vector: object expected");
-                message.vector[i] = $root.Version.fromObject(object.vector[i]);
+                message.vector[i] = $root.Id.fromObject(object.vector[i]);
             }
         }
         return message;
@@ -423,13 +428,13 @@ $root.VectorClock = (function() {
         if (options.arrays || options.defaults)
             object.vector = [];
         if (options.defaults)
-            object.node = "";
-        if (message.node != null && message.hasOwnProperty("node"))
-            object.node = message.node;
+            object.id = null;
+        if (message.id != null && message.hasOwnProperty("id"))
+            object.id = $root.Id.toObject(message.id, options);
         if (message.vector && message.vector.length) {
             object.vector = [];
             for (var j = 0; j < message.vector.length; ++j)
-                object.vector[j] = $root.Version.toObject(message.vector[j], options);
+                object.vector[j] = $root.Id.toObject(message.vector[j], options);
         }
         return object;
     };
