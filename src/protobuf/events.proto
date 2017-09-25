@@ -45,8 +45,12 @@ message OrderedOperations {
   repeated Operation operations = 2;
 }
 
+message TextChangedEvent {
+    OrderedOperations orderedOperations = 1;
+}
+
 message Event {
   oneof type {
-    OrderedOperations orderedOperations = 1;
+    TextChangedEvent textChanged = 1;
   }
 }
