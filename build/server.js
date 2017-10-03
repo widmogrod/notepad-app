@@ -24,12 +24,6 @@ wss.broadcast = function (data, exceptClient) {
     });
 };
 wss.on('connection', function connection(ws) {
-    // Restore database state
-    database.reduce((_, orderedOperations) => {
-        const event = new events_1.TextChangedEvent(orderedOperations);
-        const data = proto_serialiser_1.serialise(event);
-        return ws.send(data);
-    }, null);
     ws.on('message', function incoming(data) {
         // Update database state
         const array = new Uint8Array(data);
@@ -38,6 +32,14 @@ wss.on('connection', function connection(ws) {
             database = database.next();
             database = database.mergeOperations(event.orderedOperations);
             wss.broadcast(data, ws);
+        }
+        if (event instanceof events_1.ChangesFromEvent) {
+            // Restore database state from order
+            database.from(event.from).reduce((_, orderedOperations) => {
+                const event = new events_1.TextChangedEvent(orderedOperations);
+                const data = proto_serialiser_1.serialise(event);
+                return ws.send(data);
+            }, null);
         }
     });
 });

@@ -2008,6 +2008,197 @@ $root.TextChangedEvent = (function() {
     return TextChangedEvent;
 })();
 
+$root.ChangesFromEvent = (function() {
+
+    /**
+     * Properties of a ChangesFromEvent.
+     * @exports IChangesFromEvent
+     * @interface IChangesFromEvent
+     * @property {IOrder} [from] ChangesFromEvent from
+     */
+
+    /**
+     * Constructs a new ChangesFromEvent.
+     * @exports ChangesFromEvent
+     * @classdesc Represents a ChangesFromEvent.
+     * @constructor
+     * @param {IChangesFromEvent=} [properties] Properties to set
+     */
+    function ChangesFromEvent(properties) {
+        if (properties)
+            for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                if (properties[keys[i]] != null)
+                    this[keys[i]] = properties[keys[i]];
+    }
+
+    /**
+     * ChangesFromEvent from.
+     * @member {(IOrder|null|undefined)}from
+     * @memberof ChangesFromEvent
+     * @instance
+     */
+    ChangesFromEvent.prototype.from = null;
+
+    /**
+     * Creates a new ChangesFromEvent instance using the specified properties.
+     * @function create
+     * @memberof ChangesFromEvent
+     * @static
+     * @param {IChangesFromEvent=} [properties] Properties to set
+     * @returns {ChangesFromEvent} ChangesFromEvent instance
+     */
+    ChangesFromEvent.create = function create(properties) {
+        return new ChangesFromEvent(properties);
+    };
+
+    /**
+     * Encodes the specified ChangesFromEvent message. Does not implicitly {@link ChangesFromEvent.verify|verify} messages.
+     * @function encode
+     * @memberof ChangesFromEvent
+     * @static
+     * @param {IChangesFromEvent} message ChangesFromEvent message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    ChangesFromEvent.encode = function encode(message, writer) {
+        if (!writer)
+            writer = $Writer.create();
+        if (message.from != null && message.hasOwnProperty("from"))
+            $root.Order.encode(message.from, writer.uint32(/* id 1, wireType 2 =*/10).fork()).ldelim();
+        return writer;
+    };
+
+    /**
+     * Encodes the specified ChangesFromEvent message, length delimited. Does not implicitly {@link ChangesFromEvent.verify|verify} messages.
+     * @function encodeDelimited
+     * @memberof ChangesFromEvent
+     * @static
+     * @param {IChangesFromEvent} message ChangesFromEvent message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    ChangesFromEvent.encodeDelimited = function encodeDelimited(message, writer) {
+        return this.encode(message, writer).ldelim();
+    };
+
+    /**
+     * Decodes a ChangesFromEvent message from the specified reader or buffer.
+     * @function decode
+     * @memberof ChangesFromEvent
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @param {number} [length] Message length if known beforehand
+     * @returns {ChangesFromEvent} ChangesFromEvent
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    ChangesFromEvent.decode = function decode(reader, length) {
+        if (!(reader instanceof $Reader))
+            reader = $Reader.create(reader);
+        var end = length === undefined ? reader.len : reader.pos + length, message = new $root.ChangesFromEvent();
+        while (reader.pos < end) {
+            var tag = reader.uint32();
+            switch (tag >>> 3) {
+            case 1:
+                message.from = $root.Order.decode(reader, reader.uint32());
+                break;
+            default:
+                reader.skipType(tag & 7);
+                break;
+            }
+        }
+        return message;
+    };
+
+    /**
+     * Decodes a ChangesFromEvent message from the specified reader or buffer, length delimited.
+     * @function decodeDelimited
+     * @memberof ChangesFromEvent
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @returns {ChangesFromEvent} ChangesFromEvent
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    ChangesFromEvent.decodeDelimited = function decodeDelimited(reader) {
+        if (!(reader instanceof $Reader))
+            reader = new $Reader(reader);
+        return this.decode(reader, reader.uint32());
+    };
+
+    /**
+     * Verifies a ChangesFromEvent message.
+     * @function verify
+     * @memberof ChangesFromEvent
+     * @static
+     * @param {Object.<string,*>} message Plain object to verify
+     * @returns {string|null} `null` if valid, otherwise the reason why it is not
+     */
+    ChangesFromEvent.verify = function verify(message) {
+        if (typeof message !== "object" || message === null)
+            return "object expected";
+        if (message.from != null && message.hasOwnProperty("from")) {
+            var error = $root.Order.verify(message.from);
+            if (error)
+                return "from." + error;
+        }
+        return null;
+    };
+
+    /**
+     * Creates a ChangesFromEvent message from a plain object. Also converts values to their respective internal types.
+     * @function fromObject
+     * @memberof ChangesFromEvent
+     * @static
+     * @param {Object.<string,*>} object Plain object
+     * @returns {ChangesFromEvent} ChangesFromEvent
+     */
+    ChangesFromEvent.fromObject = function fromObject(object) {
+        if (object instanceof $root.ChangesFromEvent)
+            return object;
+        var message = new $root.ChangesFromEvent();
+        if (object.from != null) {
+            if (typeof object.from !== "object")
+                throw TypeError(".ChangesFromEvent.from: object expected");
+            message.from = $root.Order.fromObject(object.from);
+        }
+        return message;
+    };
+
+    /**
+     * Creates a plain object from a ChangesFromEvent message. Also converts values to other types if specified.
+     * @function toObject
+     * @memberof ChangesFromEvent
+     * @static
+     * @param {ChangesFromEvent} message ChangesFromEvent
+     * @param {$protobuf.IConversionOptions} [options] Conversion options
+     * @returns {Object.<string,*>} Plain object
+     */
+    ChangesFromEvent.toObject = function toObject(message, options) {
+        if (!options)
+            options = {};
+        var object = {};
+        if (options.defaults)
+            object.from = null;
+        if (message.from != null && message.hasOwnProperty("from"))
+            object.from = $root.Order.toObject(message.from, options);
+        return object;
+    };
+
+    /**
+     * Converts this ChangesFromEvent to JSON.
+     * @function toJSON
+     * @memberof ChangesFromEvent
+     * @instance
+     * @returns {Object.<string,*>} JSON object
+     */
+    ChangesFromEvent.prototype.toJSON = function toJSON() {
+        return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+    };
+
+    return ChangesFromEvent;
+})();
+
 $root.Event = (function() {
 
     /**
@@ -2015,6 +2206,7 @@ $root.Event = (function() {
      * @exports IEvent
      * @interface IEvent
      * @property {ITextChangedEvent} [textChanged] Event textChanged
+     * @property {IChangesFromEvent} [changesFrom] Event changesFrom
      */
 
     /**
@@ -2039,6 +2231,14 @@ $root.Event = (function() {
      */
     Event.prototype.textChanged = null;
 
+    /**
+     * Event changesFrom.
+     * @member {(IChangesFromEvent|null|undefined)}changesFrom
+     * @memberof Event
+     * @instance
+     */
+    Event.prototype.changesFrom = null;
+
     // OneOf field names bound to virtual getters and setters
     var $oneOfFields;
 
@@ -2049,7 +2249,7 @@ $root.Event = (function() {
      * @instance
      */
     Object.defineProperty(Event.prototype, "type", {
-        get: $util.oneOfGetter($oneOfFields = ["textChanged"]),
+        get: $util.oneOfGetter($oneOfFields = ["textChanged", "changesFrom"]),
         set: $util.oneOfSetter($oneOfFields)
     });
 
@@ -2079,6 +2279,8 @@ $root.Event = (function() {
             writer = $Writer.create();
         if (message.textChanged != null && message.hasOwnProperty("textChanged"))
             $root.TextChangedEvent.encode(message.textChanged, writer.uint32(/* id 1, wireType 2 =*/10).fork()).ldelim();
+        if (message.changesFrom != null && message.hasOwnProperty("changesFrom"))
+            $root.ChangesFromEvent.encode(message.changesFrom, writer.uint32(/* id 2, wireType 2 =*/18).fork()).ldelim();
         return writer;
     };
 
@@ -2115,6 +2317,9 @@ $root.Event = (function() {
             switch (tag >>> 3) {
             case 1:
                 message.textChanged = $root.TextChangedEvent.decode(reader, reader.uint32());
+                break;
+            case 2:
+                message.changesFrom = $root.ChangesFromEvent.decode(reader, reader.uint32());
                 break;
             default:
                 reader.skipType(tag & 7);
@@ -2158,6 +2363,14 @@ $root.Event = (function() {
             if (error)
                 return "textChanged." + error;
         }
+        if (message.changesFrom != null && message.hasOwnProperty("changesFrom")) {
+            if (properties.type === 1)
+                return "type: multiple values";
+            properties.type = 1;
+            error = $root.ChangesFromEvent.verify(message.changesFrom);
+            if (error)
+                return "changesFrom." + error;
+        }
         return null;
     };
 
@@ -2177,6 +2390,11 @@ $root.Event = (function() {
             if (typeof object.textChanged !== "object")
                 throw TypeError(".Event.textChanged: object expected");
             message.textChanged = $root.TextChangedEvent.fromObject(object.textChanged);
+        }
+        if (object.changesFrom != null) {
+            if (typeof object.changesFrom !== "object")
+                throw TypeError(".Event.changesFrom: object expected");
+            message.changesFrom = $root.ChangesFromEvent.fromObject(object.changesFrom);
         }
         return message;
     };
@@ -2198,6 +2416,11 @@ $root.Event = (function() {
             object.textChanged = $root.TextChangedEvent.toObject(message.textChanged, options);
             if (options.oneofs)
                 object.type = "textChanged";
+        }
+        if (message.changesFrom != null && message.hasOwnProperty("changesFrom")) {
+            object.changesFrom = $root.ChangesFromEvent.toObject(message.changesFrom, options);
+            if (options.oneofs)
+                object.type = "changesFrom";
         }
         return object;
     };

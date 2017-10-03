@@ -12,7 +12,7 @@ app.use(express.static('public'));
 
 import {createFromOrderer} from 'js-crdt/build/text';
 import {createVectorClock} from 'js-crdt/build/order';
-import {TextChangedEvent} from './events';
+import {TextChangedEvent, ChangesFromEvent} from './events';
 import {serialise, deserialise} from './proto-serialiser';
 
 let database = createFromOrderer(createVectorClock('server'));
@@ -29,13 +29,6 @@ wss.broadcast = function(data, exceptClient) {
 };
 
 wss.on('connection', function connection(ws) {
-  // Restore database state
-  database.reduce((_, orderedOperations) => {
-    const event = new TextChangedEvent(orderedOperations);
-    const data = serialise(event);
-    return ws.send(data);
-  }, null);
-
   ws.on('message', function incoming(data) {
     // Update database state
     const array = new Uint8Array(data);
@@ -45,6 +38,15 @@ wss.on('connection', function connection(ws) {
       database = database.next();
       database = database.mergeOperations(event.orderedOperations);
       wss.broadcast(data, ws);
+    }
+
+    if (event instanceof ChangesFromEvent) {
+      // Restore database state from order
+      database.from(event.from).reduce((_, orderedOperations) => {
+        const event = new TextChangedEvent(orderedOperations);
+        const data = serialise(event);
+        return ws.send(data);
+      }, null);
     }
   });
 });

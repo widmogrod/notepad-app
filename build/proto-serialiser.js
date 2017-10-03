@@ -15,6 +15,11 @@ function serialiseEvent(e) {
             textChanged: serialiseTextChangedEvent(e),
         });
     }
+    if (e instanceof events_1.ChangesFromEvent) {
+        return new pb.Event({
+            changesFrom: serialiseChangesFromEvent(e),
+        });
+    }
 }
 exports.serialiseEvent = serialiseEvent;
 function serialiseTextChangedEvent(e) {
@@ -23,11 +28,23 @@ function serialiseTextChangedEvent(e) {
     });
 }
 exports.serialiseTextChangedEvent = serialiseTextChangedEvent;
+function serialiseChangesFromEvent(e) {
+    return new pb.ChangesFromEvent({
+        from: serialiseOrderer(e.from),
+    });
+}
+exports.serialiseChangesFromEvent = serialiseChangesFromEvent;
+function serialiseOrderer(e) {
+    if (e instanceof order_1.VectorClock) {
+        return new pb.Order({
+            vectorClock: serialiseVectorClock(e),
+        });
+    }
+}
+exports.serialiseOrderer = serialiseOrderer;
 function serialiseOperations(oo) {
     return new pb.OrderedOperations({
-        order: new pb.Order({
-            vectorClock: serialiseVectorClock(oo.order),
-        }),
+        order: serialiseOrderer(oo.order),
         operations: serialiseOperationsList(oo.operations),
     });
 }
@@ -87,6 +104,9 @@ function deserialise(data) {
     if (e.textChanged) {
         return deserialiseTextChanged(e.textChanged);
     }
+    if (e.changesFrom) {
+        return deserialiseChangesFrom(e.changesFrom);
+    }
     return null;
 }
 exports.deserialise = deserialise;
@@ -94,6 +114,10 @@ function deserialiseTextChanged(tch) {
     return new events_1.TextChangedEvent(deserialiseOperations(tch.orderedOperations));
 }
 exports.deserialiseTextChanged = deserialiseTextChanged;
+function deserialiseChangesFrom(ch) {
+    return new events_1.ChangesFromEvent(deserialiesOrder(ch.from));
+}
+exports.deserialiseChangesFrom = deserialiseChangesFrom;
 function deserialiseOperations(oo) {
     return {
         order: deserialiesOrder(oo.order),

@@ -870,11 +870,104 @@ export class TextChangedEvent {
     public toJSON(): { [k: string]: any };
 }
 
+/** Properties of a ChangesFromEvent. */
+export interface IChangesFromEvent {
+
+    /** ChangesFromEvent from */
+    from?: IOrder;
+}
+
+/** Represents a ChangesFromEvent. */
+export class ChangesFromEvent {
+
+    /**
+     * Constructs a new ChangesFromEvent.
+     * @param [properties] Properties to set
+     */
+    constructor(properties?: IChangesFromEvent);
+
+    /** ChangesFromEvent from. */
+    public from?: (IOrder|null);
+
+    /**
+     * Creates a new ChangesFromEvent instance using the specified properties.
+     * @param [properties] Properties to set
+     * @returns ChangesFromEvent instance
+     */
+    public static create(properties?: IChangesFromEvent): ChangesFromEvent;
+
+    /**
+     * Encodes the specified ChangesFromEvent message. Does not implicitly {@link ChangesFromEvent.verify|verify} messages.
+     * @param message ChangesFromEvent message or plain object to encode
+     * @param [writer] Writer to encode to
+     * @returns Writer
+     */
+    public static encode(message: IChangesFromEvent, writer?: $protobuf.Writer): $protobuf.Writer;
+
+    /**
+     * Encodes the specified ChangesFromEvent message, length delimited. Does not implicitly {@link ChangesFromEvent.verify|verify} messages.
+     * @param message ChangesFromEvent message or plain object to encode
+     * @param [writer] Writer to encode to
+     * @returns Writer
+     */
+    public static encodeDelimited(message: IChangesFromEvent, writer?: $protobuf.Writer): $protobuf.Writer;
+
+    /**
+     * Decodes a ChangesFromEvent message from the specified reader or buffer.
+     * @param reader Reader or buffer to decode from
+     * @param [length] Message length if known beforehand
+     * @returns ChangesFromEvent
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): ChangesFromEvent;
+
+    /**
+     * Decodes a ChangesFromEvent message from the specified reader or buffer, length delimited.
+     * @param reader Reader or buffer to decode from
+     * @returns ChangesFromEvent
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): ChangesFromEvent;
+
+    /**
+     * Verifies a ChangesFromEvent message.
+     * @param message Plain object to verify
+     * @returns `null` if valid, otherwise the reason why it is not
+     */
+    public static verify(message: { [k: string]: any }): (string|null);
+
+    /**
+     * Creates a ChangesFromEvent message from a plain object. Also converts values to their respective internal types.
+     * @param object Plain object
+     * @returns ChangesFromEvent
+     */
+    public static fromObject(object: { [k: string]: any }): ChangesFromEvent;
+
+    /**
+     * Creates a plain object from a ChangesFromEvent message. Also converts values to other types if specified.
+     * @param message ChangesFromEvent
+     * @param [options] Conversion options
+     * @returns Plain object
+     */
+    public static toObject(message: ChangesFromEvent, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+    /**
+     * Converts this ChangesFromEvent to JSON.
+     * @returns JSON object
+     */
+    public toJSON(): { [k: string]: any };
+}
+
 /** Properties of an Event. */
 export interface IEvent {
 
     /** Event textChanged */
     textChanged?: ITextChangedEvent;
+
+    /** Event changesFrom */
+    changesFrom?: IChangesFromEvent;
 }
 
 /** Represents an Event. */
@@ -888,6 +981,9 @@ export class Event {
 
     /** Event textChanged. */
     public textChanged?: (ITextChangedEvent|null);
+
+    /** Event changesFrom. */
+    public changesFrom?: (IChangesFromEvent|null);
 
     /** Event type. */
     public type?: string;
