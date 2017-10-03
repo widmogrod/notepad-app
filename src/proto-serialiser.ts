@@ -88,6 +88,22 @@ function serialiseOperation(op: Operation): pb.Operation {
   });
 }
 
+export function deserialise(data: Uint8Array): Event {
+  // TODO add validation
+  const e = pb.Event.decode(data)
+  if (e.textChanged) {
+    return deserialiseTextChanged(e.textChanged);
+  }
+
+  return null;
+}
+
+export function deserialiseTextChanged(tch: pb.ITextChangedEvent): TextChangedEvent {
+  return new TextChangedEvent(
+    deserialiseOperations(tch.orderedOperations),
+  );
+}
+
 export function deserialiseOperations(oo: pb.IOrderedOperations): OrderedOperations {
   return {
     order: deserialiesOrder(oo.order),

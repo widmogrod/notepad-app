@@ -4,9 +4,7 @@ import "rxjs/add/operator/retryWhen";
 import "rxjs/add/operator/delay";
 import {QueueingSubject} from 'queueing-subject';
 import websocketConnect from 'rxjs-websockets';
-// import {serialiseOperations, deserialiseOperations, SerialisedOrderedOperations} from './serialiser';
-import {serialise, deserialiseOperations} from './proto-serialiser';
-import * as pb from './protobuf/events';
+import {serialise, deserialise} from './proto-serialiser';
 import {TextChangedEvent} from './events';
 import {OrderedOperations} from 'js-crdt/build/text';
 
@@ -44,10 +42,11 @@ export class CommunicationWS {
     this.messages
       .retryWhen(errors => errors.delay(10000))
       .flatMap(data => blobToArrayBuffer(<any>data))
-      .map(o => pb.OrderedOperations.decode(o))
-      .map(deserialiseOperations)
-      .subscribe(oo => {
-        t.remoteChange(oo);
+      .map(deserialise)
+      .subscribe(e => {
+        if (e instanceof TextChangedEvent) {
+          t.remoteChange(e.orderedOperations);
+        }
       });
   }
 
@@ -55,7 +54,6 @@ export class CommunicationWS {
     t.onLocalChange((oo: OrderedOperations) => {
       const textChanged = new TextChangedEvent(oo);
       this.publish.next(<any>serialise(textChanged));
-      // this.publish.next(<any>pb.OrderedOperations.encode(serialiseOperations(oo)).finish());
     })
   }
 }
