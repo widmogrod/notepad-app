@@ -6,10 +6,9 @@ require("rxjs/add/operator/retryWhen");
 require("rxjs/add/operator/delay");
 const queueing_subject_1 = require("queueing-subject");
 const rxjs_websockets_1 = require("rxjs-websockets");
-// import {serialiseOperations, deserialiseOperations, SerialisedOrderedOperations} from './serialiser';
 const proto_serialiser_1 = require("./proto-serialiser");
-const pb = require("./protobuf/events");
-function blobToArrayBuder(blob) {
+const events_1 = require("./events");
+function blobToArrayBuffer(blob) {
     return Rx_1.Observable.create((sink) => {
         const fileReader = new FileReader();
         fileReader.onload = () => {
@@ -32,16 +31,18 @@ class CommunicationWS {
     subscribeRemoteChanges(t) {
         this.messages
             .retryWhen(errors => errors.delay(10000))
-            .flatMap(data => blobToArrayBuder(data))
-            .map(o => pb.OrderedOperations.decode(o))
-            .map(proto_serialiser_1.deserialiseOperations)
-            .subscribe(oo => {
-            t.remoteChange(oo);
+            .flatMap(data => blobToArrayBuffer(data))
+            .map(proto_serialiser_1.deserialise)
+            .subscribe(e => {
+            if (e instanceof events_1.TextChangedEvent) {
+                t.remoteChange(e.orderedOperations);
+            }
         });
     }
     publishLocalChanges(t) {
         t.onLocalChange((oo) => {
-            this.publish.next(pb.OrderedOperations.encode(proto_serialiser_1.serialiseOperations(oo)).finish());
+            const textChanged = new events_1.TextChangedEvent(oo);
+            this.publish.next(proto_serialiser_1.serialise(textChanged));
         });
     }
 }

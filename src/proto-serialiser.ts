@@ -2,6 +2,25 @@ import * as pb from './protobuf/events';
 import {VectorClock, Orderer, Id, VectorSortedSet} from 'js-crdt/build/order';
 import {OrderedOperations, Operation, Insert, Delete, Selection} from 'js-crdt/build/text';
 import {SortedSetArray, NaiveArrayList} from 'js-crdt/build/structures';
+import {Event, TextChangedEvent} from './events';
+
+export function serialise(e: Event): Uint8Array {
+  return pb.Event.encode(serialiseEvent(e)).finish();
+}
+
+export function serialiseEvent(e: Event): pb.Event {
+  if (e instanceof TextChangedEvent) {
+    return new pb.Event({
+      textChanged: serialiseTextChangedEvent(e),
+    });
+  }
+}
+
+export function serialiseTextChangedEvent(e: TextChangedEvent): pb.TextChangedEvent {
+  return new pb.TextChangedEvent({
+    orderedOperations: serialiseOperations(e.orderedOperations),
+  });
+}
 
 export function serialiseOperations(oo: OrderedOperations): pb.OrderedOperations {
   return new pb.OrderedOperations({
@@ -67,6 +86,22 @@ function serialiseOperation(op: Operation): pb.Operation {
       length: op.length,
     }),
   });
+}
+
+export function deserialise(data: Uint8Array): Event {
+  // TODO add validation
+  const e = pb.Event.decode(data)
+  if (e.textChanged) {
+    return deserialiseTextChanged(e.textChanged);
+  }
+
+  return null;
+}
+
+export function deserialiseTextChanged(tch: pb.ITextChangedEvent): TextChangedEvent {
+  return new TextChangedEvent(
+    deserialiseOperations(tch.orderedOperations),
+  );
 }
 
 export function deserialiseOperations(oo: pb.IOrderedOperations): OrderedOperations {

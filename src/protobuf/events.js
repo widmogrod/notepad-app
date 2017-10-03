@@ -1817,13 +1817,204 @@ $root.OrderedOperations = (function() {
     return OrderedOperations;
 })();
 
+$root.TextChangedEvent = (function() {
+
+    /**
+     * Properties of a TextChangedEvent.
+     * @exports ITextChangedEvent
+     * @interface ITextChangedEvent
+     * @property {IOrderedOperations} [orderedOperations] TextChangedEvent orderedOperations
+     */
+
+    /**
+     * Constructs a new TextChangedEvent.
+     * @exports TextChangedEvent
+     * @classdesc Represents a TextChangedEvent.
+     * @constructor
+     * @param {ITextChangedEvent=} [properties] Properties to set
+     */
+    function TextChangedEvent(properties) {
+        if (properties)
+            for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                if (properties[keys[i]] != null)
+                    this[keys[i]] = properties[keys[i]];
+    }
+
+    /**
+     * TextChangedEvent orderedOperations.
+     * @member {(IOrderedOperations|null|undefined)}orderedOperations
+     * @memberof TextChangedEvent
+     * @instance
+     */
+    TextChangedEvent.prototype.orderedOperations = null;
+
+    /**
+     * Creates a new TextChangedEvent instance using the specified properties.
+     * @function create
+     * @memberof TextChangedEvent
+     * @static
+     * @param {ITextChangedEvent=} [properties] Properties to set
+     * @returns {TextChangedEvent} TextChangedEvent instance
+     */
+    TextChangedEvent.create = function create(properties) {
+        return new TextChangedEvent(properties);
+    };
+
+    /**
+     * Encodes the specified TextChangedEvent message. Does not implicitly {@link TextChangedEvent.verify|verify} messages.
+     * @function encode
+     * @memberof TextChangedEvent
+     * @static
+     * @param {ITextChangedEvent} message TextChangedEvent message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    TextChangedEvent.encode = function encode(message, writer) {
+        if (!writer)
+            writer = $Writer.create();
+        if (message.orderedOperations != null && message.hasOwnProperty("orderedOperations"))
+            $root.OrderedOperations.encode(message.orderedOperations, writer.uint32(/* id 1, wireType 2 =*/10).fork()).ldelim();
+        return writer;
+    };
+
+    /**
+     * Encodes the specified TextChangedEvent message, length delimited. Does not implicitly {@link TextChangedEvent.verify|verify} messages.
+     * @function encodeDelimited
+     * @memberof TextChangedEvent
+     * @static
+     * @param {ITextChangedEvent} message TextChangedEvent message or plain object to encode
+     * @param {$protobuf.Writer} [writer] Writer to encode to
+     * @returns {$protobuf.Writer} Writer
+     */
+    TextChangedEvent.encodeDelimited = function encodeDelimited(message, writer) {
+        return this.encode(message, writer).ldelim();
+    };
+
+    /**
+     * Decodes a TextChangedEvent message from the specified reader or buffer.
+     * @function decode
+     * @memberof TextChangedEvent
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @param {number} [length] Message length if known beforehand
+     * @returns {TextChangedEvent} TextChangedEvent
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    TextChangedEvent.decode = function decode(reader, length) {
+        if (!(reader instanceof $Reader))
+            reader = $Reader.create(reader);
+        var end = length === undefined ? reader.len : reader.pos + length, message = new $root.TextChangedEvent();
+        while (reader.pos < end) {
+            var tag = reader.uint32();
+            switch (tag >>> 3) {
+            case 1:
+                message.orderedOperations = $root.OrderedOperations.decode(reader, reader.uint32());
+                break;
+            default:
+                reader.skipType(tag & 7);
+                break;
+            }
+        }
+        return message;
+    };
+
+    /**
+     * Decodes a TextChangedEvent message from the specified reader or buffer, length delimited.
+     * @function decodeDelimited
+     * @memberof TextChangedEvent
+     * @static
+     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+     * @returns {TextChangedEvent} TextChangedEvent
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    TextChangedEvent.decodeDelimited = function decodeDelimited(reader) {
+        if (!(reader instanceof $Reader))
+            reader = new $Reader(reader);
+        return this.decode(reader, reader.uint32());
+    };
+
+    /**
+     * Verifies a TextChangedEvent message.
+     * @function verify
+     * @memberof TextChangedEvent
+     * @static
+     * @param {Object.<string,*>} message Plain object to verify
+     * @returns {string|null} `null` if valid, otherwise the reason why it is not
+     */
+    TextChangedEvent.verify = function verify(message) {
+        if (typeof message !== "object" || message === null)
+            return "object expected";
+        if (message.orderedOperations != null && message.hasOwnProperty("orderedOperations")) {
+            var error = $root.OrderedOperations.verify(message.orderedOperations);
+            if (error)
+                return "orderedOperations." + error;
+        }
+        return null;
+    };
+
+    /**
+     * Creates a TextChangedEvent message from a plain object. Also converts values to their respective internal types.
+     * @function fromObject
+     * @memberof TextChangedEvent
+     * @static
+     * @param {Object.<string,*>} object Plain object
+     * @returns {TextChangedEvent} TextChangedEvent
+     */
+    TextChangedEvent.fromObject = function fromObject(object) {
+        if (object instanceof $root.TextChangedEvent)
+            return object;
+        var message = new $root.TextChangedEvent();
+        if (object.orderedOperations != null) {
+            if (typeof object.orderedOperations !== "object")
+                throw TypeError(".TextChangedEvent.orderedOperations: object expected");
+            message.orderedOperations = $root.OrderedOperations.fromObject(object.orderedOperations);
+        }
+        return message;
+    };
+
+    /**
+     * Creates a plain object from a TextChangedEvent message. Also converts values to other types if specified.
+     * @function toObject
+     * @memberof TextChangedEvent
+     * @static
+     * @param {TextChangedEvent} message TextChangedEvent
+     * @param {$protobuf.IConversionOptions} [options] Conversion options
+     * @returns {Object.<string,*>} Plain object
+     */
+    TextChangedEvent.toObject = function toObject(message, options) {
+        if (!options)
+            options = {};
+        var object = {};
+        if (options.defaults)
+            object.orderedOperations = null;
+        if (message.orderedOperations != null && message.hasOwnProperty("orderedOperations"))
+            object.orderedOperations = $root.OrderedOperations.toObject(message.orderedOperations, options);
+        return object;
+    };
+
+    /**
+     * Converts this TextChangedEvent to JSON.
+     * @function toJSON
+     * @memberof TextChangedEvent
+     * @instance
+     * @returns {Object.<string,*>} JSON object
+     */
+    TextChangedEvent.prototype.toJSON = function toJSON() {
+        return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+    };
+
+    return TextChangedEvent;
+})();
+
 $root.Event = (function() {
 
     /**
      * Properties of an Event.
      * @exports IEvent
      * @interface IEvent
-     * @property {IOrderedOperations} [orderedOperations] Event orderedOperations
+     * @property {ITextChangedEvent} [textChanged] Event textChanged
      */
 
     /**
@@ -1841,12 +2032,12 @@ $root.Event = (function() {
     }
 
     /**
-     * Event orderedOperations.
-     * @member {(IOrderedOperations|null|undefined)}orderedOperations
+     * Event textChanged.
+     * @member {(ITextChangedEvent|null|undefined)}textChanged
      * @memberof Event
      * @instance
      */
-    Event.prototype.orderedOperations = null;
+    Event.prototype.textChanged = null;
 
     // OneOf field names bound to virtual getters and setters
     var $oneOfFields;
@@ -1858,7 +2049,7 @@ $root.Event = (function() {
      * @instance
      */
     Object.defineProperty(Event.prototype, "type", {
-        get: $util.oneOfGetter($oneOfFields = ["orderedOperations"]),
+        get: $util.oneOfGetter($oneOfFields = ["textChanged"]),
         set: $util.oneOfSetter($oneOfFields)
     });
 
@@ -1886,8 +2077,8 @@ $root.Event = (function() {
     Event.encode = function encode(message, writer) {
         if (!writer)
             writer = $Writer.create();
-        if (message.orderedOperations != null && message.hasOwnProperty("orderedOperations"))
-            $root.OrderedOperations.encode(message.orderedOperations, writer.uint32(/* id 1, wireType 2 =*/10).fork()).ldelim();
+        if (message.textChanged != null && message.hasOwnProperty("textChanged"))
+            $root.TextChangedEvent.encode(message.textChanged, writer.uint32(/* id 1, wireType 2 =*/10).fork()).ldelim();
         return writer;
     };
 
@@ -1923,7 +2114,7 @@ $root.Event = (function() {
             var tag = reader.uint32();
             switch (tag >>> 3) {
             case 1:
-                message.orderedOperations = $root.OrderedOperations.decode(reader, reader.uint32());
+                message.textChanged = $root.TextChangedEvent.decode(reader, reader.uint32());
                 break;
             default:
                 reader.skipType(tag & 7);
@@ -1961,11 +2152,11 @@ $root.Event = (function() {
         if (typeof message !== "object" || message === null)
             return "object expected";
         var properties = {};
-        if (message.orderedOperations != null && message.hasOwnProperty("orderedOperations")) {
+        if (message.textChanged != null && message.hasOwnProperty("textChanged")) {
             properties.type = 1;
-            var error = $root.OrderedOperations.verify(message.orderedOperations);
+            var error = $root.TextChangedEvent.verify(message.textChanged);
             if (error)
-                return "orderedOperations." + error;
+                return "textChanged." + error;
         }
         return null;
     };
@@ -1982,10 +2173,10 @@ $root.Event = (function() {
         if (object instanceof $root.Event)
             return object;
         var message = new $root.Event();
-        if (object.orderedOperations != null) {
-            if (typeof object.orderedOperations !== "object")
-                throw TypeError(".Event.orderedOperations: object expected");
-            message.orderedOperations = $root.OrderedOperations.fromObject(object.orderedOperations);
+        if (object.textChanged != null) {
+            if (typeof object.textChanged !== "object")
+                throw TypeError(".Event.textChanged: object expected");
+            message.textChanged = $root.TextChangedEvent.fromObject(object.textChanged);
         }
         return message;
     };
@@ -2003,10 +2194,10 @@ $root.Event = (function() {
         if (!options)
             options = {};
         var object = {};
-        if (message.orderedOperations != null && message.hasOwnProperty("orderedOperations")) {
-            object.orderedOperations = $root.OrderedOperations.toObject(message.orderedOperations, options);
+        if (message.textChanged != null && message.hasOwnProperty("textChanged")) {
+            object.textChanged = $root.TextChangedEvent.toObject(message.textChanged, options);
             if (options.oneofs)
-                object.type = "orderedOperations";
+                object.type = "textChanged";
         }
         return object;
     };

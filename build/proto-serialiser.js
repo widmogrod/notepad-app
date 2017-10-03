@@ -4,6 +4,25 @@ const pb = require("./protobuf/events");
 const order_1 = require("js-crdt/build/order");
 const text_1 = require("js-crdt/build/text");
 const structures_1 = require("js-crdt/build/structures");
+const events_1 = require("./events");
+function serialise(e) {
+    return pb.Event.encode(serialiseEvent(e)).finish();
+}
+exports.serialise = serialise;
+function serialiseEvent(e) {
+    if (e instanceof events_1.TextChangedEvent) {
+        return new pb.Event({
+            textChanged: serialiseTextChangedEvent(e),
+        });
+    }
+}
+exports.serialiseEvent = serialiseEvent;
+function serialiseTextChangedEvent(e) {
+    return new pb.TextChangedEvent({
+        orderedOperations: serialiseOperations(e.orderedOperations),
+    });
+}
+exports.serialiseTextChangedEvent = serialiseTextChangedEvent;
 function serialiseOperations(oo) {
     return new pb.OrderedOperations({
         order: new pb.Order({
@@ -62,6 +81,19 @@ function serialiseOperation(op) {
         }),
     });
 }
+function deserialise(data) {
+    // TODO add validation
+    const e = pb.Event.decode(data);
+    if (e.textChanged) {
+        return deserialiseTextChanged(e.textChanged);
+    }
+    return null;
+}
+exports.deserialise = deserialise;
+function deserialiseTextChanged(tch) {
+    return new events_1.TextChangedEvent(deserialiseOperations(tch.orderedOperations));
+}
+exports.deserialiseTextChanged = deserialiseTextChanged;
 function deserialiseOperations(oo) {
     return {
         order: deserialiesOrder(oo.order),

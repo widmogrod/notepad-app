@@ -11,23 +11,25 @@ app.use(express.static('dist'));
 app.use(express.static('public'));
 const text_1 = require("js-crdt/build/text");
 const order_1 = require("js-crdt/build/order");
-// import {serialiseOperations, deserialiseOperations} from './serialiser';
+const events_1 = require("./events");
 const proto_serialiser_1 = require("./proto-serialiser");
-const pb = require("./protobuf/events");
 let database = text_1.createFromOrderer(order_1.createVectorClock('server'));
 const wss = new WebSocket.Server({ server });
 wss.on('connection', function connection(ws) {
     // Restore database state
     database.reduce((_, orderedOperations) => {
-        return ws.send(JSON.stringify(proto_serialiser_1.serialiseOperations(orderedOperations)));
+        const event = new events_1.TextChangedEvent(orderedOperations);
+        const data = proto_serialiser_1.serialise(event);
+        return ws.send(data);
     }, null);
     ws.on('message', function incoming(data) {
         // Update database state
-        // const object = JSON.parse(data);
-        const object = pb.OrderedOperations.decode(new Uint8Array(data));
-        const partial = proto_serialiser_1.deserialiseOperations(object);
-        database = database.next();
-        database.mergeOperations(partial);
+        const array = new Uint8Array(data);
+        const event = proto_serialiser_1.deserialise(array);
+        if (event instanceof events_1.TextChangedEvent) {
+            database = database.next();
+            database = database.mergeOperations(event.orderedOperations);
+        }
         // Broadcast to everyone else.
         wss.clients.forEach(function each(client) {
             if (client !== ws && client.readyState === WebSocket.OPEN) {

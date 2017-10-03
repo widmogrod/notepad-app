@@ -780,11 +780,101 @@ export class OrderedOperations {
     public toJSON(): { [k: string]: any };
 }
 
+/** Properties of a TextChangedEvent. */
+export interface ITextChangedEvent {
+
+    /** TextChangedEvent orderedOperations */
+    orderedOperations?: IOrderedOperations;
+}
+
+/** Represents a TextChangedEvent. */
+export class TextChangedEvent {
+
+    /**
+     * Constructs a new TextChangedEvent.
+     * @param [properties] Properties to set
+     */
+    constructor(properties?: ITextChangedEvent);
+
+    /** TextChangedEvent orderedOperations. */
+    public orderedOperations?: (IOrderedOperations|null);
+
+    /**
+     * Creates a new TextChangedEvent instance using the specified properties.
+     * @param [properties] Properties to set
+     * @returns TextChangedEvent instance
+     */
+    public static create(properties?: ITextChangedEvent): TextChangedEvent;
+
+    /**
+     * Encodes the specified TextChangedEvent message. Does not implicitly {@link TextChangedEvent.verify|verify} messages.
+     * @param message TextChangedEvent message or plain object to encode
+     * @param [writer] Writer to encode to
+     * @returns Writer
+     */
+    public static encode(message: ITextChangedEvent, writer?: $protobuf.Writer): $protobuf.Writer;
+
+    /**
+     * Encodes the specified TextChangedEvent message, length delimited. Does not implicitly {@link TextChangedEvent.verify|verify} messages.
+     * @param message TextChangedEvent message or plain object to encode
+     * @param [writer] Writer to encode to
+     * @returns Writer
+     */
+    public static encodeDelimited(message: ITextChangedEvent, writer?: $protobuf.Writer): $protobuf.Writer;
+
+    /**
+     * Decodes a TextChangedEvent message from the specified reader or buffer.
+     * @param reader Reader or buffer to decode from
+     * @param [length] Message length if known beforehand
+     * @returns TextChangedEvent
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): TextChangedEvent;
+
+    /**
+     * Decodes a TextChangedEvent message from the specified reader or buffer, length delimited.
+     * @param reader Reader or buffer to decode from
+     * @returns TextChangedEvent
+     * @throws {Error} If the payload is not a reader or valid buffer
+     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+     */
+    public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): TextChangedEvent;
+
+    /**
+     * Verifies a TextChangedEvent message.
+     * @param message Plain object to verify
+     * @returns `null` if valid, otherwise the reason why it is not
+     */
+    public static verify(message: { [k: string]: any }): (string|null);
+
+    /**
+     * Creates a TextChangedEvent message from a plain object. Also converts values to their respective internal types.
+     * @param object Plain object
+     * @returns TextChangedEvent
+     */
+    public static fromObject(object: { [k: string]: any }): TextChangedEvent;
+
+    /**
+     * Creates a plain object from a TextChangedEvent message. Also converts values to other types if specified.
+     * @param message TextChangedEvent
+     * @param [options] Conversion options
+     * @returns Plain object
+     */
+    public static toObject(message: TextChangedEvent, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+    /**
+     * Converts this TextChangedEvent to JSON.
+     * @returns JSON object
+     */
+    public toJSON(): { [k: string]: any };
+}
+
 /** Properties of an Event. */
 export interface IEvent {
 
-    /** Event orderedOperations */
-    orderedOperations?: IOrderedOperations;
+    /** Event textChanged */
+    textChanged?: ITextChangedEvent;
 }
 
 /** Represents an Event. */
@@ -796,8 +886,8 @@ export class Event {
      */
     constructor(properties?: IEvent);
 
-    /** Event orderedOperations. */
-    public orderedOperations?: (IOrderedOperations|null);
+    /** Event textChanged. */
+    public textChanged?: (ITextChangedEvent|null);
 
     /** Event type. */
     public type?: string;

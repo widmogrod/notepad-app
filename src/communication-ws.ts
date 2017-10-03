@@ -4,12 +4,11 @@ import "rxjs/add/operator/retryWhen";
 import "rxjs/add/operator/delay";
 import {QueueingSubject} from 'queueing-subject';
 import websocketConnect from 'rxjs-websockets';
-// import {serialiseOperations, deserialiseOperations, SerialisedOrderedOperations} from './serialiser';
-import {serialiseOperations, deserialiseOperations} from './proto-serialiser';
-import * as pb from './protobuf/events';
+import {serialise, deserialise} from './proto-serialiser';
+import {TextChangedEvent} from './events';
 import {OrderedOperations} from 'js-crdt/build/text';
 
-function blobToArrayBuder(blob: Blob): Observable<Uint8Array> {
+function blobToArrayBuffer(blob: Blob): Observable<Uint8Array> {
   return Observable.create((sink) => {
     const fileReader = new FileReader();
     fileReader.onload = () => {
@@ -42,17 +41,19 @@ export class CommunicationWS {
   private subscribeRemoteChanges(t: Sync) {
     this.messages
       .retryWhen(errors => errors.delay(10000))
-      .flatMap(data => blobToArrayBuder(<any>data))
-      .map(o => pb.OrderedOperations.decode(o))
-      .map(deserialiseOperations)
-      .subscribe(oo => {
-        t.remoteChange(oo);
+      .flatMap(data => blobToArrayBuffer(<any>data))
+      .map(deserialise)
+      .subscribe(e => {
+        if (e instanceof TextChangedEvent) {
+          t.remoteChange(e.orderedOperations);
+        }
       });
   }
 
   private publishLocalChanges(t: Sync) {
     t.onLocalChange((oo: OrderedOperations) => {
-      this.publish.next(<any>pb.OrderedOperations.encode(serialiseOperations(oo)).finish());
+      const textChanged = new TextChangedEvent(oo);
+      this.publish.next(<any>serialise(textChanged));
     })
   }
 }
