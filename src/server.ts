@@ -18,6 +18,16 @@ import {serialise, deserialise} from './proto-serialiser';
 let database = createFromOrderer(createVectorClock('server'));
 
 const wss = new WebSocket.Server({ server });
+
+wss.broadcast = function(data, exceptClient) {
+  // Broadcast to everyone else.
+  wss.clients.forEach(function each(client) {
+    if (client !== exceptClient && client.readyState === WebSocket.OPEN) {
+      client.send(data);
+    }
+  });
+};
+
 wss.on('connection', function connection(ws) {
   // Restore database state
   database.reduce((_, orderedOperations) => {
@@ -34,14 +44,8 @@ wss.on('connection', function connection(ws) {
     if (event instanceof TextChangedEvent) {
       database = database.next();
       database = database.mergeOperations(event.orderedOperations);
+      wss.broadcast(data, ws);
     }
-
-    // Broadcast to everyone else.
-    wss.clients.forEach(function each(client) {
-      if (client !== ws && client.readyState === WebSocket.OPEN) {
-        client.send(data);
-      }
-    });
   });
 });
 

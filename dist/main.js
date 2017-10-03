@@ -58,6 +58,12 @@ class TextChangedEvent {
     }
 }
 exports.TextChangedEvent = TextChangedEvent;
+class ChangesFromEvent {
+    constructor(from) {
+        this.from = from;
+    }
+}
+exports.ChangesFromEvent = ChangesFromEvent;
 
 },{}],3:[function(require,module,exports){
 "use strict";
