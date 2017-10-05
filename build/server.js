@@ -35,11 +35,17 @@ wss.on('connection', function connection(ws) {
         }
         if (event instanceof events_1.ChangesFromEvent) {
             // Restore database state from order
-            database.from(event.from).reduce((_, orderedOperations) => {
+            const restore = (_, orderedOperations) => {
                 const event = new events_1.TextChangedEvent(orderedOperations);
                 const data = proto_serialiser_1.serialise(event);
                 return ws.send(data);
-            }, null);
+            };
+            if (event.from !== null) {
+                database.from(event.from).reduce(restore, null);
+            }
+            else {
+                database.reduce(restore, null);
+            }
         }
     });
 });

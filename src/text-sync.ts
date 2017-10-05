@@ -44,4 +44,8 @@ export class TextSync {
   public onRemoteChange(fn: ChangeFunc) {
     this.events.on('remote-change', fn);
   }
+
+  public getText(): Text {
+    return this.text;
+  }
 }

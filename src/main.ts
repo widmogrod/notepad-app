@@ -106,10 +106,27 @@ function createStringToColor(di: StringToColorDependencies): StringToColorFunc {
   return (s: string) => di.colorHash.hex(s);
 }
 
+import {Bus} from './bus';
+
+function createBus(): Bus {
+  return new Bus();
+}
+
+import {DeveloperTools} from './developer-tools';
+
+interface DeveloperToolsDependencies {
+  bus: Bus;
+}
+
+function createDeveloperTools(di: DeveloperToolsDependencies) : DeveloperTools {
+  return new DeveloperTools(di.bus);
+}
+
 interface DeIi {
   editorId: string;
   clientId: string;
   wsURL: string;
+  bus: Bus;
   colorHash: ColorHash;
   editor: Quill;
   stringToColor: StringToColorFunc;
@@ -125,6 +142,7 @@ const DI = <DeIi>{};
 DI.clientId = uuid();
 DI.editorId = '#editor';
 DI.wsURL = websocketURL();
+DI.bus = createBus();
 DI.colorHash = new ColorHash();
 DI.editor = creteQuill(DI);
 DI.stringToColor = createStringToColor(DI);
@@ -137,8 +155,10 @@ DI.textSync = createTextSync(DI);
 function main(di: DeIi) {
   di.contentUpdater.register(di.textSync);
   di.cursorUpdater.register(di.textSync);
-  di.communicationWS.register(di.textSync);
+  di.communicationWS.register(di.textSync, di.bus);
   di.editor.focus();
+
+  createDeveloperTools(di).start();
 }
 
 main(DI);

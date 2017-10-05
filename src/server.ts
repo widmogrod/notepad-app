@@ -42,11 +42,17 @@ wss.on('connection', function connection(ws) {
 
     if (event instanceof ChangesFromEvent) {
       // Restore database state from order
-      database.from(event.from).reduce((_, orderedOperations) => {
+      const restore = (_, orderedOperations) => {
         const event = new TextChangedEvent(orderedOperations);
         const data = serialise(event);
         return ws.send(data);
-      }, null);
+      }
+
+      if (event.from !== null) {
+        database.from(event.from).reduce(restore, null);
+      } else {
+        database.reduce(restore, null);
+      }
     }
   });
 });

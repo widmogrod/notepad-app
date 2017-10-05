@@ -22,27 +22,48 @@ class CommunicationWS {
     constructor(url) {
         this.url = url;
         this.publish = new queueing_subject_1.QueueingSubject();
-        this.messages = rxjs_websockets_1.default(url, this.publish, 'arraybuffer').messages;
+        const connection = rxjs_websockets_1.default(url, this.publish, 'arraybuffer');
+        this.messages = connection.messages;
+        this.connectionStatus = connection.connectionStatus;
     }
-    register(t) {
+    register(t, bus) {
         this.publishLocalChanges(t);
         this.subscribeRemoteChanges(t);
+        this.requestChangesFrom(t);
+        this.developerTools(t, bus);
     }
     subscribeRemoteChanges(t) {
-        this.messages
+        this.messagesSub = this.messages
             .retryWhen(errors => errors.delay(10000))
             .flatMap(data => blobToArrayBuffer(data))
             .map(proto_serialiser_1.deserialise)
-            .subscribe(e => {
-            if (e instanceof events_1.TextChangedEvent) {
-                t.remoteChange(e.orderedOperations);
+            .subscribe(event => {
+            if (event instanceof events_1.TextChangedEvent) {
+                t.remoteChange(event.orderedOperations);
             }
         });
     }
     publishLocalChanges(t) {
         t.onLocalChange((oo) => {
-            const textChanged = new events_1.TextChangedEvent(oo);
-            this.publish.next(proto_serialiser_1.serialise(textChanged));
+            const event = new events_1.TextChangedEvent(oo);
+            this.publish.next(proto_serialiser_1.serialise(event));
+        });
+    }
+    requestChangesFrom(t) {
+        this.connectionStatus
+            .subscribe(status => {
+            if (status === 1) {
+                const event = new events_1.ChangesFromEvent(t.getText().order);
+                this.publish.next(proto_serialiser_1.serialise(event));
+            }
+        });
+    }
+    developerTools(t, bus) {
+        bus.subscribe("connect-ws", () => {
+            this.subscribeRemoteChanges(t);
+        });
+        bus.subscribe("disconnect-ws", () => {
+            this.messagesSub.unsubscribe();
         });
     }
 }

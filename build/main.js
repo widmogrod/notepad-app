@@ -53,10 +53,19 @@ function createTextSync(di) {
 function createStringToColor(di) {
     return (s) => di.colorHash.hex(s);
 }
+const bus_1 = require("./bus");
+function createBus() {
+    return new bus_1.Bus();
+}
+const developer_tools_1 = require("./developer-tools");
+function createDeveloperTools(di) {
+    return new developer_tools_1.DeveloperTools(di.bus);
+}
 const DI = {};
 DI.clientId = uuid();
 DI.editorId = '#editor';
 DI.wsURL = websocketURL();
+DI.bus = createBus();
 DI.colorHash = new ColorHash();
 DI.editor = creteQuill(DI);
 DI.stringToColor = createStringToColor(DI);
@@ -68,7 +77,8 @@ DI.textSync = createTextSync(DI);
 function main(di) {
     di.contentUpdater.register(di.textSync);
     di.cursorUpdater.register(di.textSync);
-    di.communicationWS.register(di.textSync);
+    di.communicationWS.register(di.textSync, di.bus);
     di.editor.focus();
+    createDeveloperTools(di).start();
 }
 main(DI);
