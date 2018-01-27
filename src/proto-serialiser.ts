@@ -2,7 +2,7 @@ import * as pb from './protobuf/events';
 import {VectorClock, Orderer, Id, VectorSortedSet} from 'js-crdt/build/order';
 import {OrderedOperations, Operation, Insert, Delete, Selection} from 'js-crdt/build/text';
 import {SortedSetArray, NaiveArrayList} from 'js-crdt/build/structures';
-import {Event, TextChangedEvent} from './events';
+import {Event, TextChangedEvent, ChangesFromEvent} from './events';
 
 export function serialise(e: Event): Uint8Array {
   return pb.Event.encode(serialiseEvent(e)).finish();
@@ -14,6 +14,12 @@ export function serialiseEvent(e: Event): pb.Event {
       textChanged: serialiseTextChangedEvent(e),
     });
   }
+
+  if (e instanceof ChangesFromEvent) {
+    return new pb.Event({
+      changesFrom: serialiseChangesFromEvent(e),
+    });
+  }
 }
 
 export function serialiseTextChangedEvent(e: TextChangedEvent): pb.TextChangedEvent {
@@ -22,11 +28,23 @@ export function serialiseTextChangedEvent(e: TextChangedEvent): pb.TextChangedEv
   });
 }
 
+export function serialiseChangesFromEvent(e: ChangesFromEvent): pb.ChangesFromEvent {
+  return new pb.ChangesFromEvent({
+    from: serialiseOrderer(e.from),
+  });
+}
+
+export function serialiseOrderer(e: Orderer<any>): pb.Order {
+  if (e instanceof VectorClock) {
+    return new pb.Order({
+      vectorClock: serialiseVectorClock(e),
+    })
+  }
+}
+
 export function serialiseOperations(oo: OrderedOperations): pb.OrderedOperations {
   return new pb.OrderedOperations({
-    order: new pb.Order({
-      vectorClock: serialiseVectorClock(oo.order),
-    }),
+    order: serialiseOrderer(oo.order),
     operations: serialiseOperationsList(oo.operations),
   });
 }
@@ -94,6 +112,9 @@ export function deserialise(data: Uint8Array): Event {
   if (e.textChanged) {
     return deserialiseTextChanged(e.textChanged);
   }
+  if (e.changesFrom) {
+    return deserialiseChangesFrom(e.changesFrom);
+  }
 
   return null;
 }
@@ -101,6 +122,12 @@ export function deserialise(data: Uint8Array): Event {
 export function deserialiseTextChanged(tch: pb.ITextChangedEvent): TextChangedEvent {
   return new TextChangedEvent(
     deserialiseOperations(tch.orderedOperations),
+  );
+}
+
+export function deserialiseChangesFrom(ch: pb.IChangesFromEvent): ChangesFromEvent {
+  return new ChangesFromEvent(
+    deserialiesOrder(ch.from),
   );
 }
 

@@ -48,9 +48,13 @@ message OrderedOperations {
 message TextChangedEvent {
     OrderedOperations orderedOperations = 1;
 }
+message ChangesFromEvent {
+    Order from = 1;
+}
 
 message Event {
   oneof type {
     TextChangedEvent textChanged = 1;
+    ChangesFromEvent changesFrom = 2;
   }
 }

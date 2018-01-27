@@ -12,20 +12,23 @@ app.use(express.static('public'));
 
 import {createFromOrderer} from 'js-crdt/build/text';
 import {createVectorClock} from 'js-crdt/build/order';
-import {TextChangedEvent} from './events';
+import {TextChangedEvent, ChangesFromEvent} from './events';
 import {serialise, deserialise} from './proto-serialiser';
 
 let database = createFromOrderer(createVectorClock('server'));
 
 const wss = new WebSocket.Server({ server });
-wss.on('connection', function connection(ws) {
-  // Restore database state
-  database.reduce((_, orderedOperations) => {
-    const event = new TextChangedEvent(orderedOperations);
-    const data = serialise(event);
-    return ws.send(data);
-  }, null);
 
+wss.broadcast = function(data, exceptClient) {
+  // Broadcast to everyone else.
+  wss.clients.forEach(function each(client) {
+    if (client !== exceptClient && client.readyState === WebSocket.OPEN) {
+      client.send(data);
+    }
+  });
+};
+
+wss.on('connection', function connection(ws) {
   ws.on('message', function incoming(data) {
     // Update database state
     const array = new Uint8Array(data);
@@ -34,14 +37,23 @@ wss.on('connection', function connection(ws) {
     if (event instanceof TextChangedEvent) {
       database = database.next();
       database = database.mergeOperations(event.orderedOperations);
+      wss.broadcast(data, ws);
     }
 
-    // Broadcast to everyone else.
-    wss.clients.forEach(function each(client) {
-      if (client !== ws && client.readyState === WebSocket.OPEN) {
-        client.send(data);
+    if (event instanceof ChangesFromEvent) {
+      // Restore database state from order
+      const restore = (_, orderedOperations) => {
+        const event = new TextChangedEvent(orderedOperations);
+        const data = serialise(event);
+        return ws.send(data);
       }
-    });
+
+      if (event.from !== null) {
+        database.from(event.from).reduce(restore, null);
+      } else {
+        database.reduce(restore, null);
+      }
+    }
   });
 });
 

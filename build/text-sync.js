@@ -33,5 +33,8 @@ class TextSync {
     onRemoteChange(fn) {
         this.events.on('remote-change', fn);
     }
+    getText() {
+        return this.text;
+    }
 }
 exports.TextSync = TextSync;
